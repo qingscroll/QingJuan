@@ -1,159 +1,209 @@
-# 青卷开发规范
+# 青卷开发指南（总览）
 
-本目录是青卷的唯一开发规范来源。所有后续编码、重构、评审与发布均应遵循这里的约束。
+> 本目录是青卷项目的**唯一开发规范来源**。所有编码、重构、代码评审与发布都以这里的约定为准。
+> 这一份是入口文档：先读它了解整体，再按需要进入对应章节。
 
-## 当前发布基线
+---
 
-- 当前已发布版本：`2.0.0+32`，对外版本为 `v2.0.0`；仓库当前开发版本为 `2.0.1+33`。V2.0.1 新增笔趣阁聚合搜索，并内嵌作品、目录和章节解析能力。
-- Windows 客户端支持“本机后端”和“Linux 远程后端”两种显式连接模式；Android 仍只连接既有 Linux FastAPI 服务。
-- Windows 发布包必须包含由 PyInstaller 构建的本机伴随后端。本机模式只监听回环地址，不使用连接 Token；远程模式
-  必须配置地址与 Token，连接失败时不得自动回退本机。
-- 既有功能基线包括：本地文件上传导入、单章与多章导出、设备 TTS、链接任务与实时日志、单一
-  OpenAI 兼容翻译配置，以及 Linux RapidOCR 漫画翻译链路；v1.3.4 增加 OCR 容器恢复、竖排合并和超长译文安全缩放。
-- 后续版本不得破坏现有后端数据、导入导出格式、阅读进度和设置；确需不兼容变更时必须提供迁移说明和测试。
+## 这份文档是给谁看的
 
-## 产品与平台边界
+| 如果你…… | 建议从哪读起 |
+| --- | --- |
+| 刚接触项目，想搞懂“青卷到底是什么、怎么跑起来” | 先读本页，然后读[《原则与架构》](./01-principles-and-architecture.md) |
+| 要改 Flutter 客户端（`lib/`、`test/`） | [《Flutter 客户端开发规范》](./03-frontend.md) + [《UI 与可访问性》](./02-ui-and-accessibility.md) |
+| 要改 FastAPI 后端、管理界面或 Linux 部署（`python-backend/`、`admin-web/`、`deploy/linux/`） | [《后端、管理界面与集成》](./04-backend-and-android.md) |
+| 要写测试或准备提交合并 | [《质量与测试》](./05-quality-and-testing.md)、[《工作流与迁移》](./06-workflow-and-migration.md) |
+| 只想知道“提交代码前必须满足什么” | [最低强制要求](#8-最低强制要求每条都很重要) 与 [质量与测试](./05-quality-and-testing.md) |
 
-- 产品形态：带可选本机后端的 Windows 桌面客户端、Android 手机与平板远程客户端，以及随后端同源提供的管理员界面。
-- 客户端：Flutter + Dart + `fluent_ui`。
-- 管理界面：React + TypeScript + Ant Design，用于管理当前 FastAPI 后端，不作为阅读客户端或 PWA。
-- UI 基线：Flutter 客户端使用 Fluent 视觉语言并适配 Windows 键鼠与 Android 触控；管理界面遵循 Ant Design。
-- 后端：Python + FastAPI；Windows 可使用随包回环进程并隐式使用本机管理员，Linux 使用多用户远程服务。
-- 连接：Windows 本机模式固定使用 `http://127.0.0.1:19453`；Windows 远程模式与 Android 必须由用户配置服务器，
-  私有网络可使用 HTTP，其他网络必须使用 HTTPS，并启用 Bearer Token 认证。
-- 存储：当前选中的后端持有 SQLite、书籍文件、任务与服务凭据；客户端只保存非敏感偏好和平台安全存储
-  保护的远程连接 Token。本机与 Linux 数据目录互不自动同步。
-- 不支持：Android 本地 Python 后端、iOS、面向读者的 Web/PWA 客户端、Electron、Capacitor、Vue 客户端。
+---
 
-`fluent_ui` 是 Flutter 社区维护的 Fluent 组件库，不是
-`microsoft/fluentui` 仓库中的 React/Web 包。项目在 Flutter 技术栈中使用它实现控件，
-并以 Microsoft Fluent 的布局、状态、动效和可访问性原则作为设计依据。
+## 1. 项目到底是什么
 
-## 文档导航
+青卷（QingJuan）是一个 **小说 / 漫画 的导入、下载、翻译、阅读客户端**，同时也负责管理这些内容背后的服务。
 
-| 文档 | 内容 | 主要适用范围 |
+它由三个部分组成，共享同一套业务能力：
+
+```
+┌─────────────────────┐   ┌──────────────────────┐
+│  Flutter 客户端      │   │  管理界面（可选）       │
+│  Windows + Android  │   │  React + Ant Design   │
+└──────────┬──────────┘   └──────────┬───────────┘
+           │  HTTP / HTTPS           │ 同源 Cookie 会话
+           ▼                         ▼
+┌─────────────────────────────────────────────────┐
+│            FastAPI 后端（业务核心）                │
+│   抓取 / 下载 / 翻译 / OCR / 任务 / 书库 / 账号    │
+└─────────────────────────────────────────────────┘
+```
+
+- **Flutter 客户端**：Windows 桌面端与 Android 手机 / 平板端。两者共用业务逻辑和 Controller，但分别维护两套界面（Windows 走 Fluent 桌面风格，Android 走触控优先的移动风格）。
+- **FastAPI 后端**：有两种运行形态——
+  - *Windows 本机伴随后端*：打包在 Windows 安装包内，只监听回环地址 `http://127.0.0.1:19453`，面向单机用户；
+  - *Linux 远程服务*：systemd 单进程多用户服务，供 Android（必须）和 Windows（可选）远程连接。
+- **管理界面**：随 Linux 后端一起提供的 React 管理页（`/admin/`），用于配置服务器、维护用户、查看设备 / 诊断 / 日志等运维操作。它不是阅读客户端。
+
+> 一句话总结：**“当前选中的后端”是书籍、任务、阅读进度、模型设置的唯一权威来源**；客户端只负责展示与操作，不自己存书库。
+
+## 2. 各文档都讲什么（导航）
+
+| 文档 | 内容 | 主要涉及目录 |
 | --- | --- | --- |
-| [原则与架构](./01-principles-and-architecture.md) | 依赖方向、模块边界、目录与拆分阈值 | 全仓库 |
-| [UI 与可访问性](./02-ui-and-accessibility.md) | Fluent、Android 触控、响应式布局与语义 | `lib/features/`、`lib/shared/` |
-| [Flutter 客户端](./03-frontend.md) | Dart、Widget、Controller、API 与状态管理 | `lib/`、`test/` |
-| [后端、管理界面与客户端集成](./04-backend-and-android.md) | FastAPI、认证、React 管理界面、Windows / Android 与 Linux 部署 | `python-backend/`、`admin-web/`、`windows/`、`android/`、`deploy/linux/` |
-| [质量与测试](./05-quality-and-testing.md) | TDD、测试分层、门禁、验收与完成定义 | 所有变更 |
-| [工作流与迁移](./06-workflow-and-migration.md) | Git、PR、发布、技术债与禁止项 | 贡献流程 |
+| [原则与架构](./01-principles-and-architecture.md) | 依赖方向、模块边界、目录职责、文件拆分阈值、命名规范 | 全仓库 |
+| [UI 与可访问性](./02-ui-and-accessibility.md) | Fluent 视觉基线、Android 触控、响应式布局、阅读器沉浸、语义与可访问性 | `lib/features/`、`lib/shared/` |
+| [Flutter 客户端](./03-frontend.md) | Widget / Controller / API / 状态管理 / 导航 / 持久化 / 阅读器具体实现 | `lib/`、`test/` |
+| [后端与管理界面](./04-backend-and-android.md) | FastAPI 分层、API 约定、认证与凭据、数据库、抓取与站点插件、后台任务、部署 | `python-backend/`、`admin-web/`、`windows/`、`android/`、`deploy/linux/` |
+| [质量与测试](./05-quality-and-testing.md) | TDD 流程、测试分层、强制命令、三轮验证、完成定义 | 所有变更 |
+| [工作流与迁移](./06-workflow-and-migration.md) | Git 流程、PR 要求、CI 门禁、发布流程、迁移规则、禁止反模式 | 贡献与发布 |
 
-## 开发环境与依赖基线
+---
 
-### 必需工具
+## 3. 一个请求是怎么在系统里流动的
 
-| 工具 | 支持基线 | 用途与要求 |
+理解下面这条链路，就理解了 80% 的项目结构：
+
+```
+用户点击                 →  Widget（只负责布局与交互）
+→ Feature Controller     →  表达“一个功能域”的用例、持有状态
+→ ApiClient              →  负责 HTTP、鉴权头、JSON、错误归一化
+→ FastAPI Router         →  校验输入、调用业务、映射响应
+→ Service / Site Plugin  →  具体业务：抓取、下载、翻译、任务
+→ Repository / db.py     →  SQLite、文件系统、第三方网站
+```
+
+基本铁律：
+
+- **依赖只能向下**：Widget 不许直连 HTTP / 数据库 / 进程；Controller 不依赖页面实例。
+- **客户端不侧写安全**：连接 Token 只存在于安全存储与请求头；模型密钥只存在后端 SQLite，客户端拿不到。
+- **数据由后端管**：书库、任务、阅读进度、插件开关都在后端，客户端只存“界面偏好”和“安全存储里的连接信息”。
+
+## 4. 平台边界一句话
+
+| | Windows 客户端 | Android 客户端 | Linux 后端 |
+| --- | --- | --- | --- |
+| 连接方式 | 本机后端(127.0.0.1) **或** 远程 Linux | 仅远程 Linux | 本地多用户服务 |
+| 界面风格 | Fluent 桌面（NavigationView） | 触控移动端（底部导航） | Ant Design 管理页 |
+| 登录 | 本机隐式管理员 / 远程账号 | 远程账号 | 管理密码 + 用户账号 / Token |
+
+> Windows 提供**两种显式连接模式**（本机 / 远程），切换模式意味着切换数据源，绝不会自动回退。Android 只有远程模式。
+
+---
+
+## 5. 快速上手：把项目跑起来
+
+### 必需的开发环境
+
+| 工具 | 版本基线 | 用途与要点 |
 | --- | --- | --- |
-| Windows 10 / 11 x64 | 客户端运行与 Windows 开发主机 | 构建、运行和调试 Windows / Android 客户端；Windows 可运行随包本机后端 |
-| Linux / macOS | Flutter 支持的当前开发主机 | Android 客户端开发与调试 |
-| Android | Android 8.0（API 26）或更高版本 | 客户端运行平台；手机上不需要 Python 环境 |
-| Linux | x86_64、systemd、CPython 3.11+ | 远程后端运行平台；使用原生虚拟环境，不承载 Flutter 客户端 |
-| Flutter | `3.24.3` stable | 必须使用 stable 版本；正式包禁止使用 master、beta 或其他未验证版本 |
-| Dart | `3.5.3` | 随 Flutter `3.24.3` 提供，不单独安装或升级 |
-| Android SDK | `flutter doctor -v` 当前要求的 SDK、Platform Tools 与 Build Tools | 构建、安装与调试 APK |
-| JDK | JDK 17 | Gradle 与 Android 构建；优先使用 Android Studio 随附版本 |
-| Python | CPython `3.13.x` x64 | 后端开发、测试与 Linux 部署校验；不使用 Microsoft Store 的重定向别名 |
-| Node.js | `20.19.x` 或 `22.12+` | 只用于构建和测试 `admin-web/`；Linux 运行时直接提供仓库内已构建静态资源 |
-| PowerShell | Windows PowerShell 5.1 或 PowerShell 7 | Windows 开发主机上的文档命令 |
-| Git | 当前受支持版本 | 源码和子模块管理；本项目当前没有 Git 子模块 |
+| Windows 10 / 11 x64 | 客户端运行与 Windows 开发主机 | 构建、运行、调试 Windows / Android 客户端 |
+| Linux / macOS | 受支持的开发主机 | Android 客户端开发（可选） |
+| Flutter | `3.24.3` **stable** | 正式包禁止用 master / beta | 
+| Dart | `3.5.3` | 随 Flutter 3.24.3 提供，不单独安装 |
+| JDK | 17 | Gradle 与 Android 构建 |
+| Python | CPython `3.13.x` x64 | 后端开发与测试；别用 Store 重定向别名 |
+| Node.js | `20.19.x` 或 `22.12+` | 仅构建 / 测试 `admin-web/` |
+| Android SDK | `flutter doctor -v` 要求 | 构建 APK |
+| Git | 当前支持版本 | 仓库管理 |
 
-Flutter 与 Dart 视为同一套工具链。升级 Flutter 时必须在同一个变更中同步 Windows、Android Gradle 配置、
-`.github/workflows/ci.yml`、本文档和两个客户端的真实构建结果。
-本机安装了多个 Flutter 或 Python 时，先用 `Get-Command flutter` 和 `Get-Command python`
-确认当前 PowerShell 会话解析到的可执行文件，不以 IDE 状态栏显示为准。
-
-Android 构建依赖由 Gradle Wrapper、Flutter 和 Android SDK 管理。不要提交本机 SDK 路径、签名密钥、
-`key.properties` 或生成产物；正式签名通过受保护的 CI Secret 或发布负责人本机安全配置提供。
-
-### 项目依赖来源
-
-| 范围 | 权威文件 | 安装命令 |
-| --- | --- | --- |
-| Flutter 运行与插件依赖 | `pubspec.yaml`、`pubspec.lock` | `flutter pub get` |
-| Python 运行依赖 | `python-backend/requirements.txt` | `python -m pip install -r python-backend/requirements.txt` |
-| Python 开发与发布依赖 | `python-backend/requirements-dev.txt` | `python -m pip install -r python-backend/requirements-dev.txt` |
-| 管理界面依赖 | `admin-web/package.json`、`admin-web/package-lock.json` | `npm ci --prefix admin-web` |
-
-`requirements-dev.txt` 已包含后端运行、测试和 Windows PyInstaller 发布依赖。只调试远程客户端时不需要在开发机
-启动 Python；修改后端、调试 Windows 本机模式或构建完整 Windows 包时必须安装该文件。不要在文档中复制完整三方包版本，
-版本升级以依赖文件和 lockfile 为准。
-仅修改 Flutter 客户端时不需要 Node.js。管理界面开发需要 Node.js/npm，但已部署 Linux 服务不在运行时安装或启动
-Node.js，也不使用 WebView；手机端仍不需要 Python 环境。
-
-### 首次配置
-
-在仓库根目录执行：
+### 首次配置（在仓库根目录执行）
 
 ```powershell
 flutter config --enable-android
 flutter config --enable-windows-desktop
-flutter doctor -v
+flutter doctor -v          # 确认 Flutter 3.24.3、Android toolchain 无错误
 flutter pub get
-flutter devices
+flutter devices            # 能看到模拟器或开启了 USB 调试的真机
 ```
 
-`flutter doctor -v` 必须确认 Flutter 为 `3.24.3`，Android toolchain 无错误，并能识别模拟器或已开启
-USB 调试的真机。修改后端、调试 Windows 本机模式或构建完整 Windows 包时创建 `python-backend/.venv` 并安装
-`requirements-dev.txt`；开发态 Windows 本机模式可从仓库启动该 Python，正式 Windows 包只启动随包可执行文件，
-Android 不读取或复制 Python 运行时。
+> `flutter doctor` 必须同时确认 Android toolchain 无错误；`Get-Command flutter` / `Get-Command python` 用于确认当前 PowerShell 会话实际解析到哪个工具（不要只看 IDE 状态栏）。
 
-### 可选运行能力
-
-- 设备 TTS 使用操作系统已安装的语音引擎与语音包；客户端不得把正文上传到未明确配置的朗读服务。
-- Linux 后端使用 RapidOCR，并通过已配置的 Chromium 可执行文件提供浏览器会话回退。
-- 翻译和可选视觉识别需要用户自行配置 OpenAI 兼容 API，不是本地开发、测试或启动的前置条件。
-- `QINGJUAN_DATA_DIR` 只用于覆盖开发数据目录，不应写入全局环境或指向仓库外未确认的生产数据。
-
-启动 Android 调试：
+如果还要改后端或调试 Windows 本机模式，再创建 Python 虚拟环境：
 
 ```powershell
-flutter run -d <设备 ID>
+cd python-backend
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install -r requirements-dev.txt   # 已含运行 + 测试 + 发布依赖
 ```
 
-启动 Windows 调试：
+要改或跑管理界面时：
 
 ```powershell
+cd admin-web
+npm ci
+npm run dev
+```
+
+### 调试启动
+
+```powershell
+# Android（真机 / 模拟器）
+flutter run -d <设备ID>
+
+# Windows 桌面
 flutter run -d windows
 ```
 
-Windows 首次启动在没有既有远程配置时默认本机模式，按需启动随包后端；已有远程配置继续保持远程模式。
-Android 首次启动显示服务器配置入口。远程模式填写 Linux FastAPI 根地址与连接 Token 并通过服务标识/API 版本握手后，
-应用才加载书架、插件与书源规则、任务及设置；连接失败时保留配置表单和诊断，且不回退本机。切换模式或服务器后
-必须停止旧轮询、清空旧页面状态并从新后端重新加载。Linux 部署入口、认证和数据目录约束见
-[后端、管理界面与客户端集成](./04-backend-and-android.md)。
+> Windows 首次启动时若没有既有远程配置，默认进入**本机模式**并按需启动随包后端；Android 首次启动会展示服务器配置页。
+> 手机端仍不需要 Python 环境——手机只连接远程 Linux 后端。
 
-静态检查、测试命令和三轮验证要求见[质量与测试](./05-quality-and-testing.md)，
-Windows 与 Android 构建、发布流程见[工作流与迁移](./06-workflow-and-migration.md)。
+---
 
-## 最低强制要求
+## 6. 当前发布基线（读代码前先看这个）
 
-1. Flutter UI 使用 `fluent_ui` 和项目共享 Widget；`admin-web/` 只使用 Ant Design，不在任一界面混用两套组件体系。
-2. 新功能按 Feature 拆分；页面不直接处理原始 HTTP、数据库或进程。
-3. 网络 DTO、领域模型、状态控制与展示组件分离。
-4. 任何异步界面都有加载、空、成功、失败和重试状态。
-5. 所有用户可见错误使用中文且可执行，不暴露堆栈或密钥。
-6. 改动同步补充测试，提交前完成格式化、静态分析、测试和 Windows / Android 构建。
-7. 根目录只保留 `README.md`；其他 Markdown 必须进入 `docs/development/` 的对应区块。
-8. 不提交密钥、数据库、缓存、下载内容、日志、临时构建产物和个人数据；
-   `python-backend/app/admin_static/` 是 Linux 运行时所需、由 CI 校验的唯一管理界面构建产物例外。
-9. 无认证服务不得监听非回环地址；客户端不得向非青卷同源地址发送连接 Token。
+- 已发布版本：**v2.0.0（build 32）**；仓库当前开发版本：**`2.0.2+34`**（优化移动端阅读体验与性能，修复书页偶发空白与卡顿）。
+- Windows 发布包**必须包含** PyInstaller 构建的本机伴随后端；本机模式只监听回环地址，不用 Token。
+- 既有功能要求：本地文件导入、单章 / 多章导出、设备 TTS、链接任务与实时日志、单一 OpenAI 兼容翻译配置，以及 RapidOCR 漫画翻译链路。
+- 后续版本升级**不得破坏**：现有后端数据、导入导出格式、阅读进度与设置；必须保证兼容（特殊场景要提供迁移说明 + 测试）。
 
-## 规范优先级
+---
 
-发生冲突时依次采用：
+## 7. 平台边界与“不支持”清单
 
-1. 安全、隐私、许可证和用户明确要求；
+支持：
+
+- Windows 桌面客户端（带可选本机后端）
+- Android 手机 / 平板（远程客户端）
+- Linux x86_64 systemd 服务（后端 + 管理界面）
+
+**不支持**（也禁止引入）：Android 本地 Python 后端、iOS、面向读者的 Web / PWA `客户端`、Electron、Capacitor、Vue 客户端。
+
+> 特别注意：`fluent_ui` 是 Flutter 社区维护的 Fluent 组件库，不是 `microsoft/fluentui` 仓库里那套 React/Web 包。项目在 Flutter 技术栈中用它实现控件，并以 Microsoft Fluent 的布局、状态、动效、可访问性原则作为设计依据。
+
+---
+
+## 8. 最低强制要求（每条都很重要）
+
+这些是所有代码的地基，改动任何部分都不得破坏它们：
+
+1. **组件体系隔离**：Flutter 用 `fluent_ui`，管理界面用 Ant Design；两套体系绝不混用（Material 页面组件等于禁止）。
+2. **分层清晰**：新功能按 Feature 拆；页面不直接处理 HTTP / 数据库 / 进程。
+3. **数据模型分离**：网络 DTO、领域模型、状态控制、展示组件各自独立。
+4. **异步界面五种状态**：任何异步界面都有 加载 / 空 / 成功 / 失败 / 重试 状态。
+5. **用户可见错误用中文**：可执行的提示，不暴露堆栈、密钥。
+6. **改动配套完整检查**：提交前跑完 格式化 → 静态分析 → 测试 → Windows / Android 构建。
+7. **文档归位**：根目录只放 `README.md`；其他 Markdown 必须在 `docs/development/` 对应章节。
+8. **不提交脏产物**：密钥、数据库、缓存、下载内容、日志、临时构建产物、个人数据一律不进 Git；`python-backend/app/admin_static/` 是唯一例外的构建产物。
+9. **回环与安全**：无认证服务只能监听回环地址；客户端不向非青卷同源地址发送连接 Token。
+
+## 规范优先级（冲突时按这个顺序取舍）
+
+1. 安全、隐私、许可与用户明确要求；
 2. 本开发规范；
-3. Flutter、Dart、FastAPI 官方约定；
+3. Flutter / Dart / FastAPI 官方约定；
 4. 现有代码模式。
 
-现有实现与规范不一致时，不复制旧问题。局部修改应在可控范围内向规范靠拢，并用测试保护行为。
+原则：**不复制现有代码的坏习惯**。局部修改应该在可控范围内向规范靠拢，并用测试保护行为。
 
-## 维护方式
+## 维护这份文档
 
-- 架构、依赖、构建或 UI 基线改变时，必须在同一个 PR 更新对应文档。
-- 不为一次性讨论创建新的 Markdown；将结论合并到现有章节。
-- 重复规则只保留一个权威位置，其他地方使用链接。
-- 客户端开发命令必须能在 Windows PowerShell 执行；Linux 部署命令使用明确标注的 Bash 代码块。
+- 架构、依赖、构建或 UI 基线变化时，**必须在同一个 PR** 更新对应文档。
+- 不为一次性讨论新造一个 Markdown；把结论合并进现有章节。
+- 同一条规则只保留一份权威位置，其余地方用链接引用。
+- 客户端开发命令必须能在 **Windows PowerShell** 下执行；Linux 部署命令使用明确标注 **Bash** 的代码块。
+
+## 下一步
+
+- 想理清全部技术栈和目录职责 → [原则与架构](./01-principles-and-architecture.md)
+- 想跑通开发环境与调试 → [快速上手：把项目跑起来](#5-快速上手把项目跑起来)（见上文 §5）
+- 准备写代码 / 改页面 → [UI 与可访问性](./02-ui-and-accessibility.md) 与 [Flutter 客户端](./03-frontend.md)
+- 准备发版本 → [工作流与迁移](./06-workflow-and-migration.md)
