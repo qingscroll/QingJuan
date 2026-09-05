@@ -1,5 +1,7 @@
 import 'package:fluent_ui/fluent_ui.dart';
 
+import '../mobile/mobile_surface.dart';
+import 'mobile_palette.dart';
 import 'motion.dart';
 
 Future<T?> showMobileSheet<T>({
@@ -72,24 +74,11 @@ class MobileSheet extends StatelessWidget {
               maxWidth: maxWidth,
               maxHeight: screen.height * maxHeightFactor,
             ),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: theme.cardColor,
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(
-                  color:
-                      dark ? const Color(0xFF303640) : const Color(0xFFE8ECF2),
-                ),
-                boxShadow: <BoxShadow>[
-                  BoxShadow(
-                    color: const Color(0xFF101828).withAlpha(dark ? 70 : 30),
-                    blurRadius: 28,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
-              ),
+            child: MobileOverlaySurface(
+              isDark: dark,
+              borderRadius: BorderRadius.circular(24),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(22),
+                borderRadius: BorderRadius.circular(24),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
@@ -137,17 +126,15 @@ class MobileSheet extends StatelessWidget {
                     ),
                     Container(
                       height: 1,
-                      color: dark
-                          ? const Color(0xFF303640)
-                          : const Color(0xFFE8ECF2),
+                      color:
+                          dark ? MobilePalette.nightLine : MobilePalette.line,
                     ),
                     Flexible(child: child),
                     if (actions.isNotEmpty) ...<Widget>[
                       Container(
                         height: 1,
-                        color: dark
-                            ? const Color(0xFF303640)
-                            : const Color(0xFFE8ECF2),
+                        color:
+                            dark ? MobilePalette.nightLine : MobilePalette.line,
                       ),
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),

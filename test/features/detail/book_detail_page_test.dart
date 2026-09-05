@@ -13,14 +13,111 @@ import 'package:qingjuan/core/backend/backend_connection_manager.dart';
 import 'package:qingjuan/features/auth/auth_controller.dart';
 import 'package:qingjuan/features/detail/book_detail_page.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
+import 'package:qingjuan/features/manga_translation/manga_bookshelf_import.dart';
+import 'package:qingjuan/features/manga_translation/manga_translation_coordinator.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
 import 'package:qingjuan/features/tasks/tasks_controller.dart';
 import 'package:qingjuan/shared/responsive.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../reader/mobile_fixture_capture.dart';
 
 void main() {
+  setUpAll(loadMobileCaptureFonts);
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+  for (final brightness in Brightness.values) {
+    testWidgets('mobile detail fixture ${brightness.name}', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final key = GlobalKey();
+      final harness = await _Harness.create(
+        MockClient((_) async => _jsonResponse(_detailPayload)),
+        brightness: brightness,
+        child: const UiPlatformScope(
+            platform: TargetPlatform.android,
+            child: BookDetailPage(bookId: 'book-1')),
+      );
+      addTearDown(harness.dispose);
+      await tester.pumpWidget(RepaintBoundary(key: key, child: harness.widget));
+      await tester.pumpAndSettle();
+      expect(find.text('开始阅读'), findsOneWidget);
+      await saveMobileFixture(tester, key, 'detail-${brightness.name}');
+      await tester.tap(find.byIcon(FluentIcons.more));
+      await tester.pumpAndSettle();
+      expect(find.text('下载全部章节'), findsOneWidget);
+      expect(find.text('导出全部章节'), findsOneWidget);
+      await saveMobileFixture(tester, key, 'detail-actions-${brightness.name}');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'mobile download posts a task and preserves selected chapter scope',
+      (tester) async {
+    final downloaded = <int>[];
+    final harness = await _Harness.create(MockClient((request) async {
+      if (request.url.path == '/api/v1/books/book-1/chapters/download') {
+        final payload = jsonDecode(request.body) as Map<String, dynamic>;
+        downloaded.addAll((payload['chapterIndexes'] as List).cast<int>());
+        return _jsonResponse({
+          'id': 'download-1',
+          'bookId': 'book-1',
+          'taskType': 'download',
+          'status': 'queued',
+          'totalCount': 1,
+          'completedCount': 0,
+          'progress': 0
+        });
+      }
+      if (request.url.path == '/api/v1/tasks') return _jsonResponse([]);
+      return _jsonResponse(_detailPayloadWithKind('长小说'));
+    }),
+        child: const UiPlatformScope(
+            platform: TargetPlatform.android,
+            child: BookDetailPage(bookId: 'book-1')));
+    addTearDown(harness.dispose);
+    await tester.pumpWidget(harness.widget);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('选择'));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('mobile-chapter-1')));
+    await tester.pump();
+    await tester.tap(find.text('管理所选章节'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('下载所选章节'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+    expect(downloaded, [1]);
+    expect(find.text('TXT'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final size in [const Size(320, 740), const Size(1024, 800)]) {
+    testWidgets('mobile detail supports 200 percent text at $size',
+        (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final harness = await _Harness.create(
+          MockClient((_) async => _jsonResponse(_detailPayloadWithKind('长小说'))),
+          child: MediaQuery(
+              data: MediaQueryData(
+                  size: size, textScaler: const TextScaler.linear(2)),
+              child: const UiPlatformScope(
+                  platform: TargetPlatform.android,
+                  child: BookDetailPage(bookId: 'book-1'))));
+      addTearDown(harness.dispose);
+      await tester.pumpWidget(harness.widget);
+      await tester.pumpAndSettle();
+      expect(find.text('开始阅读'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   test('posts the selected chapter export format and destination', () async {
     final directory = await Directory.systemTemp.createTemp('qingjuan-export-');
@@ -155,7 +252,8 @@ void main() {
     expect(find.text('听小说'), findsOneWidget);
   });
 
-  testWidgets('Android detail keeps the full synopsis in a scrollable viewport',
+  testWidgets(
+      'Android detail expands the full synopsis in the main reading flow',
       (tester) async {
     final longSynopsis = List<String>.filled(
       10,
@@ -190,24 +288,12 @@ void main() {
     await tester.pumpWidget(harness.widget);
     await tester.pump(const Duration(milliseconds: 100));
 
-    final synopsis = tester.widget<Text>(find.text(longSynopsis));
-    expect(synopsis.maxLines, isNull);
-    expect(synopsis.overflow, isNot(TextOverflow.ellipsis));
-
-    final region = find.byKey(const ValueKey('book-synopsis-scroll'));
-    expect(region, findsOneWidget);
-    final scrollView = find.descendant(
-      of: region,
-      matching: find.byType(SingleChildScrollView),
-    );
-    expect(scrollView, findsOneWidget);
-    final controller =
-        tester.widget<SingleChildScrollView>(scrollView).controller!;
-    expect(controller.position.maxScrollExtent, greaterThan(0));
-
-    await tester.drag(scrollView, const Offset(0, -80));
+    expect(tester.widget<Text>(find.text(longSynopsis)).maxLines, 3);
+    await tester.tap(find.text('展开简介'));
     await tester.pumpAndSettle();
-    expect(controller.offset, greaterThan(0));
+    expect(tester.widget<Text>(find.text(longSynopsis)).maxLines, isNull);
+    expect(find.text('收起简介'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('hides audiobook action for manga books', (tester) async {
@@ -233,6 +319,144 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('听小说'), findsNothing);
+  });
+
+  testWidgets(
+      'Windows manga sends every chapter to the dedicated translation workspace',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    var legacyTranslationRequests = 0;
+    final payload = _detailPayloadWithKind('漫画');
+    final harness = await _Harness.create(
+      MockClient((request) async {
+        if (request.method == 'GET' &&
+            request.url.path == '/api/v1/books/book-1') {
+          return _jsonResponse(payload);
+        }
+        if (request.url.path.contains('/chapters/translate')) {
+          legacyTranslationRequests += 1;
+        }
+        return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+      }),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('漫画翻译'), findsOneWidget);
+    await tester.tap(find.text('漫画翻译'));
+    await tester.pumpAndSettle();
+
+    expect(imports, hasLength(1));
+    expect(imports.single.bookId, 'book-1');
+    expect(imports.single.chapterIndexes, <int>[1, 2]);
+    expect(harness.appState.section, AppSection.translator);
+    expect(find.text('打开作品'), findsOneWidget);
+    expect(legacyTranslationRequests, 0);
+  });
+
+  testWidgets(
+      'Windows manga sends only checked chapters to the dedicated workspace',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final harness = await _Harness.create(
+      MockClient((request) async {
+        if (request.method == 'GET' &&
+            request.url.path == '/api/v1/books/book-1') {
+          return _jsonResponse(_detailPayloadWithKind('漫画'));
+        }
+        return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+      }),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.text('翻译所选到工作台'), findsOneWidget);
+    await tester.tap(find.text('翻译所选到工作台'));
+    await tester.pumpAndSettle();
+
+    expect(imports, hasLength(1));
+    expect(imports.single.chapterIndexes, <int>[1]);
+    expect(harness.appState.section, AppSection.translator);
+    expect(find.text('打开作品'), findsOneWidget);
+  });
+
+  testWidgets('Windows novels keep the legacy translation task action',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final legacyChapters = <List<int>>[];
+    final harness = await _Harness.create(
+      _legacyTranslationClient(
+        _detailPayloadWithKind('长小说'),
+        legacyChapters,
+      ),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('翻译全部'), findsOneWidget);
+    await tester.tap(find.text('翻译全部'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    expect(legacyChapters, <List<int>>[
+      <int>[1, 2],
+    ]);
+    expect(imports, isEmpty);
+    expect(harness.appState.section, isNot(AppSection.translator));
+    expect(find.text('测试作品'), findsWidgets);
+  });
+
+  testWidgets('non-Windows manga keeps the legacy translation task action',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final legacyChapters = <List<int>>[];
+    final harness = await _Harness.create(
+      _legacyTranslationClient(
+        _detailPayloadWithKind('漫画'),
+        legacyChapters,
+      ),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.android),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(FluentIcons.more));
+    await tester.pumpAndSettle();
+    expect(find.text('翻译全部章节'), findsOneWidget);
+    expect(find.text('漫画翻译'), findsNothing);
+    await tester.tap(find.text('翻译全部章节'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    expect(legacyChapters, <List<int>>[
+      <int>[1, 2],
+    ]);
+    expect(imports, isEmpty);
+    expect(harness.appState.section, isNot(AppSection.translator));
+    expect(find.text('测试作品'), findsWidgets);
   });
 
   testWidgets('opens import-compatible novel chapter export formats',
@@ -269,7 +493,7 @@ void main() {
     );
   });
 
-  testWidgets('top download action opens the same export format dialog',
+  testWidgets('mobile export action opens the export format dialog',
       (tester) async {
     final harness = await _Harness.create(
       MockClient((_) async => http.Response(
@@ -284,7 +508,9 @@ void main() {
 
     await tester.pumpWidget(harness.widget);
     await tester.pump(const Duration(milliseconds: 100));
-    await tester.tap(find.text('下载全部'));
+    await tester.tap(find.byIcon(FluentIcons.more));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('导出全部章节'));
     await tester.pumpAndSettle();
 
     expect(find.text('导出全部章节'), findsOneWidget);
@@ -542,19 +768,128 @@ const _detailPayload = <String, Object?>{
   ],
 };
 
+Map<String, Object?> _detailPayloadWithKind(String kind) => <String, Object?>{
+      ..._detailPayload,
+      'book': <String, Object?>{
+        ...(_detailPayload['book']! as Map<String, Object?>),
+        'bookKind': kind,
+        'chapterCount': 2,
+      },
+      'downloadedChapterCount': 2,
+      'chapters': <Object?>[
+        <String, Object?>{
+          'index': 1,
+          'title': '第一章',
+          'downloaded': true,
+          'translated': false,
+          'wordCount': 1200,
+          'imageCount': kind == '漫画' ? 2 : 0,
+        },
+        <String, Object?>{
+          'index': 2,
+          'title': '第二章',
+          'downloaded': true,
+          'translated': false,
+          'wordCount': 900,
+          'imageCount': kind == '漫画' ? 3 : 0,
+        },
+      ],
+    };
+
+http.Response _jsonResponse(Object? payload, [int statusCode = 200]) =>
+    http.Response(
+      jsonEncode(payload),
+      statusCode,
+      headers: const <String, String>{
+        'content-type': 'application/json; charset=utf-8',
+      },
+    );
+
+MangaBookshelfImportInvoker _capturingImporter(
+  List<MangaBookshelfImportRequest> imports,
+) {
+  return (
+    request, {
+    onProgress,
+    abortTrigger,
+  }) async {
+    imports.add(request);
+    return MangaBookshelfImportResult(
+      bookId: request.bookId,
+      bookTitle: request.bookTitle,
+      sourceRoot: Directory.systemTemp.path,
+      filePaths: const <String>[],
+      chapterCount: request.chapterIndexes.length,
+    );
+  };
+}
+
+http.Client _legacyTranslationClient(
+  Map<String, Object?> detail,
+  List<List<int>> capturedChapters,
+) {
+  return MockClient((request) async {
+    if (request.method == 'GET' && request.url.path == '/api/v1/books/book-1') {
+      return _jsonResponse(detail);
+    }
+    if (request.method == 'POST' &&
+        request.url.path == '/api/v1/books/book-1/chapters/translate') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      capturedChapters.add(
+        (body['chapterIndexes'] as List<dynamic>)
+            .whereType<num>()
+            .map((value) => value.toInt())
+            .toList(),
+      );
+      return _jsonResponse(<String, Object?>{
+        'id': 'translate-1',
+        'bookId': 'book-1',
+        'taskType': 'translate',
+        'status': 'queued',
+        'totalCount': capturedChapters.last.length,
+        'completedCount': 0,
+        'progress': 0,
+        'message': '任务已创建',
+        'attempts': 0,
+        'updatedAt': '2026-08-30T00:00:00Z',
+      });
+    }
+    if (request.method == 'GET' && request.url.path == '/api/v1/tasks') {
+      return _jsonResponse(<Object?>[]);
+    }
+    return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+  });
+}
+
+Widget _platformDetailLauncher(TargetPlatform platform) => MediaQuery(
+      data: MediaQueryData(
+        size: platform == TargetPlatform.windows
+            ? const Size(1280, 800)
+            : const Size(390, 844),
+      ),
+      child: UiPlatformScope(
+        platform: platform,
+        child: const _DetailLauncher(),
+      ),
+    );
+
 class _Harness {
   _Harness({
     required this.widget,
+    required this.appState,
     required this.api,
     required this.library,
     required this.sources,
     required this.tasks,
     required this.settings,
+    required this.mangaTranslation,
   });
 
   static Future<_Harness> create(
     http.Client client, {
     Widget child = const BookDetailPage(bookId: 'book-1'),
+    MangaBookshelfImportInvoker? importBookshelfBook,
+    Brightness brightness = Brightness.light,
   }) async {
     final appState = AppState(await SharedPreferences.getInstance());
     final api = ApiClient(() => appState.backendUrl, client: client);
@@ -563,8 +898,24 @@ class _Harness {
     final sources = SourcesController(api);
     final tasks = TasksController(api);
     final settings = SettingsController(api);
+    final mangaTranslation = importBookshelfBook == null
+        ? null
+        : MangaTranslationCoordinator(
+            api,
+            importBookshelfBook: importBookshelfBook,
+          );
     final widget = FluentApp(
-      theme: buildQingJuanTheme(Brightness.light),
+      theme: captureMobileFixtures
+          ? buildQingJuanTheme(brightness).copyWith(
+              typography: buildQingJuanTheme(brightness)
+                  .typography
+                  .apply(fontFamily: 'Roboto'))
+          : buildQingJuanTheme(brightness),
+      builder: captureMobileFixtures
+          ? (context, child) => DefaultTextStyle(
+              style: const TextStyle(fontFamily: 'Roboto'), child: child!)
+          : null,
+      debugShowCheckedModeBanner: false,
       home: AppScope(
         appState: appState,
         api: api,
@@ -574,27 +925,33 @@ class _Harness {
         sources: sources,
         tasks: tasks,
         settings: settings,
+        mangaTranslation: mangaTranslation,
         child: child,
       ),
     );
     return _Harness(
       widget: widget,
+      appState: appState,
       api: api,
       library: library,
       sources: sources,
       tasks: tasks,
       settings: settings,
+      mangaTranslation: mangaTranslation,
     );
   }
 
   final Widget widget;
+  final AppState appState;
   final ApiClient api;
   final LibraryController library;
   final SourcesController sources;
   final TasksController tasks;
   final SettingsController settings;
+  final MangaTranslationCoordinator? mangaTranslation;
 
   void dispose() {
+    mangaTranslation?.dispose();
     library.dispose();
     sources.dispose();
     tasks.dispose();

@@ -7,6 +7,8 @@ import ast
 # Author: Tavre
 # License: GPL-3.0-only
 import asyncio
+import base64
+import binascii
 import copy
 import html
 import ipaddress
@@ -20,18 +22,19 @@ import sys
 import unicodedata
 import warnings
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 from urllib.parse import quote, urljoin, urlparse
 from uuid import uuid4
 
 import httpx
 import uvicorn
 from bs4 import BeautifulSoup, Tag, XMLParsedAsHTMLWarning
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 
@@ -93,6 +96,7 @@ try:
         inspect_local_document,
         write_local_document,
     )
+    from .manga_workflow import parse_manga_project, run_manga_workflow
     from .model_endpoint_security import (
         ModelEndpointSecurityError,
         configured_model_endpoint_allowlist,
@@ -121,6 +125,10 @@ try:
         ChapterRecord,
         LinkJobRecord,
         LinkJobStartPayload,
+        MangaChapterTranslationPayload,
+        MangaChapterTranslationResponse,
+        MangaTranslatedPagePayload,
+        MangaWorkflowResponse,
         PreviewResponse,
         PublicBookRecord,
         PublicBookSourceRecord,
@@ -148,10 +156,13 @@ try:
     from .runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from .scraper import (
         _fetch_with_edge_cdp,
+        _merge_page_translations,
         _normalize_search_text,
         _normalize_source_url,
         apply_downloaded_chapter_payload,
         build_translated_filename,
+        build_translated_image_asset_path,
+        build_translated_meta_filename,
         create_book_manifest_only,
         download_book,
         download_chapter_payload,
@@ -162,11 +173,15 @@ try:
         preview_from_url,
         repair_18comic_chapter_images,
         save_manifest,
+        save_translated_page_payload,
         search_builtin_site_books,
         translate_selected_chapters,
         translate_single_manga_image,
+        translated_checkpoint_path,
         translated_image_payload_is_current,
+        translated_text_path,
     )
+    from .scraper_network_security import create_public_http_client
     from .security import API_PREFIX, API_VERSION, authentication_enabled
     from .site_plugins import (
         SitePlugin,
@@ -235,6 +250,7 @@ except ImportError:
         inspect_local_document,
         write_local_document,
     )
+    from app.manga_workflow import parse_manga_project, run_manga_workflow
     from app.model_endpoint_security import (
         ModelEndpointSecurityError,
         configured_model_endpoint_allowlist,
@@ -263,6 +279,10 @@ except ImportError:
         ChapterRecord,
         LinkJobRecord,
         LinkJobStartPayload,
+        MangaChapterTranslationPayload,
+        MangaChapterTranslationResponse,
+        MangaTranslatedPagePayload,
+        MangaWorkflowResponse,
         PreviewResponse,
         PublicBookRecord,
         PublicBookSourceRecord,
@@ -290,10 +310,13 @@ except ImportError:
     from app.runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from app.scraper import (
         _fetch_with_edge_cdp,
+        _merge_page_translations,
         _normalize_search_text,
         _normalize_source_url,
         apply_downloaded_chapter_payload,
         build_translated_filename,
+        build_translated_image_asset_path,
+        build_translated_meta_filename,
         create_book_manifest_only,
         download_book,
         download_chapter_payload,
@@ -304,11 +327,15 @@ except ImportError:
         preview_from_url,
         repair_18comic_chapter_images,
         save_manifest,
+        save_translated_page_payload,
         search_builtin_site_books,
         translate_selected_chapters,
         translate_single_manga_image,
+        translated_checkpoint_path,
         translated_image_payload_is_current,
+        translated_text_path,
     )
+    from app.scraper_network_security import create_public_http_client
     from app.security import API_PREFIX, API_VERSION, authentication_enabled
     from app.site_plugins import (
         SitePlugin,
@@ -334,6 +361,8 @@ _USER_SITE_PLUGIN_RUNTIMES: dict[tuple[str, str], Any] = {}
 _RUNTIME_LOGGER = logging.getLogger("qingjuan.runtime")
 _TASK_LOGGER = logging.getLogger("qingjuan.task")
 SOURCE_CHAPTER_CACHE_AHEAD = 20
+MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_PIXELS = 80_000_000
 SOURCE_IMPORT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json,text/plain,text/html;q=0.9,*/*;q=0.8",
@@ -1398,6 +1427,133 @@ async def post_translate_image(
         await file.close()
 
 
+_DisconnectResult = TypeVar("_DisconnectResult")
+
+
+async def _await_or_cancel_on_disconnect(
+    request: Request,
+    operation: Awaitable[_DisconnectResult],
+    *,
+    poll_seconds: float = 0.25,
+) -> _DisconnectResult:
+    task = asyncio.ensure_future(operation)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=poll_seconds)
+            if task.done():
+                break
+            if await request.is_disconnected():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                raise HTTPException(status_code=499, detail="客户端已停止漫画工作流")
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+@library_router.post("/images/workflow", response_model=MangaWorkflowResponse)
+async def post_image_workflow(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    mode: Annotated[str, Form()],
+    language: Annotated[str, Form()] = "中文",
+    title: Annotated[str, Form()] = "",
+    project: Annotated[str | None, Form()] = None,
+    companion: Annotated[str | None, Form()] = None,
+    translatedFile: Annotated[UploadFile | None, File()] = None,
+    upscaleFactor: Annotated[int, Form()] = 2,
+    translatedProject: Annotated[str | None, Form()] = None,
+    translated_project: Annotated[str | None, Form()] = None,
+    translated_file: Annotated[UploadFile | None, File()] = None,
+    upscale_factor: Annotated[int | None, Form()] = None,
+) -> MangaWorkflowResponse:
+    require_user_access(request)
+    translated_upload = translatedFile or translated_file
+    try:
+        normalized_language = _validate_language(language)
+        original_name = _normalize_form_text(file.filename or "").strip() or "upload.png"
+        _validate_workflow_image_upload(original_name, file.content_type)
+        image_bytes = await file.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="图片文件为空")
+
+        translated_image_bytes: bytes | None = None
+        translated_image_name = "translated.png"
+        if translated_upload is not None:
+            translated_image_name = (
+                _normalize_form_text(translated_upload.filename or "").strip() or "translated.png"
+            )
+            _validate_workflow_image_upload(
+                translated_image_name,
+                translated_upload.content_type,
+            )
+            translated_image_bytes = await translated_upload.read()
+            if not translated_image_bytes:
+                raise HTTPException(status_code=400, detail="替换译图文件为空")
+
+        resolved_companion = (
+            companion
+            if companion is not None and companion.strip()
+            else translatedProject or translated_project
+        )
+        return await _await_or_cancel_on_disconnect(
+            request,
+            run_manga_workflow(
+                image_bytes=image_bytes,
+                original_name=original_name,
+                mode=_normalize_form_text(mode).strip(),
+                target_language=normalized_language,
+                settings=load_settings(),
+                title=_normalize_form_text(title).strip(),
+                project=project,
+                companion=resolved_companion,
+                translated_image_bytes=translated_image_bytes,
+                translated_image_name=translated_image_name,
+                upscale_factor=(upscale_factor if upscale_factor is not None else upscaleFactor),
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"漫画工作流失败：{exc}") from exc
+    finally:
+        await file.close()
+        for upload in (translatedFile, translated_file):
+            if upload is not None:
+                await upload.close()
+
+
+@library_router.post(
+    "/books/{book_id}/chapters/{chapter_index}/manga-translation",
+    response_model=MangaChapterTranslationResponse,
+)
+async def post_manga_chapter_translation(
+    book_id: str,
+    chapter_index: int,
+    payload: MangaChapterTranslationPayload,
+    request: Request,
+) -> MangaChapterTranslationResponse:
+    owner_id = require_user_access(request).owner_id
+    book = _get_book_or_404(book_id, owner_id)
+    if book.bookKind != "漫画":
+        raise HTTPException(status_code=400, detail="仅漫画书籍支持写入漫画译文")
+    try:
+        return await _commit_manga_chapter_translation(book, chapter_index, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _RUNTIME_LOGGER.exception(
+            "漫画工作台译文写回失败：book=%s chapter=%s",
+            book.id,
+            chapter_index,
+        )
+        raise HTTPException(status_code=500, detail=f"漫画译文写入书架失败：{exc}") from exc
+
+
 @library_router.put("/books/{book_id}/progress", response_model=ReadingProgressRecord)
 async def put_reading_progress(
     book_id: str,
@@ -1418,6 +1574,11 @@ async def put_reading_progress(
         lastAnchorIndex=max(0, payload.anchorIndex),
         lastAnchorOffsetRatio=_clamp_unit_float(payload.anchorOffsetRatio),
         lastReadAt=_now(),
+        lastPageIndex=payload.pageIndex,
+        lastPageCount=payload.pageCount,
+        lastLayoutKey=payload.layoutKey,
+        lastContentMode=payload.contentMode,
+        lastCharacterOffset=payload.characterOffset,
     )
     return save_reading_progress(progress)
 
@@ -1504,6 +1665,7 @@ async def get_task_page_results(
                     pageNumber=page.page_number,
                     totalPages=total_pages,
                     texts=texts,
+                    updatedAt=task.updatedAt,
                 )
             )
     return results
@@ -1695,9 +1857,23 @@ async def _run_link_job(job_id: str) -> None:
 
 
 @library_router.post("/books/link-jobs", response_model=PublicLinkJobRecord)
-async def post_link_job(payload: LinkJobStartPayload, request: Request) -> LinkJobRecord:
+async def post_link_job(
+    payload: LinkJobStartPayload,
+    request: Request,
+    idempotency_key: Annotated[
+        str | None,
+        Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    ] = None,
+) -> LinkJobRecord:
     owner_id = _effective_owner_id(require_user_access(request))
-    job = LINK_JOB_STORE.create(payload.mode, payload.payload, owner_id)
+    try:
+        job, created = LINK_JOB_STORE.create_or_get(
+            payload.mode, payload.payload, owner_id, idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created:
+        return job
     task = asyncio.create_task(_run_link_job(job.id))
     link_job_tasks: set[asyncio.Task[Any]] = getattr(app.state, "link_job_tasks", set())
     link_job_tasks.add(task)
@@ -2140,7 +2316,7 @@ async def _fetch_book_source_import_payload(url: str) -> str:
         read=SOURCE_IMPORT_TIMEOUT,
     )
     try:
-        async with httpx.AsyncClient(
+        async with create_public_http_client(
             follow_redirects=True,
             timeout=timeout,
             headers=SOURCE_IMPORT_HEADERS,
@@ -2547,8 +2723,8 @@ async def _search_legado_source(
     headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
     charset = str(request.get("charset") or "").strip()
     timeout = httpx.Timeout(LEGADO_SEARCH_SOURCE_TIMEOUT, connect=LEGADO_SEARCH_CONNECT_TIMEOUT)
-    async with httpx.AsyncClient(
-        follow_redirects=True, timeout=timeout, headers=headers, verify=False
+    async with create_public_http_client(
+        follow_redirects=True, timeout=timeout, headers=headers
     ) as client:
         if method == "POST":
             response = await client.post(search_target, data=body)
@@ -3316,6 +3492,42 @@ def _validate_cover_extension(filename: str, content_type: str | None) -> str:
     raise HTTPException(status_code=400, detail="仅支持 JPG、PNG、WEBP 封面文件")
 
 
+def _validate_workflow_image_upload(filename: str, content_type: str | None) -> None:
+    supported_extensions = {
+        ".avif",
+        ".bmp",
+        ".heic",
+        ".heif",
+        ".jfif",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+    supported_content_types = {
+        "image/avif",
+        "image/bmp",
+        "image/heic",
+        "image/heif",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/webp",
+        "image/x-ms-bmp",
+    }
+    if Path(filename).suffix.lower() in supported_extensions:
+        return
+    normalized_content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_content_type in supported_content_types:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="仅支持 JPG、JFIF、PNG、WEBP、BMP、TIFF、AVIF、HEIC、HEIF 图片",
+    )
+
+
 def _allocate_book_dir(root_dir: Path, language: str, title: str) -> Path:
     base_dir = root_dir / language
     safe_title = _sanitize_book_title(title)
@@ -3468,6 +3680,334 @@ def _chapter_manifest_lock_for(book_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         locks[book_id] = lock
     return lock
+
+
+def _book_child_path(book_dir: Path, asset_path: str, *, label: str) -> Path:
+    resolved_book_dir = book_dir.resolve()
+    target_path = (resolved_book_dir / asset_path).resolve()
+    if not target_path.is_relative_to(resolved_book_dir):
+        raise HTTPException(status_code=400, detail=f"{label}包含非法路径")
+    return target_path
+
+
+def _source_manga_image_size(source_path: Path, *, page_number: int) -> tuple[int, int]:
+    if not source_path.is_file():
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页原图不存在")
+    try:
+        with Image.open(source_path) as source_image:
+            image_size = source_image.size
+            source_image.verify()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页原图无效：{exc}") from exc
+    if image_size[0] <= 0 or image_size[1] <= 0:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页原图尺寸无效")
+    return image_size
+
+
+def _decode_manga_translation_png(value: str, *, page_number: int) -> tuple[bytes, tuple[int, int]]:
+    encoded = value.strip()
+    max_encoded_size = ((MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_BYTES + 2) // 3) * 4
+    if not encoded or len(encoded) > max_encoded_size:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页译图为空或过大")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页译图 Base64 无效") from exc
+    if not image_bytes or len(image_bytes) > MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页译图为空或过大")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as translated_image:
+            translated_image.load()
+            image_size = translated_image.size
+            if (
+                image_size[0] <= 0
+                or image_size[1] <= 0
+                or image_size[0] * image_size[1] > MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_PIXELS
+            ):
+                raise ValueError("图片尺寸超出限制")
+            normalized = BytesIO()
+            if translated_image.mode == "CMYK":
+                translated_image.convert("RGB").save(normalized, format="PNG")
+            else:
+                translated_image.save(normalized, format="PNG")
+            normalized_bytes = normalized.getvalue()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页译图无效：{exc}") from exc
+
+    if not normalized_bytes or len(normalized_bytes) > MANGA_CHAPTER_TRANSLATION_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail=f"第 {page_number} 页译图编码后过大")
+    return normalized_bytes, image_size
+
+
+def _validate_complete_manga_translation_pages(
+    payload: MangaChapterTranslationPayload,
+    *,
+    page_count: int,
+) -> dict[int, Any]:
+    provided_numbers = [page.pageNumber for page in payload.pages]
+    if len(provided_numbers) != len(set(provided_numbers)):
+        raise HTTPException(status_code=400, detail="漫画译文页码不能重复")
+
+    expected_numbers = set(range(1, page_count + 1))
+    provided_number_set = set(provided_numbers)
+    if provided_number_set != expected_numbers:
+        missing = sorted(expected_numbers - provided_number_set)
+        unexpected = sorted(provided_number_set - expected_numbers)
+        details: list[str] = []
+        if missing:
+            details.append(f"缺少页码 {missing}")
+        if unexpected:
+            details.append(f"越界页码 {unexpected}")
+        suffix = f"：{'；'.join(details)}" if details else ""
+        raise HTTPException(status_code=400, detail=f"必须一次提交整章全部 {page_count} 页{suffix}")
+    return {page.pageNumber: page for page in payload.pages}
+
+
+def _publish_staged_manga_translation_files(
+    book_dir: Path,
+    staging_dir: Path,
+    relative_paths: list[str],
+) -> None:
+    resolved_book_dir = book_dir.resolve()
+    resolved_staging_dir = staging_dir.resolve()
+    backup_root = resolved_staging_dir / "__backup__"
+    prepared: list[tuple[Path, Path, Path]] = []
+    seen_targets: set[Path] = set()
+
+    for relative_path in relative_paths:
+        staged_path = (resolved_staging_dir / relative_path).resolve()
+        target_path = (resolved_book_dir / relative_path).resolve()
+        backup_path = (backup_root / relative_path).resolve()
+        if (
+            not staged_path.is_relative_to(resolved_staging_dir)
+            or not target_path.is_relative_to(resolved_book_dir)
+            or not backup_path.is_relative_to(backup_root)
+        ):
+            raise HTTPException(status_code=400, detail="漫画译文发布路径非法")
+        if not staged_path.is_file():
+            raise RuntimeError(f"漫画译文暂存文件不存在：{relative_path}")
+        if target_path in seen_targets:
+            raise HTTPException(status_code=400, detail="漫画译文发布路径重复")
+        if target_path.exists() and not target_path.is_file():
+            raise RuntimeError(f"漫画译文目标不是文件：{relative_path}")
+        seen_targets.add(target_path)
+        prepared.append((staged_path, target_path, backup_path))
+
+    published: list[tuple[Path, Path | None]] = []
+    try:
+        for staged_path, target_path, backup_path in prepared:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            backup: Path | None = None
+            if target_path.exists():
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target_path, backup_path)
+                backup = backup_path
+            published.append((target_path, backup))
+            os.replace(staged_path, target_path)
+    except Exception as publish_error:
+        rollback_errors: list[Exception] = []
+        for target_path, backup_path in reversed(published):
+            try:
+                if backup_path is not None and backup_path.exists():
+                    os.replace(backup_path, target_path)
+                else:
+                    target_path.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            (resolved_staging_dir / ".rollback-failed").write_text(
+                "漫画译文发布回滚失败，保留备份以便恢复。",
+                encoding="utf-8",
+            )
+            raise RuntimeError(
+                f"漫画译文发布失败且回滚未完成，备份位于 {resolved_staging_dir}"
+            ) from publish_error
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise
+
+
+async def _commit_manga_chapter_translation(
+    book: BookRecord,
+    chapter_index: int,
+    payload: MangaChapterTranslationPayload,
+) -> MangaChapterTranslationResponse:
+    if chapter_index <= 0:
+        raise HTTPException(status_code=400, detail="章节序号必须大于 0")
+    target_language = _validate_language(payload.targetLanguage)
+    book_dir = _resolve_book_dir(book)
+    manifest_lock = _chapter_manifest_lock_for(book.id)
+
+    async with manifest_lock:
+        manifest = _load_or_initialize_manifest(book, book_dir)
+        if chapter_index not in _build_manifest_lookup(manifest):
+            raise HTTPException(status_code=404, detail=f"未找到章节：{chapter_index}")
+
+    try:
+        await _ensure_source_chapter_cached(
+            book,
+            book_dir,
+            manifest,
+            chapter_index,
+            prepare_next=False,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"章节缓存失败：{exc}") from exc
+
+    async with manifest_lock:
+        manifest = _load_or_initialize_manifest(book, book_dir)
+        chapter = _build_manifest_lookup(manifest).get(chapter_index)
+        if chapter is None:
+            raise HTTPException(status_code=404, detail=f"未找到章节：{chapter_index}")
+
+        filename = str(chapter.get("file_name") or f"{chapter_index:04d}-chapter-{chapter_index}.txt")
+        source_chapter_path = _book_child_path(book_dir, filename, label="章节文件")
+        if not source_chapter_path.is_file():
+            raise HTTPException(status_code=400, detail=f"章节尚未缓存：{chapter_index}")
+
+        raw_image_files = chapter.get("image_files")
+        if not isinstance(raw_image_files, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw_image_files
+        ):
+            raise HTTPException(status_code=400, detail="章节原图清单无效")
+        image_files = [item.strip() for item in raw_image_files]
+        if not image_files:
+            raise HTTPException(status_code=400, detail="该漫画章节没有可写入译文的原图")
+        if len(image_files) != len(set(image_files)):
+            raise HTTPException(status_code=400, detail="章节原图清单包含重复路径")
+        pages_by_number = _validate_complete_manga_translation_pages(
+            payload,
+            page_count=len(image_files),
+        )
+
+        translated_pages: list[MangaTranslatedPagePayload] = []
+        translated_image_files: list[str] = []
+        normalized_images: list[tuple[str, bytes]] = []
+        resolved_targets: set[Path] = set()
+        for page_number, source_asset_path in enumerate(image_files, start=1):
+            source_image_path = _book_child_path(
+                book_dir,
+                source_asset_path,
+                label=f"第 {page_number} 页原图",
+            )
+            source_image_size = _source_manga_image_size(
+                source_image_path,
+                page_number=page_number,
+            )
+            page_request = pages_by_number[page_number]
+            normalized_image, translated_image_size = _decode_manga_translation_png(
+                page_request.outputImageBase64,
+                page_number=page_number,
+            )
+            if translated_image_size != source_image_size:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"第 {page_number} 页译图尺寸 {translated_image_size} "
+                        f"与原图尺寸 {source_image_size} 不一致"
+                    ),
+                )
+
+            translated_asset_path = build_translated_image_asset_path(source_asset_path)
+            translated_image_path = _book_child_path(
+                book_dir,
+                translated_asset_path,
+                label=f"第 {page_number} 页译图",
+            )
+            if translated_image_path in resolved_targets:
+                raise HTTPException(status_code=400, detail="章节译图路径发生冲突")
+            resolved_targets.add(translated_image_path)
+
+            try:
+                parsed_project = parse_manga_project(
+                    page_request.project,
+                    default_image_key=Path(source_asset_path).name,
+                    image_size=source_image_size,
+                    label=f"第 {page_number} 页工程数据",
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"第 {page_number} 页工程数据无效：{exc}",
+                ) from exc
+            page_translation = page_request.pageTranslation.strip() or "\n".join(
+                region.translation.strip() for region in parsed_project.regions if region.translation.strip()
+            )
+            translated_pages.append(
+                MangaTranslatedPagePayload(
+                    page_number=page_number,
+                    image_size=source_image_size,
+                    target_language=target_language,
+                    render_mode="ocr_pipeline",
+                    source_image_file=source_asset_path,
+                    translated_image_file=translated_asset_path,
+                    page_translation=page_translation,
+                    regions=parsed_project.regions,
+                )
+            )
+            translated_image_files.append(translated_asset_path)
+            normalized_images.append((translated_asset_path, normalized_image))
+
+        page_translations = [page.page_translation for page in translated_pages]
+        source_title = str(chapter.get("title") or f"第{chapter_index}章")
+        translated_text = _merge_page_translations(source_title, page_translations)
+        translated_filename = build_translated_filename(filename)
+        translated_meta_filename = build_translated_meta_filename(filename)
+        updated_manifest = copy.deepcopy(manifest)
+        updated_chapter = _build_manifest_lookup(updated_manifest)[chapter_index]
+        updated_chapter["translated_meta_file_name"] = translated_meta_filename
+        updated_chapter["translated_image_files"] = translated_image_files
+        updated_chapter["translated"] = True
+        updated_chapter["translated_file_name"] = translated_filename
+        updated_chapter["page_count"] = len(image_files)
+
+        staging_dir = book_dir / f".manga-translation-{uuid4().hex}.tmp"
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        published = False
+        try:
+            for translated_asset_path, normalized_image in normalized_images:
+                staged_image_path = _book_child_path(
+                    staging_dir,
+                    translated_asset_path,
+                    label="译图暂存路径",
+                )
+                staged_image_path.parent.mkdir(parents=True, exist_ok=True)
+                staged_image_path.write_bytes(normalized_image)
+            save_translated_page_payload(
+                staging_dir,
+                filename,
+                page_translations,
+                translated_image_files,
+                translated_pages=translated_pages,
+            )
+            translated_text_path(staging_dir, filename).write_text(translated_text, encoding="utf-8")
+            save_manifest(staging_dir, updated_manifest)
+            _publish_staged_manga_translation_files(
+                book_dir,
+                staging_dir,
+                [
+                    *translated_image_files,
+                    translated_meta_filename,
+                    translated_filename,
+                    "manifest.json",
+                ],
+            )
+            with suppress(OSError):
+                translated_checkpoint_path(book_dir, filename).unlink(missing_ok=True)
+            published = True
+        finally:
+            if published or not (staging_dir / ".rollback-failed").exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    _refresh_book_state(book)
+    return MangaChapterTranslationResponse(
+        bookId=book.id,
+        chapterIndex=chapter_index,
+        pageCount=len(image_files),
+        translatedImageFiles=translated_image_files,
+    )
 
 
 async def _cache_source_chapter_by_id(book_id: str, chapter_index: int) -> None:
@@ -3692,7 +4232,16 @@ def _load_or_initialize_manifest(book: BookRecord, book_dir: Path) -> dict:
 
 
 def _hydrate_book_record(book: BookRecord) -> BookRecord:
-    manifest = _load_or_initialize_manifest(book, _resolve_book_dir(book))
+    book_dir = _resolve_book_dir(book)
+    manifest = _load_or_initialize_manifest(book, book_dir)
+    if book_dir.exists():
+        chapters = list(_build_manifest_lookup(manifest).values())
+        book = _update_book_chapter_counts(
+            book,
+            chapter_count=len(chapters),
+            downloaded_count=sum(bool(chapter.get("downloaded")) for chapter in chapters),
+            translated_count=sum(bool(chapter.get("translated")) for chapter in chapters),
+        )
     cover = _resolve_book_cover(book, manifest)
     if cover == book.cover:
         return book
@@ -3757,6 +4306,11 @@ def _build_book_detail(book: BookRecord) -> BookDetailResponse:
                 lastReadAt=progress.lastReadAt,
             )
         )
+        refreshed_book = refreshed_book.model_copy(update={
+            "lastReadChapterIndex": progress.lastChapterIndex,
+            "lastReadPageIndex": progress.lastPageIndex,
+            "lastReadPageCount": progress.lastPageCount,
+        })
 
     return BookDetailResponse(
         book=refreshed_book,
@@ -3787,23 +4341,33 @@ def _normalize_progress_anchor_type(value: str | None) -> str:
 
 
 def _refresh_book_state(book: BookRecord, chapters: list[ChapterRecord] | None = None) -> BookRecord:
-    current_chapters = chapters or _load_chapter_records(book)
-    translated = any(chapter.translated for chapter in current_chapters)
-    downloaded_count = len([chapter for chapter in current_chapters if chapter.downloaded])
-    if current_chapters and all(chapter.translated for chapter in current_chapters):
+    current_chapters = chapters if chapters is not None else _load_chapter_records(book)
+    return _update_book_chapter_counts(
+        book,
+        chapter_count=len(current_chapters),
+        downloaded_count=sum(chapter.downloaded for chapter in current_chapters),
+        translated_count=sum(chapter.translated for chapter in current_chapters),
+    )
+
+
+def _update_book_chapter_counts(
+    book: BookRecord, *, chapter_count: int, downloaded_count: int, translated_count: int,
+) -> BookRecord:
+    translated = translated_count > 0
+    if chapter_count > 0 and translated_count == chapter_count:
         status = "已完成"
-    elif current_chapters and downloaded_count == len(current_chapters):
+    elif chapter_count > 0 and downloaded_count == chapter_count:
         status = "已下载"
     elif downloaded_count > 0:
         status = "解析中"
     else:
         status = "待处理"
-    if book.chapterCount == len(current_chapters) and book.translated == translated and book.status == status:
+    if book.chapterCount == chapter_count and book.translated == translated and book.status == status:
         return book
 
     refreshed = book.model_copy(
         update={
-            "chapterCount": len(current_chapters),
+            "chapterCount": chapter_count,
             "translated": translated,
             "status": status,
             "updatedAt": _now(),

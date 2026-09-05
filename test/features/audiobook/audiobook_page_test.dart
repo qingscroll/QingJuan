@@ -6,8 +6,62 @@ import 'package:qingjuan/core/models/tts_speech_style.dart';
 import 'package:qingjuan/features/audiobook/audiobook_controller.dart';
 import 'package:qingjuan/features/audiobook/audiobook_page.dart';
 import 'package:qingjuan/shared/responsive.dart';
+import 'package:qingjuan/mobile/mobile_action_button.dart';
+import '../reader/mobile_fixture_capture.dart';
 
 void main() {
+  setUpAll(loadMobileCaptureFonts);
+  for (final brightness in Brightness.values) {
+    testWidgets('mobile listening fixture ${brightness.name}', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final key = GlobalKey();
+      final detail = _singleChapterDetail();
+      await tester.pumpWidget(RepaintBoundary(
+          key: key,
+          child: FluentApp(
+            debugShowCheckedModeBanner: false,
+            theme: captureMobileFixtures
+                ? buildQingJuanTheme(brightness,
+                        platform: TargetPlatform.android)
+                    .copyWith(
+                        typography: buildQingJuanTheme(brightness,
+                                platform: TargetPlatform.android)
+                            .typography
+                            .apply(fontFamily: 'Roboto'))
+                : buildQingJuanTheme(brightness,
+                    platform: TargetPlatform.android),
+            builder: captureMobileFixtures
+                ? (context, child) => DefaultTextStyle(
+                    style: const TextStyle(fontFamily: 'Roboto'), child: child!)
+                : null,
+            home: UiPlatformScope(
+                platform: TargetPlatform.android,
+                child: AudiobookPage(
+                  detail: detail,
+                  engine: _PageTestTtsEngine(),
+                  loadChapter: (index, mode) async => ChapterContent(
+                      chapter: detail.chapters.single,
+                      content: '清晨的光落在窗边，照亮了昨夜未曾合上的书。阅读让日常多了一份安静。',
+                      paragraphs: const [],
+                      mode: mode,
+                      translatedAvailable: false,
+                      imageSources: const [],
+                      pageTranslations: const []),
+                )),
+          )));
+      await tester.pumpAndSettle();
+      await saveMobileFixture(tester, key, 'audiobook-${brightness.name}');
+      await tester.tap(find.byIcon(FluentIcons.settings));
+      await tester.pumpAndSettle();
+      await saveMobileFixture(
+          tester, key, 'audiobook-settings-${brightness.name}');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('audiobook page loads text and exposes playback controls',
       (tester) async {
     final engine = _PageTestTtsEngine();
@@ -32,11 +86,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('播放'), findsOneWidget);
+    expect(find.textContaining('用于测试听书功能'), findsOneWidget);
+    await tester.tap(find.byIcon(FluentIcons.settings));
+    await tester.pumpAndSettle();
     expect(find.text('语速'), findsOneWidget);
     expect(find.text('音量'), findsOneWidget);
     expect(find.text('朗读风格'), findsOneWidget);
     expect(find.text('自然叙述'), findsOneWidget);
-    expect(find.textContaining('用于测试听书功能'), findsOneWidget);
 
     await tester.tap(find.byType(ComboBox<TtsSpeechStyle>));
     await tester.pumpAndSettle();
@@ -46,11 +102,46 @@ void main() {
     expect(engine.rates.last, closeTo(0.42, 0.001));
     expect(engine.pitches.last, closeTo(1.01, 0.001));
 
-    await tester.tap(find.widgetWithText(FilledButton, '播放'));
+    Navigator.of(tester.element(find.text('声音与播放'))).pop();
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(MobileActionButton, '播放'));
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(engine.spoken, <String>['这是一段用于测试听书功能的正文。']);
     expect(find.textContaining('本书播放完成'), findsOneWidget);
+  });
+
+  testWidgets('mobile listening retry button reloads the failed chapter',
+      (tester) async {
+    final detail = _singleChapterDetail();
+    var attempts = 0;
+    await tester.pumpWidget(FluentApp(
+        home: AudiobookPage(
+      detail: detail,
+      engine: _PageTestTtsEngine(),
+      loadChapter: (index, mode) async {
+        attempts += 1;
+        if (attempts == 1) throw StateError('连接暂时中断');
+        return ChapterContent(
+            chapter: detail.chapters.single,
+            content: '重试后恢复的正文。',
+            paragraphs: const ['重试后恢复的正文。'],
+            mode: mode,
+            translatedAvailable: false,
+            imageSources: const [],
+            pageTranslations: const []);
+      },
+    )));
+    await tester.pumpAndSettle();
+    expect(find.text('暂时无法播放'), findsOneWidget);
+    final retry = find.widgetWithText(MobileActionButton, '重试播放');
+    await tester.ensureVisible(retry);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    expect(attempts, 2);
+    expect(find.text('重试后恢复的正文。'), findsOneWidget);
+    expect(find.text('暂时无法播放'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('audiobook styles remain usable at 200 percent text scaling',
@@ -83,6 +174,8 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 100));
 
+    await tester.tap(find.byIcon(FluentIcons.settings));
+    await tester.pumpAndSettle();
     expect(find.text('朗读风格'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

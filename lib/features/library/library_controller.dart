@@ -21,6 +21,9 @@ class LibraryController extends ChangeNotifier {
   String? linkJobConnectionError;
   Timer? _linkJobPoller;
   bool _linkJobLoadInProgress = false;
+  bool _linkJobStartInProgress = false;
+  String? _linkJobOperationKey;
+  String? _linkJobMode;
   bool _disposed = false;
   int _contextGeneration = 0;
   double? importProgress;
@@ -32,6 +35,10 @@ class LibraryController extends ChangeNotifier {
     _linkJobPoller?.cancel();
     _linkJobPoller = null;
     _linkJobLoadInProgress = false;
+    _linkJobStartInProgress = false;
+    _linkJobOperationKey = null;
+    _linkJobMode = null;
+    importProgress = null;
     books = const [];
     query = '';
     error = null;
@@ -83,16 +90,34 @@ class LibraryController extends ChangeNotifier {
   Future<BookPreview> preview(JsonMap payload) => api.previewBook(payload);
 
   Future<void> startLinkJob(String mode, JsonMap payload) async {
-    if (hasActiveLinkJob) return;
+    if (hasActiveLinkJob || _linkJobStartInProgress) {
+      throw const ApiException('已有链接任务正在处理，请等待当前任务完成后重试');
+    }
     final generation = _contextGeneration;
+    _linkJobStartInProgress = true;
     linkJobConnectionError = null;
+    if (linkJob != null ||
+        _linkJobMode != mode ||
+        !mapEquals(linkJobPayload, payload)) {
+      _linkJobOperationKey = null;
+    }
+    _linkJobOperationKey ??= ApiClient.createOperationKey();
+    _linkJobMode = mode;
     linkJobPayload = Map<String, dynamic>.from(payload);
-    final startedJob = await api.startLinkJob(mode, payload);
-    if (_disposed || generation != _contextGeneration) return;
-    linkJob = startedJob;
-    notifyListeners();
-    _updateLinkJobPolling();
-    await refreshLinkJob();
+    // The previous terminal job must not make an unconfirmed new operation
+    // appear consumed: a lost response must retain this new operation's key.
+    linkJob = null;
+    try {
+      final startedJob = await api.startLinkJob(mode, payload,
+          idempotencyKey: _linkJobOperationKey);
+      if (_disposed || generation != _contextGeneration) return;
+      linkJob = startedJob;
+      notifyListeners();
+      _updateLinkJobPolling();
+      await refreshLinkJob();
+    } finally {
+      if (generation == _contextGeneration) _linkJobStartInProgress = false;
+    }
   }
 
   Future<void> refreshLinkJob() async {
@@ -102,7 +127,11 @@ class LibraryController extends ChangeNotifier {
     final generation = _contextGeneration;
     try {
       final next = await api.fetchLinkJob(current.id);
-      if (_disposed || generation != _contextGeneration) return;
+      if (_disposed ||
+          generation != _contextGeneration ||
+          linkJob?.id != current.id) {
+        return;
+      }
       linkJob = next;
       linkJobConnectionError = null;
       _updateLinkJobPolling();
@@ -123,12 +152,14 @@ class LibraryController extends ChangeNotifier {
   }
 
   void clearLinkJob() {
-    if (hasActiveLinkJob) return;
+    if (hasActiveLinkJob || _linkJobStartInProgress) return;
     _linkJobPoller?.cancel();
     _linkJobPoller = null;
     linkJob = null;
     linkJobPayload = null;
     linkJobConnectionError = null;
+    _linkJobOperationKey = null;
+    _linkJobMode = null;
     notifyListeners();
   }
 

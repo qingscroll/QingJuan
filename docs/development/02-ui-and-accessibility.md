@@ -2,7 +2,7 @@
 
 ## 1. UI 技术基线
 
-Windows / Android 客户端必须使用 Flutter `fluent_ui`。Microsoft
+Windows 使用 Flutter `fluent_ui`；Android 使用统一主题的 Flutter 原生 / Material、flutter_miuix 与移动兼容组件。移动端以[2026重构规范](../design/mobile-redesign.md)为准，本文旧移动布局示例不再作为设计约束。Microsoft
 [`microsoft/fluentui`](https://github.com/microsoft/fluentui) 是视觉与交互参考；
 其 React/Web 包不适用于 Flutter，不得为了名称一致混入 WebView 或第二套前端框架。
 

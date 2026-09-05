@@ -62,7 +62,7 @@ PR、`main` / `master` 推送（含合并推送）、手动触发，都先并行
 3. **Bash / systemd 校验** + Linux 原生后端 健康 / 认证 / 数据目录 冒烟；
 4. **React 管理界面**：TypeScript、测试、生产构建，并校验 `python-backend/app/admin_static/` 已提交静态资源与构建结果**一致**。
 
-4 道全绿 → CI 才并行构建 Android Release APK 与含随包后端的 Windows x64 组合包，并上传到本次 Actions 运行。Android 固定 JDK 17，两端统一 Flutter 3.24.3；构建**不依赖**开发机全局 Gradle、签名文件、缓存私配。
+4 道全绿 → CI 才并行构建 Android Release APK 与含随包后端的 Windows x64 组合包，并上传到本次 Actions 运行。Android 固定 JDK 17，两端统一 Flutter 3.44.4；构建**不依赖**开发机全局 Gradle、签名文件、缓存私配。
 
 Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI）、`npm`（React）、`github-actions`（CI）。升级前读变更说明，尤其注意 Dart SDK / AGP / 平台插件 / FastAPI / Pydantic；不要在一个 PR 里无差别升所有大版本。
 
@@ -75,7 +75,7 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 - 用户 / 发布负责人指定版本时以其语义版本为准，但 `build` 必须大于上一版；major / minor / 预发布 / 跳号不得自行推断。
 - 日常调试 / 重复构建**不得改版本号**；只有准备形成新发布才递增。
 - 修改版本后验证：Android `versionName` / `versionCode`、FastAPI 元数据、Windows 文件属性都来自同一版本源；禁止在 Dart / Python / Kotlin / C++ / 发布脚本里出现独立硬编码版本。
-- 当前基线：已发布 `2.0.1+33`；后续 build 必须 > `33`，不得回退 / 复用。`2.0.2+34` 为本次发布候选，面向移动端阅读体验优化（性能与书页稳定性），对外标签 `v2.0.2`。
+- 当前基线：已发布 `2.1.0+40`；后续 build 必须 > `40`，不得回退 / 复用。`2.1.0+40` 为本次发布候选，面向移动端重设计、漫画文本工作台、书架译文写回与 Windows 托盘体验，对外标签 `v2.1.0`。
 
 ### 发布前清单
 
@@ -92,8 +92,8 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 合并并确认 `main` 的 CI 全绿后：
 
 ```powershell
-git tag v2.0.2
-git push origin v2.0.2
+git tag v2.1.0
+git push origin v2.1.0
 ```
 
 `release.yml` 会重跑 Flutter 检查 + Ruff + Pytest，再并行构建 Windows ZIP 与签名 Android APK；**只有标签、`pubspec.yaml`、两个客户端版本、后端元数据版本全部一致**才上传产物与 SHA-256 并创建 Release。禁止手工跳过失败门禁、用未提交本地工作区制作正式包。
@@ -125,6 +125,7 @@ git push origin v2.0.2
 - 迁移到 Linux 时绝对路径转相对存储键，不直接复用 Windows 路径。
 - 已有密钥保留在后端，升级后只读接口返回配置状态；客户端空值不得误清已有密钥。
 - 回滚必须保留升级前的完整备份；新版本写入后不让旧版本直接打开同一生产目录。
+- Linux 升级将停服、备份验证和版本切换分别记录。数据库与 WAL 完整复制并通过完整性校验前，失败只能重启旧服务，不能用部分备份覆盖生产数据；部署回归测试须注入复制中途失败并验证原数据库与 WAL 保持完整。重新安装或轮换连接 Token 后必须重启服务，使新的环境配置立即生效。
 
 ## 7. **禁止的反模式**（红牌，出现即退）
 

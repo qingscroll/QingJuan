@@ -1,9 +1,37 @@
 import 'dart:async';
 
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../core/window/desktop_tray.dart';
+import 'responsive.dart';
+
 const desktopTitleBarHeight = 32.0;
+
+/// Keeps the Windows window chrome outside the app [Navigator].
+///
+/// Routes are rendered in [child], so pushing a detail page or reader never
+/// replaces the title bar. Mobile platforms keep using their native system
+/// chrome and therefore receive [child] unchanged.
+class DesktopWindowFrame extends StatelessWidget {
+  const DesktopWindowFrame({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (UiPlatformScope.of(context) != TargetPlatform.windows) return child;
+    return Column(
+      key: const ValueKey('desktop-window-frame'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const DesktopTitleBar(),
+        Expanded(child: child),
+      ],
+    );
+  }
+}
 
 /// v1.3.4 Windows 自绘标题栏。
 class DesktopTitleBar extends StatefulWidget {
@@ -15,6 +43,29 @@ class DesktopTitleBar extends StatefulWidget {
 
 class _DesktopTitleBarState extends State<DesktopTitleBar> with WindowListener {
   bool _isMaximized = false;
+  bool _isHidingToTray = false;
+  String? _trayError;
+
+  Future<void> _hideToTray() async {
+    if (_isHidingToTray) return;
+    setState(() {
+      _isHidingToTray = true;
+      _trayError = null;
+    });
+    try {
+      await DesktopTray.hideToTray();
+    } on PlatformException {
+      if (mounted) {
+        setState(() => _trayError = '无法收起到托盘，请重试');
+      }
+    } on MissingPluginException {
+      if (mounted) {
+        setState(() => _trayError = '当前程序不支持托盘，请更新完整客户端');
+      }
+    } finally {
+      if (mounted) setState(() => _isHidingToTray = false);
+    }
+  }
 
   @override
   void initState() {
@@ -50,17 +101,27 @@ class _DesktopTitleBarState extends State<DesktopTitleBar> with WindowListener {
                   padding: const EdgeInsetsDirectional.only(start: 16),
                   child: Align(
                     alignment: AlignmentDirectional.centerStart,
-                    child: Text(
-                      '青卷',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.typography.body?.copyWith(
-                        fontWeight: FontWeight.w600,
+                    child: Semantics(
+                      liveRegion: _trayError != null,
+                      child: Text(
+                        _trayError == null ? '青卷' : '青卷 · $_trayError',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.typography.body?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
+            ),
+            _CaptionButton(
+              key: const ValueKey('window-hide-to-tray'),
+              tooltip: _isHidingToTray ? '正在收起到托盘' : '收起到托盘（后台继续运行）',
+              icon: FluentIcons.mini_contract,
+              onPressed:
+                  _isHidingToTray ? null : () => unawaited(_hideToTray()),
             ),
             _CaptionButton(
               key: const ValueKey('window-minimize'),
@@ -105,7 +166,7 @@ class _CaptionButton extends StatelessWidget {
 
   final String tooltip;
   final IconData icon;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final bool isClose;
 
   @override

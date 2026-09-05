@@ -1,6 +1,7 @@
 import 'package:fluent_ui/fluent_ui.dart';
 
 import '../../app/app_state.dart';
+import '../../shared/mobile_palette.dart';
 
 class ReaderPalette {
   const ReaderPalette({
@@ -39,6 +40,22 @@ class ReaderPalette {
         accent: value,
         isDark: isDark,
       );
+
+  /// Android uses a neutral black reading surface; desktop keeps its palette.
+  ReaderPalette get mobilePalette => mode == ReaderPaletteMode.night
+      ? const ReaderPalette(
+          mode: ReaderPaletteMode.night,
+          name: '夜间',
+          background: Color(0xFF090909),
+          surface: Color(0xFF151515),
+          text: Color(0xFFCECFCC),
+          secondaryText: Color(0xFFA8ADA9),
+          divider: Color(0xFF2A2A2A),
+          controlFill: Color(0xFF242424),
+          accent: MobilePalette.accentDark,
+          isDark: true,
+        )
+      : this;
 
   Color get overlay =>
       isDark ? const Color(0xA6000000) : const Color(0x520F0D09);
@@ -131,7 +148,7 @@ extension ReaderLineSpacingPresentation on ReaderLineSpacing {
 
   double get height => switch (this) {
         ReaderLineSpacing.compact => 1.62,
-        ReaderLineSpacing.standard => 1.82,
+        ReaderLineSpacing.standard => 1.8,
         ReaderLineSpacing.relaxed => 2.04,
       };
 }

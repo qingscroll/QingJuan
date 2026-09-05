@@ -1,6 +1,8 @@
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/foundation.dart';
 
+import '../shared/mobile_palette.dart';
+
 /// v1.3.4 Windows 桌面端使用的青绿色 Fluent 强调色。
 final qingJuanAccent = AccentColor.swatch(const <String, Color>{
   'darkest': Color(0xFF06433D),
@@ -12,23 +14,23 @@ final qingJuanAccent = AccentColor.swatch(const <String, Color>{
   'lightest': Color(0xFFD5EFEC),
 });
 
-/// Android 移动端使用的青卷蓝色强调色。
+/// Android 移动端使用中性纸白与青瓷强调色。
 final qingJuanMobileAccent = AccentColor.swatch(const <String, Color>{
-  'darkest': Color(0xFF123A8C),
-  'darker': Color(0xFF1850BD),
-  'dark': Color(0xFF2465D8),
-  'normal': Color(0xFF3377F6),
-  'light': Color(0xFF5B93F8),
-  'lighter': Color(0xFFA9C7FF),
-  'lightest': Color(0xFFEAF2FF),
+  'darkest': Color(0xFF1A352E),
+  'darker': Color(0xFF254A40),
+  'dark': Color(0xFF2C564C),
+  'normal': MobilePalette.accent,
+  'light': MobilePalette.accentDark,
+  'lighter': Color(0xFFC6D9D1),
+  'lightest': MobilePalette.accentSoft,
 });
 
-const qingJuanMobileBlue = Color(0xFF3377F6);
-const qingJuanPaper = Color(0xFFF6F7F9);
-const qingJuanPaperSurface = Color(0xFFFFFFFF);
-const qingJuanInk = Color(0xFF111318);
-const qingJuanDarkSurface = Color(0xFF191C22);
-const qingJuanDarkElevated = Color(0xFF22262E);
+const qingJuanMobilePrimary = MobilePalette.accent;
+const qingJuanPaper = MobilePalette.paper;
+const qingJuanPaperSurface = MobilePalette.card;
+const qingJuanInk = MobilePalette.night;
+const qingJuanDarkSurface = MobilePalette.nightCard;
+const qingJuanDarkElevated = MobilePalette.nightInset;
 
 FluentThemeData buildQingJuanTheme(
   Brightness brightness, {
@@ -146,7 +148,7 @@ FluentThemeData _buildMobileTheme(Brightness brightness) {
         isDark ? qingJuanDarkElevated : qingJuanPaperSurface,
     menuColor: isDark ? qingJuanDarkElevated : qingJuanPaperSurface,
     inactiveBackgroundColor:
-        isDark ? const Color(0xFF292D35) : const Color(0xFFE9EDF3),
+        isDark ? MobilePalette.nightInset : MobilePalette.inset,
     cardColor: isDark ? qingJuanDarkSurface : qingJuanPaperSurface,
     navigationPaneTheme: NavigationPaneThemeData(
       animationDuration: const Duration(milliseconds: 110),
@@ -166,35 +168,35 @@ FluentThemeData _buildMobileTheme(Brightness brightness) {
     typography: Typography.raw(
       caption: TextStyle(
         fontSize: 12,
-        color: isDark ? const Color(0xFF9FA6B2) : const Color(0xFF727985),
+        color: isDark ? MobilePalette.nightMuted : MobilePalette.muted,
       ),
       body: TextStyle(
         fontSize: 14,
-        color: isDark ? const Color(0xFFE8EBF0) : const Color(0xFF252A32),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
       bodyLarge: TextStyle(
         fontSize: 16,
-        color: isDark ? const Color(0xFFF1F3F6) : const Color(0xFF1F242C),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
       subtitle: TextStyle(
         fontSize: 18,
         fontWeight: FontWeight.w600,
-        color: isDark ? const Color(0xFFF3F5F8) : const Color(0xFF181C23),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
       title: TextStyle(
         fontSize: 28,
         fontWeight: FontWeight.w700,
-        color: isDark ? const Color(0xFFF7F8FA) : const Color(0xFF15191F),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
       titleLarge: TextStyle(
         fontSize: 34,
         fontWeight: FontWeight.w700,
-        color: isDark ? const Color(0xFFF7F8FA) : const Color(0xFF15191F),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
       display: TextStyle(
         fontSize: 42,
         fontWeight: FontWeight.w600,
-        color: isDark ? const Color(0xFFF7F8FA) : const Color(0xFF15191F),
+        color: isDark ? MobilePalette.nightInk : MobilePalette.ink,
       ),
     ),
   );

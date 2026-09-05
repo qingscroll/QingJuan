@@ -1,4 +1,5 @@
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/rendering.dart' as rendering;
 
 import '../../app/app_scope.dart';
 import '../../app/app_theme.dart';
@@ -279,7 +280,8 @@ class _LibraryContent extends StatelessWidget {
     final scaleAllowance = 48 * (textScale - 1).clamp(0.0, 1.0).toDouble();
     final recent = _mostRecentBook(allBooks);
     return CustomScrollView(
-      cacheExtent: compact ? 360 : 520,
+      scrollCacheExtent:
+          rendering.ScrollCacheExtent.pixels(compact ? 360 : 520),
       slivers: <Widget>[
         if (compact && recent != null) ...<Widget>[
           SliverToBoxAdapter(
@@ -433,7 +435,7 @@ class _ContinueReadingCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '读到第 ${book.lastReadChapterIndex} 章',
+                      '读到${book.readingPositionLabel}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.typography.caption,
@@ -442,7 +444,7 @@ class _ContinueReadingCard extends StatelessWidget {
                     ProgressBar(
                       value: progress,
                       strokeWidth: 4,
-                      activeColor: qingJuanMobileBlue,
+                      activeColor: qingJuanMobilePrimary,
                     ),
                     const SizedBox(height: 9),
                     Align(

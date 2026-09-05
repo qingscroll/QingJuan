@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app import main
+from app.api.routers import library_router
+from app.application import create_application
 from app.link_jobs import LinkJobStore
 from app.models import AddBookPayload, BookRecord, PreviewResponse
+from app.security import API_PREFIX
 
 
 def _payload() -> AddBookPayload:
@@ -16,6 +21,92 @@ def _payload() -> AddBookPayload:
         bookKind="漫画",
         language="中文",
     )
+
+
+def test_idempotent_link_creation_is_atomic_and_returns_existing_terminal_job() -> None:
+    store = LinkJobStore()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(
+            lambda _: store.create_or_get("import", _payload(), "user-first", "operation-1"),
+            range(20),
+        ))
+    assert sum(created for _, created in results) == 1
+    assert len({job.id for job, _ in results}) == 1
+    first = results[0][0]
+    store.fail(first.id, "上游暂时不可用")
+    repeated, created = store.create_or_get("import", _payload(), "user-first", "operation-1")
+    assert not created
+    assert repeated.id == first.id
+    assert repeated.status == "failed"
+
+
+def test_idempotency_keys_are_owner_scoped_and_optional() -> None:
+    store = LinkJobStore()
+    first, _ = store.create_or_get("import", _payload(), "user-first", "same-key")
+    second, created = store.create_or_get("import", _payload(), "user-second", "same-key")
+    assert created and first.id != second.id
+    without_key, _ = store.create_or_get("import", _payload(), "user-first")
+    repeated_without_key, created = store.create_or_get("import", _payload(), "user-first")
+    assert created and without_key.id != repeated_without_key.id
+
+
+@pytest.mark.asyncio
+async def test_link_job_api_reuses_one_job_and_rejects_changed_request(monkeypatch) -> None:
+    store = LinkJobStore()
+    started: list[str] = []
+
+    async def fake_run(job_id: str) -> None:
+        started.append(job_id)
+        store.start(job_id, "测试任务已启动")
+
+    monkeypatch.setattr(main, "LINK_JOB_STORE", store)
+    monkeypatch.setattr(main, "_run_link_job", fake_run)
+    monkeypatch.setattr(main.app.state, "link_job_tasks", set(), raising=False)
+    application = create_application(routers=[library_router], api_prefix=API_PREFIX)
+    request = {"mode": "import", "payload": _payload().model_dump(mode="json")}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://testserver",
+    ) as client:
+        responses = await asyncio.gather(*[
+            client.post(f"{API_PREFIX}/books/link-jobs", json=request,
+                        headers={"Idempotency-Key": "operation-1"})
+            for _ in range(8)
+        ])
+        await asyncio.sleep(0)
+        assert all(response.status_code == 200 for response in responses)
+        ids = {response.json()["id"] for response in responses}
+        assert len(ids) == 1
+        assert started == list(ids)
+        for changed in (
+            {**request, "mode": "preview"},
+            {**request, "payload": {**request["payload"], "sourceUrl": "https://example.com/comic/2"}},
+        ):
+            conflict = await client.post(
+                f"{API_PREFIX}/books/link-jobs", json=changed,
+                headers={"Idempotency-Key": "operation-1"},
+            )
+            assert conflict.status_code == 409
+            assert "Idempotency-Key" in conflict.json()["detail"]
+        assert len(started) == 1
+        fresh = await client.post(f"{API_PREFIX}/books/link-jobs", json=request)
+        assert fresh.status_code == 200
+        assert fresh.json()["id"] not in ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["", "x" * 129, "contains space"])
+async def test_link_job_api_rejects_invalid_idempotency_key(monkeypatch, key: str) -> None:
+    monkeypatch.setattr(main, "LINK_JOB_STORE", LinkJobStore())
+    application = create_application(routers=[library_router], api_prefix=API_PREFIX)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            f"{API_PREFIX}/books/link-jobs",
+            json={"mode": "preview", "payload": _payload().model_dump(mode="json")},
+            headers={"Idempotency-Key": key},
+        )
+        assert response.status_code == 422
 
 
 def test_link_job_store_tracks_progress_and_incremental_logs() -> None:

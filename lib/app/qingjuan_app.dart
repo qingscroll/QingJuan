@@ -15,10 +15,13 @@ import '../core/backend/local_backend_process.dart';
 import '../core/backend/user_session_store.dart';
 import '../features/auth/auth_controller.dart';
 import '../features/library/library_controller.dart';
+import '../features/manga_translation/manga_translation_coordinator.dart';
 import '../features/settings/settings_controller.dart';
 import '../features/shell/app_shell.dart';
 import '../features/sources/sources_controller.dart';
 import '../features/tasks/tasks_controller.dart';
+import '../mobile/mobile_app.dart';
+import '../shared/desktop_title_bar.dart';
 import '../shared/responsive.dart';
 import 'app_scope.dart';
 import 'app_state.dart';
@@ -34,6 +37,7 @@ class QingJuanApp extends StatefulWidget {
     required this.sources,
     required this.tasks,
     required this.settings,
+    required this.mangaTranslation,
   });
 
   @visibleForTesting
@@ -46,6 +50,7 @@ class QingJuanApp extends StatefulWidget {
     required SourcesController sources,
     required TasksController tasks,
     required SettingsController settings,
+    MangaTranslationCoordinator? mangaTranslation,
   }) =>
       QingJuanApp._(
         appState: appState,
@@ -56,6 +61,7 @@ class QingJuanApp extends StatefulWidget {
         sources: sources,
         tasks: tasks,
         settings: settings,
+        mangaTranslation: mangaTranslation ?? MangaTranslationCoordinator(api),
       );
 
   static Future<QingJuanApp> bootstrap() async {
@@ -99,6 +105,10 @@ class QingJuanApp extends StatefulWidget {
       sources: SourcesController(api),
       tasks: TasksController(api),
       settings: SettingsController(api),
+      mangaTranslation: MangaTranslationCoordinator(
+        api,
+        preferences: preferences,
+      ),
     );
   }
 
@@ -110,6 +120,7 @@ class QingJuanApp extends StatefulWidget {
   final SourcesController sources;
   final TasksController tasks;
   final SettingsController settings;
+  final MangaTranslationCoordinator mangaTranslation;
 
   @override
   State<QingJuanApp> createState() => _QingJuanAppState();
@@ -117,6 +128,7 @@ class QingJuanApp extends StatefulWidget {
 
 class _QingJuanAppState extends State<QingJuanApp> {
   final _navigatorKey = GlobalKey<NavigatorState>();
+  final _rootNavigatorKey = GlobalKey<NavigatorState>();
   String? _activeWorkspaceIdentity;
   int _workspaceGeneration = 0;
   int _backendActivationOperation = 0;
@@ -135,10 +147,10 @@ class _QingJuanAppState extends State<QingJuanApp> {
   Future<void> _initialize() async {
     await widget.backend.ensureReady();
     if (!mounted) return;
-    widget.appState.showNotice(widget.backend.message);
+    if (!Platform.isAndroid) widget.appState.showNotice(widget.backend.message);
     if (widget.backend.status == BackendStatus.ready) {
       await _activateReadyBackend();
-    } else {
+    } else if (!Platform.isAndroid) {
       widget.appState.selectSection(AppSection.settings);
     }
     if (!mounted) return;
@@ -196,7 +208,9 @@ class _QingJuanAppState extends State<QingJuanApp> {
           widget.backend.readyEpoch == readyEpoch) {
         _handledReadyEpoch = readyEpoch;
         widget.appState.showNotice('账号状态恢复失败：$error');
-        widget.appState.selectSection(AppSection.settings);
+        if (!Platform.isAndroid) {
+          widget.appState.selectSection(AppSection.settings);
+        }
       }
     } finally {
       if (_activationEpochInProgress == readyEpoch) {
@@ -220,7 +234,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     if (!mounted) return;
     final identity = widget.auth.workspaceIdentity;
     if (identity == _activeWorkspaceIdentity) {
-      if (identity == null) {
+      if (identity == null && !Platform.isAndroid) {
         widget.appState.selectSection(AppSection.settings);
       }
       return;
@@ -230,9 +244,14 @@ class _QingJuanAppState extends State<QingJuanApp> {
     _resetWorkspaceState();
     _returnToWorkspaceRoot();
     if (identity == null) {
-      widget.appState.selectSection(AppSection.settings);
+      if (Platform.isAndroid) {
+        widget.appState.selectSection(AppSection.library);
+      } else {
+        widget.appState.selectSection(AppSection.settings);
+      }
       return;
     }
+    if (Platform.isAndroid) widget.appState.selectSection(AppSection.library);
     await Future.wait<void>(<Future<void>>[
       widget.library.load(),
       widget.sources.load(),
@@ -247,6 +266,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     widget.sources.resetForBackendSwitch();
     widget.tasks.resetForBackendSwitch();
     widget.settings.resetForBackendSwitch();
+    widget.mangaTranslation.resetForBackendSwitch();
     PaintingBinding.instance.imageCache
       ..clear()
       ..clearLiveImages();
@@ -257,7 +277,17 @@ class _QingJuanAppState extends State<QingJuanApp> {
       if (!mounted) return;
       final navigator = _navigatorKey.currentState;
       if (navigator != null) navigator.popUntil((route) => route.isFirst);
+      // Fluent dialogs can target the outer app while Android pages use the
+      // mobile navigator. Clear both when the active account/backend changes.
+      _rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
     });
+  }
+
+  Widget _buildPlatformHome() {
+    if (Platform.isAndroid) {
+      return MobileQingJuanApp(navigatorKey: _navigatorKey);
+    }
+    return const AppShell();
   }
 
   @override
@@ -270,6 +300,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     widget.sources.dispose();
     widget.tasks.dispose();
     widget.settings.dispose();
+    widget.mangaTranslation.dispose();
     widget.auth.dispose();
     unawaited(widget.backend.dispose());
     widget.api.close();
@@ -288,11 +319,13 @@ class _QingJuanAppState extends State<QingJuanApp> {
       sources: widget.sources,
       tasks: widget.tasks,
       settings: widget.settings,
+      mangaTranslation: widget.mangaTranslation,
       child: AnimatedBuilder(
         animation: widget.appState.themeModeListenable,
         builder: (context, _) {
           return FluentApp(
-            navigatorKey: _navigatorKey,
+            navigatorKey:
+                Platform.isAndroid ? _rootNavigatorKey : _navigatorKey,
             debugShowCheckedModeBanner: false,
             title: '青卷',
             themeMode: widget.appState.themeModeListenable.value,
@@ -311,10 +344,13 @@ class _QingJuanAppState extends State<QingJuanApp> {
               GlobalMaterialLocalizations.delegate,
               GlobalCupertinoLocalizations.delegate,
             ],
-            home: UiPlatformScope(
+            builder: (context, child) => UiPlatformScope(
               platform: defaultTargetPlatform,
-              child: const AppShell(),
+              child: DesktopWindowFrame(
+                child: child ?? const SizedBox.shrink(),
+              ),
             ),
+            home: _buildPlatformHome(),
           );
         },
       ),

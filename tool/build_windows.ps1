@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$requiredFlutterVersion = "3.24.3"
+$requiredFlutterVersion = "3.44.4"
 $nugetVersion = "6.12.1"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $flutterOutput = Join-Path $projectRoot "build/windows/x64/runner/Release"

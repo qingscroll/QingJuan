@@ -4,13 +4,13 @@ import 'package:flutter/services.dart';
 import '../../app/app_scope.dart';
 import '../../app/app_state.dart';
 import '../../shared/app_surface.dart';
-import '../../shared/desktop_title_bar.dart';
 import '../../shared/feedback_widgets.dart';
 import '../../shared/motion.dart';
 import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../about/about_page.dart';
 import '../library/library_page.dart';
+import '../manga_translation/manga_translation_page.dart';
 import '../search/search_page.dart';
 import '../settings/settings_page.dart';
 import '../sources/plugins_page.dart';
@@ -34,6 +34,7 @@ class AppShell extends StatelessWidget {
     AppSection.sources,
     AppSection.plugins,
     AppSection.tasks,
+    AppSection.translator,
     AppSection.settings,
   ];
 
@@ -42,6 +43,7 @@ class AppShell extends StatelessWidget {
     AppSection.search,
     AppSection.sources,
     AppSection.tasks,
+    AppSection.translator,
     AppSection.settings,
   ];
 
@@ -51,6 +53,7 @@ class AppShell extends StatelessWidget {
     AppSection.sources,
     AppSection.plugins,
     AppSection.tasks,
+    AppSection.translator,
   };
 
   Widget _page(AppScope scope, AppSection section) {
@@ -84,6 +87,7 @@ class AppShell extends StatelessWidget {
           onBack: () => _selectSection(app, AppSection.settings),
         ),
       AppSection.tasks => const TasksPage(),
+      AppSection.translator => const MangaTranslationPage(),
       AppSection.settings => const SettingsPage(),
       AppSection.about => AboutPage(
           onBack: () => _selectSection(app, AppSection.settings),
@@ -97,6 +101,7 @@ class AppShell extends StatelessWidget {
         AppSection.sources => '书源管理',
         AppSection.plugins => '插件配置',
         AppSection.tasks => '任务',
+        AppSection.translator => '漫画翻译',
         AppSection.settings => '设置',
         AppSection.about => '关于',
       };
@@ -107,6 +112,7 @@ class AppShell extends StatelessWidget {
         AppSection.sources => '书源',
         AppSection.plugins => '插件',
         AppSection.tasks => '任务',
+        AppSection.translator => '漫画翻译',
         AppSection.settings => '我的',
         AppSection.about => '关于',
       };
@@ -117,6 +123,7 @@ class AppShell extends StatelessWidget {
         AppSection.sources => FluentIcons.database,
         AppSection.plugins => FluentIcons.plug_connected,
         AppSection.tasks => FluentIcons.history,
+        AppSection.translator => FluentIcons.translate,
         AppSection.settings => FluentIcons.settings,
         AppSection.about => FluentIcons.info,
       };
@@ -141,9 +148,15 @@ class AppShell extends StatelessWidget {
         final theme = FluentTheme.of(context);
         final dark = theme.brightness == Brightness.dark;
         final mobile = usesMobileUi(context);
-        final desktopSections = app.clientPluginManagementAvailable
+        final allDesktopSections = app.clientPluginManagementAvailable
             ? _desktopLocalSections
             : _desktopRemoteSections;
+        final desktopSections = <AppSection>[
+          for (final section in allDesktopSections)
+            if (section != AppSection.translator ||
+                UiPlatformScope.of(context) == TargetPlatform.windows)
+              section,
+        ];
         final content = mobile
             ? _MobileShell(
                 section: app.section,
@@ -564,12 +577,6 @@ class _DesktopShellState extends State<_DesktopShell> {
               beginOffset: const Offset(0.018, 0),
               child: child,
             ),
-            appBar: NavigationAppBar(
-              automaticallyImplyLeading: false,
-              height: desktopTitleBarHeight,
-              backgroundColor: theme.micaBackgroundColor,
-              title: const DesktopTitleBar(),
-            ),
             pane: NavigationPane(
               selected: selectedIndex,
               displayMode: displayMode,
@@ -614,7 +621,7 @@ class _DesktopShellState extends State<_DesktopShell> {
         if (isExpanded && !_paneCollapsed)
           PositionedDirectional(
             start: paneWidth - 4,
-            top: desktopTitleBarHeight,
+            top: 0,
             bottom: 0,
             width: 8,
             child: Semantics(
@@ -656,7 +663,8 @@ class _DesktopShellState extends State<_DesktopShell> {
         3 => LogicalKeyboardKey.digit4,
         4 => LogicalKeyboardKey.digit5,
         5 => LogicalKeyboardKey.digit6,
-        _ => LogicalKeyboardKey.digit7,
+        6 => LogicalKeyboardKey.digit7,
+        _ => LogicalKeyboardKey.digit8,
       };
 
   PhysicalKeyboardKey _shortcutPhysicalKey(int index) => switch (index) {
@@ -666,6 +674,7 @@ class _DesktopShellState extends State<_DesktopShell> {
         3 => PhysicalKeyboardKey.digit4,
         4 => PhysicalKeyboardKey.digit5,
         5 => PhysicalKeyboardKey.digit6,
-        _ => PhysicalKeyboardKey.digit7,
+        6 => PhysicalKeyboardKey.digit7,
+        _ => PhysicalKeyboardKey.digit8,
       };
 }

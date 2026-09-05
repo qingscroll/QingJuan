@@ -16,6 +16,7 @@ import 'package:qingjuan/features/shell/app_shell.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
 import 'package:qingjuan/features/tasks/tasks_controller.dart';
 import 'package:qingjuan/shared/app_surface.dart';
+import 'package:qingjuan/shared/desktop_title_bar.dart';
 import 'package:qingjuan/shared/responsive.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -217,7 +218,7 @@ void main() {
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
     expect(view.pane?.displayMode, PaneDisplayMode.open);
-    expect(view.pane?.items, hasLength(6));
+    expect(view.pane?.items, hasLength(7));
     expect(view.pane?.footerItems, hasLength(1));
     expect(find.byKey(const ValueKey('tablet-navigation')), findsOneWidget);
     expect(find.byKey(const ValueKey('mobile-app-bar')), findsNothing);
@@ -237,6 +238,14 @@ void main() {
     final pluginItem = view.pane!.items[3] as PaneItem;
     expect((sourceItem.title as Text).data, '书源管理');
     expect((pluginItem.title as Text).data, '插件配置');
+    expect(
+      view.pane?.items
+          .whereType<PaneItem>()
+          .map((item) => item.title)
+          .whereType<Text>()
+          .map((text) => text.data),
+      contains('漫画翻译'),
+    );
   });
 
   testWidgets('switching to Linux remote hides client plugin management',
@@ -259,7 +268,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 180));
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
-    expect(view.pane?.items, hasLength(5));
+    expect(view.pane?.items, hasLength(6));
     expect(
       view.pane?.items
           .whereType<PaneItem>()
@@ -468,24 +477,27 @@ class _Harness {
     final sources = SourcesController(api);
     final tasks = TasksController(api);
     final settings = SettingsController(api);
-    final widget = FluentApp(
-      theme: buildQingJuanTheme(brightness, platform: targetPlatform),
-      home: MediaQuery(
-        data: MediaQueryData(size: viewport, textScaler: textScaler),
-        child: UiPlatformScope(
-          platform: targetPlatform,
-          child: AppScope(
-            appState: appState,
-            api: api,
-            backend: backend,
-            auth: auth,
-            library: library,
-            sources: sources,
-            tasks: tasks,
-            settings: settings,
-            child: const AppShell(),
+    final widget = AppScope(
+      appState: appState,
+      api: api,
+      backend: backend,
+      auth: auth,
+      library: library,
+      sources: sources,
+      tasks: tasks,
+      settings: settings,
+      child: FluentApp(
+        theme: buildQingJuanTheme(brightness, platform: targetPlatform),
+        builder: (context, child) => MediaQuery(
+          data: MediaQueryData(size: viewport, textScaler: textScaler),
+          child: UiPlatformScope(
+            platform: targetPlatform,
+            child: DesktopWindowFrame(
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         ),
+        home: const AppShell(),
       ),
     );
     return _Harness(

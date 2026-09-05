@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 from .multi_user import DEFAULT_ADMIN_USER_ID
 
@@ -21,6 +21,17 @@ DevicePlatform = Literal["android", "windows", "linux", "macos", "ios", "other"]
 MangaTextDirection = Literal["vertical", "horizontal"]
 MangaRegionShape = Literal["ellipse", "roundrect", "rect"]
 MangaRenderMode = Literal["ocr_pipeline", "image_edit_fallback"]
+MangaWorkflowMode = Literal[
+    "normal",
+    "export_translation",
+    "export_original",
+    "translate_json_only",
+    "import_translation_render",
+    "colorize_only",
+    "upscale_only",
+    "inpaint_only",
+    "replace_translation",
+]
 UserRole = Literal["admin", "user"]
 UserStatus = Literal["active", "disabled"]
 
@@ -107,6 +118,44 @@ class MangaTranslatedPagePayload(BaseModel):
     diagnostics: dict[str, Any] | None = None
 
 
+class MangaWorkflowResponse(BaseModel):
+    mode: MangaWorkflowMode
+    imageKey: str
+    mimeType: Literal["image/png"] = "image/png"
+    outputImageBase64: str | None = None
+    inpaintedImageBase64: str | None = None
+    project: dict[str, Any] = Field(default_factory=dict)
+    projectDocument: dict[str, Any] = Field(default_factory=dict)
+    original: dict[str, str] = Field(default_factory=dict)
+    translated: dict[str, str] = Field(default_factory=dict)
+    pageTranslation: str = ""
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class MangaChapterTranslationPagePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pageNumber: int = Field(ge=1)
+    outputImageBase64: str = Field(min_length=1)
+    project: dict[str, Any]
+    pageTranslation: str = ""
+
+
+class MangaChapterTranslationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    targetLanguage: str = Field(min_length=1)
+    pages: list[MangaChapterTranslationPagePayload] = Field(min_length=1)
+
+
+class MangaChapterTranslationResponse(BaseModel):
+    bookId: str
+    chapterIndex: int
+    translated: bool = True
+    pageCount: int
+    translatedImageFiles: list[str] = Field(default_factory=list)
+
+
 class AddBookPayload(BaseModel):
     sourceUrl: HttpUrl
     bookKind: BookKind
@@ -152,6 +201,8 @@ class BookRecord(BaseModel):
     cover: str | None = None
     lastReadChapterIndex: int = 0
     lastReadAt: str | None = None
+    lastReadPageIndex: int | None = None
+    lastReadPageCount: int | None = None
 
 
 class PublicBookRecord(BaseModel):
@@ -170,6 +221,8 @@ class PublicBookRecord(BaseModel):
     cover: str | None = None
     lastReadChapterIndex: int = 0
     lastReadAt: str | None = None
+    lastReadPageIndex: int | None = None
+    lastReadPageCount: int | None = None
 
 
 class LinkJobStartPayload(BaseModel):
@@ -254,6 +307,11 @@ class ReadingProgressRecord(BaseModel):
     lastAnchorIndex: int = 0
     lastAnchorOffsetRatio: float = 0
     lastReadAt: str | None = None
+    lastPageIndex: int | None = None
+    lastPageCount: int | None = None
+    lastLayoutKey: str | None = None
+    lastContentMode: Literal["original", "translated"] | None = None
+    lastCharacterOffset: int | None = None
 
 
 class ReadingProgressPayload(BaseModel):
@@ -262,6 +320,17 @@ class ReadingProgressPayload(BaseModel):
     anchorType: Literal["top", "paragraph", "image"] = "top"
     anchorIndex: int = 0
     anchorOffsetRatio: float = 0
+    pageIndex: int | None = Field(default=None, ge=0, le=2**31 - 1)
+    pageCount: int | None = Field(default=None, gt=0, le=2**31 - 1)
+    layoutKey: str | None = Field(default=None, max_length=256)
+    contentMode: Literal["original", "translated"] | None = None
+    characterOffset: int | None = Field(default=None, ge=0, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def validate_page_bounds(self) -> Self:
+        if self.pageIndex is not None and self.pageCount is not None and self.pageIndex >= self.pageCount:
+            raise ValueError("页索引必须小于章节总页数")
+        return self
 
 
 class ChapterActionPayload(BaseModel):

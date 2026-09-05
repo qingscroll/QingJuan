@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 
 import '../models/book.dart';
 import '../models/link_job.dart';
+import '../models/manga_workflow.dart';
 import '../models/settings.dart';
 import '../models/site_plugin.dart';
 import '../models/source.dart';
@@ -22,12 +24,17 @@ class ApiClient {
     Map<String, String> Function()? deviceHeaders,
     void Function()? onUserSessionExpired,
     http.Client? client,
+    Future<void> Function(File backup)? deleteDownloadBackup,
   })  : _token = token ?? (() => ''),
         _userToken = userToken ?? (() => ''),
         _connectionRevision = connectionRevision ?? (() => 0),
         _deviceHeaders = deviceHeaders ?? (() => const <String, String>{}),
         _onUserSessionExpired = onUserSessionExpired,
-        _client = client ?? http.Client();
+        _client = client ?? http.Client(),
+        _deleteDownloadBackup = deleteDownloadBackup ??
+            ((backup) async {
+              await backup.delete();
+            });
 
   static const _apiPrefix = '/api/v1';
   final String Function() _baseUrl;
@@ -37,6 +44,7 @@ class ApiClient {
   final Map<String, String> Function() _deviceHeaders;
   final void Function()? _onUserSessionExpired;
   final http.Client _client;
+  final Future<void> Function(File backup) _deleteDownloadBackup;
 
   Uri _uri(String endpoint, [Map<String, dynamic>? query]) =>
       _uriFor(_baseUrl(), endpoint, query);
@@ -80,7 +88,8 @@ class ApiClient {
     Object? body,
     Map<String, dynamic>? query,
     bool includeUserToken = true,
-    int attempts = 4,
+    int? attempts,
+    String? idempotencyKey,
     Duration timeout = const Duration(minutes: 2),
   }) async {
     final baseUrl = _baseUrl();
@@ -95,8 +104,11 @@ class ApiClient {
       includeUserToken: includeUserToken,
     );
     final encoded = body == null ? null : jsonEncode(body);
+    if (idempotencyKey != null) headers['Idempotency-Key'] = idempotencyKey;
+    // A lost response does not mean the server rejected a mutation.
+    final maximumAttempts = attempts ?? (method == 'GET' ? 4 : 1);
     Object? lastError;
-    for (var attempt = 0; attempt < attempts; attempt++) {
+    for (var attempt = 0; attempt < maximumAttempts; attempt++) {
       try {
         final requestFuture = switch (method) {
           'GET' => _client.get(uri, headers: headers),
@@ -123,7 +135,7 @@ class ApiClient {
       } on TimeoutException catch (error) {
         lastError = error;
       }
-      if (attempt < attempts - 1) {
+      if (attempt < maximumAttempts - 1) {
         await Future<void>.delayed(
             Duration(milliseconds: 250 * (1 << attempt)));
       }
@@ -493,15 +505,25 @@ class ApiClient {
     return BookPreview.fromJson(_map(response));
   }
 
-  Future<LinkJob> startLinkJob(String mode, JsonMap payload) async {
+  Future<LinkJob> startLinkJob(String mode, JsonMap payload,
+      {String? idempotencyKey}) async {
+    final operationKey = idempotencyKey ?? createOperationKey();
     final response = _decode(
       await _request(
         'POST',
         '/books/link-jobs',
         body: <String, dynamic>{'mode': mode, 'payload': payload},
+        idempotencyKey: operationKey,
       ),
     );
     return LinkJob.fromJson(_map(response));
+  }
+
+  static String createOperationKey() {
+    final random = math.Random.secure();
+    return List.generate(
+            16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'))
+        .join();
   }
 
   Future<LinkJob> fetchLinkJob(String jobId) async {
@@ -552,19 +574,119 @@ class ApiClient {
     return Book.fromJson(_map(_decode(response)));
   }
 
+  Future<MangaWorkflowResult> runImageWorkflow({
+    required String filePath,
+    required String mode,
+    String language = '中文',
+    String title = '',
+    Object? project,
+    Object? companion,
+    String? translatedFilePath,
+    int upscaleFactor = 2,
+    Future<void>? abortTrigger,
+  }) async {
+    final multipart = http.AbortableMultipartRequest(
+      'POST',
+      _uri('/images/workflow'),
+      abortTrigger: abortTrigger,
+    )
+      ..headers.addAll(_headers())
+      ..fields['mode'] = mode
+      ..fields['language'] = language
+      ..fields['title'] = title
+      ..fields['upscaleFactor'] = '$upscaleFactor'
+      ..files.add(await http.MultipartFile.fromPath('file', filePath));
+    if (project != null) {
+      multipart.fields['project'] = jsonEncode(project);
+    }
+    if (companion != null) {
+      multipart.fields['companion'] = jsonEncode(companion);
+    }
+    if (translatedFilePath != null && translatedFilePath.trim().isNotEmpty) {
+      multipart.files.add(
+        await http.MultipartFile.fromPath(
+          'translatedFile',
+          translatedFilePath,
+        ),
+      );
+    }
+    final streamed =
+        await _client.send(multipart).timeout(const Duration(minutes: 30));
+    final response = await http.Response.fromStream(streamed);
+    return MangaWorkflowResult.fromJson(_map(_decode(response)));
+  }
+
+  Future<void> saveMangaBookshelfTranslation({
+    required String bookId,
+    required int chapterIndex,
+    required String targetLanguage,
+    required List<Map<String, dynamic>> pages,
+  }) async {
+    final orderedPages =
+        pages.map((page) => Map<String, dynamic>.from(page)).toList()
+          ..sort(
+            (left, right) => ((left['pageNumber'] as num?)?.toInt() ?? 0)
+                .compareTo((right['pageNumber'] as num?)?.toInt() ?? 0),
+          );
+    _decode(
+      await _request(
+        'POST',
+        '/books/$bookId/chapters/$chapterIndex/manga-translation',
+        body: <String, dynamic>{
+          'targetLanguage': targetLanguage,
+          'pages': orderedPages,
+        },
+        timeout: const Duration(minutes: 10),
+      ),
+    );
+  }
+
   Future<void> deleteBook(String bookId) async {
     _decode(await _request('DELETE', '/books/$bookId'));
   }
 
+  /// A guard captures an account and backend without exposing its credentials.
+  bool Function() captureContextGuard() {
+    final base = _baseUrl();
+    final token = _token();
+    final user = _userToken();
+    final revision = _connectionRevision();
+    return () =>
+        base == _baseUrl() &&
+        token == _token() &&
+        user == _userToken() &&
+        revision == _connectionRevision();
+  }
+
   Future<void> saveProgress(
-      String bookId, int chapterIndex, double ratio) async {
+    String bookId,
+    int chapterIndex,
+    double ratio, {
+    String anchorType = 'top',
+    int anchorIndex = 0,
+    double anchorOffsetRatio = 0,
+    int? pageIndex,
+    int? pageCount,
+    String? layoutKey,
+    String? contentMode,
+    int? characterOffset,
+  }) async {
     _decode(
       await _request(
         'PUT',
         '/books/$bookId/progress',
+        timeout: const Duration(seconds: 8),
         body: <String, dynamic>{
           'chapterIndex': chapterIndex,
-          'scrollRatio': ratio
+          'scrollRatio': ratio,
+          'anchorType': anchorType,
+          'anchorIndex': anchorIndex,
+          'anchorOffsetRatio': anchorOffsetRatio,
+          if (pageIndex != null) 'pageIndex': pageIndex,
+          if (pageCount != null) 'pageCount': pageCount,
+          if (layoutKey != null) 'layoutKey': layoutKey,
+          if (contentMode != null) 'contentMode': contentMode,
+          if (characterOffset != null) 'characterOffset': characterOffset,
         },
       ),
     );
@@ -845,6 +967,83 @@ class ApiClient {
     return sameOrigin ? _headers() : const <String, String>{};
   }
 
+  Future<void> downloadUrlToFile(
+    String sourceUrl,
+    String targetPath, {
+    void Function(int receivedBytes, int totalBytes)? onProgress,
+    Future<void>? abortTrigger,
+  }) async {
+    final resolvedUrl = resolveUrl(sourceUrl);
+    if (resolvedUrl.isEmpty) {
+      throw const ApiException('下载地址为空');
+    }
+    final target = File(targetPath);
+    final temporary = File('$targetPath.qingjuan-part');
+    final backup = File('$targetPath.qingjuan-backup');
+    await temporary.parent.create(recursive: true);
+    if (!await target.exists() && await backup.exists()) {
+      await backup.rename(target.path);
+    } else if (await target.exists() && await backup.exists()) {
+      await _tryDeleteDownloadBackup(backup);
+    }
+    try {
+      final request = http.AbortableRequest(
+        'GET',
+        Uri.parse(resolvedUrl),
+        abortTrigger: abortTrigger,
+      )..headers.addAll(headersForUrl(sourceUrl));
+      final response =
+          await _client.send(request).timeout(const Duration(minutes: 5));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final decoded = await http.Response.fromStream(response);
+        _decode(decoded);
+      }
+      final sink = temporary.openWrite();
+      final totalBytes = response.contentLength ?? 0;
+      var receivedBytes = 0;
+      try {
+        await for (final chunk
+            in response.stream.timeout(const Duration(minutes: 5))) {
+          sink.add(chunk);
+          receivedBytes += chunk.length;
+          onProgress?.call(receivedBytes, totalBytes);
+        }
+      } finally {
+        await sink.close();
+      }
+
+      if (await backup.exists()) await _deleteDownloadBackup(backup);
+      var movedExisting = false;
+      try {
+        if (await target.exists()) {
+          await target.rename(backup.path);
+          movedExisting = true;
+        }
+        await temporary.rename(target.path);
+        if (movedExisting && await backup.exists()) {
+          await _tryDeleteDownloadBackup(backup);
+        }
+      } catch (_) {
+        if (movedExisting && await backup.exists() && !await target.exists()) {
+          await backup.rename(target.path);
+        }
+        rethrow;
+      }
+    } catch (_) {
+      if (await temporary.exists()) await temporary.delete();
+      rethrow;
+    }
+  }
+
+  Future<void> _tryDeleteDownloadBackup(File backup) async {
+    try {
+      await _deleteDownloadBackup(backup);
+    } on FileSystemException {
+      // The target is already complete. Keep the backup for crash recovery
+      // instead of reporting a successful download as failed.
+    }
+  }
+
   Future<void> _downloadArtifact(
     JsonMap artifact,
     String targetPath, {
@@ -854,39 +1053,11 @@ class ApiClient {
     if (downloadUrl.isEmpty) {
       throw const ApiException('后端未返回导出下载地址');
     }
-    final target = File(targetPath);
-    final temporary = File('$targetPath.qingjuan-part');
-    await temporary.parent.create(recursive: true);
-    try {
-      final request = http.Request('GET', Uri.parse(resolveUrl(downloadUrl)))
-        ..headers.addAll(headersForUrl(downloadUrl));
-      final response =
-          await _client.send(request).timeout(const Duration(minutes: 2));
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        final decoded = await http.Response.fromStream(response);
-        _decode(decoded);
-      }
-      final sink = temporary.openWrite();
-      final totalBytes = response.contentLength ??
-          (artifact['sizeBytes'] as num?)?.toInt() ??
-          0;
-      var receivedBytes = 0;
-      try {
-        await for (final chunk
-            in response.stream.timeout(const Duration(minutes: 2))) {
-          sink.add(chunk);
-          receivedBytes += chunk.length;
-          onProgress?.call(receivedBytes, totalBytes);
-        }
-      } finally {
-        await sink.close();
-      }
-      if (await target.exists()) await target.delete();
-      await temporary.rename(target.path);
-    } catch (_) {
-      if (await temporary.exists()) await temporary.delete();
-      rethrow;
-    }
+    await downloadUrlToFile(
+      downloadUrl,
+      targetPath,
+      onProgress: onProgress,
+    );
   }
 
   void close() => _client.close();

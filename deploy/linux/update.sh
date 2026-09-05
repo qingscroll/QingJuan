@@ -166,6 +166,8 @@ backup_artifact "$UNINSTALL_COMMAND" "qingjuan-uninstall"
 backup_artifact "$UPDATE_RUNNER_COMMAND" "qingjuan-update-runner"
 
 update_succeeded="false"
+service_stop_requested="false"
+database_backup_ready="false"
 cutover_started="false"
 release_created="false"
 release_ready="false"
@@ -348,6 +350,10 @@ restore_current_link() {
 }
 
 restore_database() {
+  if [[ "$database_backup_ready" != "true" ]]; then
+    printf '数据库备份尚未完成验证，拒绝覆盖现有数据库。\n' >&2
+    return 1
+  fi
   if [[ ! -f "$database_backup" ]]; then
     return
   fi
@@ -488,6 +494,9 @@ rollback_update() {
     else
       systemctl stop qingjuan-updater.path >/dev/null 2>&1 || true
     fi
+  fi
+
+  if [[ "$service_stop_requested" == "true" ]]; then
     if ! systemctl start "$SERVICE_NAME"; then
       printf '回滚步骤失败：启动旧服务。\n' >&2
       rollback_ok="false"
@@ -657,7 +666,7 @@ for release_file in "${release_files[@]}"; do
 done
 
 write_online_state "restarting" "新 release 准备完成，后端正在短暂重启"
-cutover_started="true"
+service_stop_requested="true"
 systemctl stop "$SERVICE_NAME"
 
 if [[ -e "$database_file" || -L "$database_file" ]]; then
@@ -730,6 +739,10 @@ except FileNotFoundError:
 PY
 fi
 
+# A failed copy can leave a partial database or WAL in rollback_dir. Until the
+# complete snapshot passes quick_check, rollback must only restart the old service.
+database_backup_ready="true"
+cutover_started="true"
 install -o root -g root -m 0600 "$next_backend_file" "$BACKEND_FILE"
 if [[ -f "$CLIENT_FILE" ]]; then
   chmod 0640 "$CLIENT_FILE"

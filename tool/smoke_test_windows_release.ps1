@@ -1,9 +1,171 @@
 [CmdletBinding()]
 param(
-    [int]$Port = 19453
+    [ValidateRange(0, 65535)]
+    [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-SmokeTestPort {
+    param([int]$RequestedPort)
+    $reservation = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback, $RequestedPort
+    )
+    $reservation.Server.ExclusiveAddressUse = $true
+    try {
+        $reservation.Start()
+        return ([System.Net.IPEndPoint]$reservation.LocalEndpoint).Port
+    }
+    catch {
+        throw "Smoke-test port $RequestedPort is already occupied or unavailable; no requests were sent."
+    }
+    finally {
+        $reservation.Stop()
+    }
+}
+
+function Get-SmokeOwnedProcess {
+    param([int]$ProcessId)
+    $lineage = @()
+    $visited = @{}
+    $candidateId = $ProcessId
+    $childStart = [long]::MaxValue
+    while (-not $visited.ContainsKey($candidateId)) {
+        $visited[$candidateId] = $true
+        $candidate = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+        if ($null -eq $candidate) { return $null }
+        try { $started = $candidate.StartTime.ToUniversalTime().Ticks }
+        catch { return $null }
+        if ($started -gt $childStart) { return $null }
+        if ($ownedProcessStarts.ContainsKey($candidateId)) {
+            if ($ownedProcessStarts[$candidateId] -ne $started) { return $null }
+            foreach ($entry in $lineage) {
+                $ownedProcessStarts[$entry.Id] = $entry.Start
+            }
+            return Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        }
+        $lineage += @{ Id = $candidateId; Start = $started }
+        $metadata = Get-CimInstance Win32_Process -Filter "ProcessId = $candidateId" -ErrorAction Stop
+        if ($null -eq $metadata) { return $null }
+        # A PID can be reused between querying Process and its parent metadata.
+        if ([math]::Abs(($metadata.CreationDate.ToUniversalTime().Ticks - $started)) -gt 10000) {
+            return $null
+        }
+        $candidateId = [int]$metadata.ParentProcessId
+        $childStart = $started
+    }
+    return $null
+}
+
+function Assert-SmokeListenerOwnership {
+    param([switch]$AllowNotListening)
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @('127.0.0.1', '0.0.0.0') })
+    if ($listeners.Count -eq 0) {
+        if ($AllowNotListening) { return $false }
+        throw "The smoke-test backend no longer owns a listening socket on port $Port."
+    }
+    foreach ($listener in $listeners) {
+        if ($null -eq (Get-SmokeOwnedProcess -ProcessId $listener.OwningProcess)) {
+            throw "Refusing HTTP on port ${Port}: its listener is outside the smoke-test process tree."
+        }
+    }
+    return $true
+}
+
+function Stop-SmokeOwnedProcesses {
+    # Discover descendants before terminating parents. Port ownership and an
+    # executable path alone never authorize terminating another process.
+    $snapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    do {
+        $previousCount = $ownedProcessStarts.Count
+        foreach ($candidate in $snapshot) {
+            if ($ownedProcessStarts.ContainsKey([int]$candidate.ParentProcessId)) {
+                $null = Get-SmokeOwnedProcess -ProcessId $candidate.ProcessId
+            }
+        }
+    } while ($ownedProcessStarts.Count -gt $previousCount)
+    $failures = @()
+    $identities = @($ownedProcessStarts.GetEnumerator() | Sort-Object Value -Descending)
+    foreach ($identity in $identities) {
+        $owned = Get-Process -Id $identity.Key -ErrorAction SilentlyContinue
+        if ($null -eq $owned) { continue }
+        try {
+            if ($owned.StartTime.ToUniversalTime().Ticks -ne $identity.Value) { continue }
+            $owned.Kill()
+            if (-not $owned.WaitForExit(10000)) {
+                $failures += "Owned process $($identity.Key) did not exit."
+            }
+        }
+        catch {
+            if (-not $owned.HasExited) { $failures += "Could not stop owned process $($identity.Key)." }
+        }
+    }
+    if ($failures.Count -gt 0) { throw ($failures -join ' ') }
+}
+
+function Test-SmokeReadingProgress {
+    $boundary = 'qingjuan-smoke-' + [Guid]::NewGuid().ToString('N')
+    # Keep source ASCII so Windows PowerShell 5.1 also constructs valid UTF-8.
+    $bookKind = -join ([char[]](0x957F, 0x5C0F, 0x8BF4))
+    $language = -join ([char[]](0x4E2D, 0x6587))
+    $fixture = "Chapter 1 Smoke import`r`nThis is the first isolated chapter.`r`n`r`nChapter 2 Reading position`r`n"
+    $fixture += (1..12 | ForEach-Object { "Paragraph $_ - fixture text for packaged database and reading-position verification." }) -join "`r`n"
+    $parts = @(
+        "--$boundary`r`nContent-Disposition: form-data; name=`"bookKind`"`r`n`r`n$bookKind`r`n"
+        "--$boundary`r`nContent-Disposition: form-data; name=`"language`"`r`n`r`n$language`r`n"
+        "--$boundary`r`nContent-Disposition: form-data; name=`"title`"`r`n`r`nSmoke reading position`r`n"
+        "--$boundary`r`nContent-Disposition: form-data; name=`"file`"; filename=`"smoke-position.txt`"`r`nContent-Type: text/plain; charset=utf-8`r`n`r`n$fixture`r`n"
+        "--$boundary--`r`n"
+    )
+    $requestHeaders = @{ 'X-QingJuan-Local-Request' = '1' }
+    Assert-SmokeListenerOwnership | Out-Null
+    $book = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/books/import-local" `
+        -Method Post -Headers $requestHeaders -ContentType "multipart/form-data; boundary=$boundary" `
+        -Body ([System.Text.Encoding]::UTF8.GetBytes(($parts -join ''))) -TimeoutSec 20
+    if ([string]::IsNullOrWhiteSpace($book.id) -or $book.chapterCount -ne 2) {
+        throw 'Packaged backend did not import the two-chapter smoke fixture.'
+    }
+    $bookId = [Uri]::EscapeDataString($book.id)
+    $position = @{
+        chapterIndex = 2; scrollRatio = 0.4
+        anchorType = 'paragraph'; anchorIndex = 1; anchorOffsetRatio = 0.25
+        pageIndex = 2; pageCount = 6; layoutKey = 'smoke-layout-v1'
+        contentMode = 'original'; characterOffset = 96
+    }
+    $body = [System.Text.Encoding]::UTF8.GetBytes(($position | ConvertTo-Json -Compress))
+    Assert-SmokeListenerOwnership | Out-Null
+    $saved = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/books/$bookId/progress" `
+        -Method Put -Headers $requestHeaders -ContentType 'application/json; charset=utf-8' `
+        -Body $body -TimeoutSec 5
+    Assert-SmokeListenerOwnership | Out-Null
+    $detail = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/books/$bookId" -TimeoutSec 5
+    $expected = @{
+        lastChapterIndex = 2; lastScrollRatio = 0.4
+        lastAnchorType = 'paragraph'; lastAnchorIndex = 1; lastAnchorOffsetRatio = 0.25
+        lastPageIndex = 2; lastPageCount = 6; lastLayoutKey = 'smoke-layout-v1'
+        lastContentMode = 'original'; lastCharacterOffset = 96
+    }
+    foreach ($field in $expected.Keys) {
+        if ($saved.$field -ne $expected[$field] -or $detail.progress.$field -ne $expected[$field]) {
+            throw "Packaged backend did not persist reading-progress field $field."
+        }
+    }
+    if ($detail.book.lastReadPageIndex -ne 2 -or $detail.book.lastReadPageCount -ne 6) {
+        throw 'Packaged backend did not expose page position in the book summary.'
+    }
+    Assert-SmokeListenerOwnership | Out-Null
+    $chapter = Invoke-RestMethod `
+        -Uri "http://127.0.0.1:$Port/api/v1/books/$bookId/chapters/2?mode=original" -TimeoutSec 5
+    if ($chapter.chapter.index -ne 2 -or [string]::IsNullOrWhiteSpace($chapter.content)) {
+        throw 'Packaged backend could not read the chapter referenced by saved progress.'
+    }
+    Write-Output 'Packaged reading progress passed: imported fixture, chapter, page, layout, character and paragraph anchors.'
+}
+
+# Reserve an unused loopback port before starting a backend or sending HTTP.
+# Listener ownership is checked again after launch to handle reservation races.
+$Port = Get-SmokeTestPort -RequestedPort $Port
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $releaseOutput = Join-Path $projectRoot "release/qingjuan-windows"
 $versionLine = Get-Content -LiteralPath (Join-Path $projectRoot "pubspec.yaml") -Encoding UTF8 |
@@ -58,17 +220,22 @@ $env:QINGJUAN_MULTI_USER = "0"
 $env:QINGJUAN_2FA_ENCRYPTION_KEY = ""
 $stdout = Join-Path $smokeRoot "backend.stdout.log"
 $stderr = Join-Path $smokeRoot "backend.stderr.log"
-$process = Start-Process -FilePath $backendPath -ArgumentList @(
-    "serve", "--host", "127.0.0.1", "--port", "$Port", "--parent-pid", "$PID"
-) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-
-$serverProcessId = $null
+$ownedProcessStarts = @{}
+$cleanupFailure = $null
 try {
+    $process = Start-Process -FilePath $backendPath -ArgumentList @(
+        "serve", "--host", "127.0.0.1", "--port", "$Port", "--parent-pid", "$PID"
+    ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $ownedProcessStarts[$process.Id] = $process.StartTime.ToUniversalTime().Ticks
     $health = $null
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         if ($process.HasExited) {
             $errorOutput = Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue
             throw "Packaged backend exited early: $errorOutput"
+        }
+        if (-not (Assert-SmokeListenerOwnership -AllowNotListening)) {
+            Start-Sleep -Milliseconds 250
+            continue
         }
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 2
@@ -82,6 +249,7 @@ try {
         throw "Packaged backend health check timed out."
     }
 
+    Assert-SmokeListenerOwnership | Out-Null
     $meta = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/meta" -TimeoutSec 5
     if ($meta.service -ne "qingjuan-backend" -or $meta.appVersion -ne $expectedVersion.Split("+")[0]) {
         throw "Packaged backend metadata does not match the client version."
@@ -90,6 +258,7 @@ try {
         throw "Windows local backend unexpectedly advertises the admin web interface."
     }
 
+    Assert-SmokeListenerOwnership | Out-Null
     try {
         Invoke-WebRequest -Uri "http://127.0.0.1:$Port/admin/" -TimeoutSec 5 -UseBasicParsing | Out-Null
         throw "Windows local backend unexpectedly serves the admin web interface."
@@ -107,6 +276,7 @@ try {
         "/admin/api/registration-settings",
         "/admin/api/users"
     )) {
+        Assert-SmokeListenerOwnership | Out-Null
         try {
             Invoke-WebRequest `
                 -Uri "http://127.0.0.1:$Port$hiddenMultiUserPath" `
@@ -170,6 +340,7 @@ try {
         }
     )
     foreach ($hiddenPost in $hiddenMultiUserPosts) {
+        Assert-SmokeListenerOwnership | Out-Null
         try {
             Invoke-WebRequest `
                 -Uri "http://127.0.0.1:$Port$($hiddenPost.Path)" `
@@ -188,6 +359,7 @@ try {
         }
     }
 
+    Assert-SmokeListenerOwnership | Out-Null
     $settings = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/settings" -TimeoutSec 5
     $settings.translationModel.enabled = $false
     $settings.translationModel | Add-Member -NotePropertyName apiKey -NotePropertyValue "" -Force
@@ -204,6 +376,7 @@ try {
     # UTF-8 bytes so settings containing Chinese text round-trip correctly.
     $settingsJson = $settings | ConvertTo-Json -Depth 8 -Compress
     $settingsBody = [System.Text.Encoding]::UTF8.GetBytes($settingsJson)
+    Assert-SmokeListenerOwnership | Out-Null
     $savedSettings = Invoke-RestMethod `
         -Uri "http://127.0.0.1:$Port/api/v1/settings" `
         -Method Put `
@@ -215,34 +388,12 @@ try {
         throw "Windows client model settings API did not persist the update."
     }
 
-    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
-        Select-Object -First 1
-    $serverProcessId = $listener.OwningProcess
-    Write-Output "Windows combined package smoke test passed: version=$expectedVersion"
+    Test-SmokeReadingProgress
+    Write-Output "Windows combined package smoke test passed: version=$expectedVersion port=$Port"
 }
 finally {
-    $processIds = @($process.Id)
-    if ($null -ne $serverProcessId) {
-        $processIds += $serverProcessId
-    }
-    $processIds += @(
-        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.OwningProcess }
-    )
-    foreach ($processId in ($processIds | Select-Object -Unique)) {
-        $ownedProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($null -eq $ownedProcess) {
-            continue
-        }
-        if ($ownedProcess.Path -ne $backendPath) {
-            throw "Refusing to stop unexpected process $processId at $($ownedProcess.Path)."
-        }
-        Stop-Process -Id $processId -Force
-        $ownedProcess.WaitForExit()
-    }
-    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-        throw "Packaged backend still owns port $Port after smoke-test cleanup."
-    }
+    try { Stop-SmokeOwnedProcesses }
+    catch { $cleanupFailure = $_ }
     if ($null -eq $previousDataDir) {
         Remove-Item Env:QINGJUAN_DATA_DIR -ErrorAction SilentlyContinue
     }
@@ -279,4 +430,5 @@ finally {
     else {
         $env:QINGJUAN_2FA_ENCRYPTION_KEY = $previousTwoFactorEncryptionKey
     }
+    if ($null -ne $cleanupFailure) { throw $cleanupFailure }
 }

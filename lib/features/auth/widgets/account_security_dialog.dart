@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/material.dart' as material;
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../../core/models/user_account.dart';
-import '../../../shared/mobile_sheet.dart';
+import '../../../mobile/mobile_settings_route.dart';
+import '../../../mobile/mobile_security_controls.dart';
 import '../../../shared/responsive.dart';
 import '../auth_controller.dart';
 import 'github_device_dialog.dart';
@@ -15,12 +17,12 @@ Future<void> showAccountSecurityDialog({
   required AuthController auth,
 }) {
   final mobile = usesMobileUi(context);
-  Widget builder(BuildContext routeContext) => _AccountSecurityDialog(
-        auth: auth,
-        mobile: mobile,
-      );
+  Widget builder(BuildContext routeContext) =>
+      _AccountSecurityDialog(auth: auth, mobile: mobile);
   if (mobile) {
-    return showMobileSheet<void>(context: context, builder: builder);
+    return Navigator.of(
+      context,
+    ).push<void>(material.MaterialPageRoute<void>(builder: builder));
   }
   return showDialog<void>(context: context, builder: builder);
 }
@@ -42,8 +44,14 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(widget.auth.loadAccountSecurity(force: true));
+      if (mounted) unawaited(_loadSecurity());
     });
+  }
+
+  Future<void> _loadSecurity() async {
+    try {
+      await widget.auth.loadAccountSecurity(force: true);
+    } catch (_) {/* AuthController keeps a visible, retryable loading error. */}
   }
 
   @override
@@ -53,28 +61,15 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
       builder: (context, _) => _body(context),
     );
     if (widget.mobile) {
-      return MobileSheet(
-        title: '账号安全',
-        subtitle: 'GitHub 登录与两步验证',
-        onClose: () => Navigator.of(context).pop(),
-        child: SizedBox(
-          height:
-              (MediaQuery.sizeOf(context).height * 0.76).clamp(420.0, 680.0),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
-            child: body,
-          ),
-        ),
-      );
+      return MobileSettingsPage(title: '账号安全', child: body);
     }
     return ContentDialog(
       title: const Text('账号安全'),
-      content: SizedBox(
-        width: 520,
-        child: SingleChildScrollView(child: body),
-      ),
+      content: SizedBox(width: 520, child: SingleChildScrollView(child: body)),
       actions: <Widget>[
-        Button(
+        mobileSecurityAction(
+          context,
+          mobile: widget.mobile,
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('关闭'),
         ),
@@ -85,9 +80,11 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
   Widget _body(BuildContext context) {
     final auth = widget.auth;
     if (!auth.isAuthenticated) {
-      return const InfoBar(
-        title: Text('登录状态已失效'),
-        content: Text('请关闭面板并重新登录。'),
+      return mobileSecurityNotice(
+        context,
+        mobile: widget.mobile,
+        title: const Text('登录状态已失效'),
+        content: const Text('请关闭面板并重新登录。'),
         severity: InfoBarSeverity.error,
       );
     }
@@ -109,16 +106,18 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
         key: const ValueKey('account-security-error'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          InfoBar(
+          mobileSecurityNotice(
+            context,
+            mobile: widget.mobile,
             title: const Text('无法读取账号安全状态'),
             content: Text(loadError ?? '服务器未返回安全状态'),
             severity: InfoBarSeverity.error,
           ),
           const SizedBox(height: 12),
-          Button(
-            onPressed: () => unawaited(
-              auth.loadAccountSecurity(force: true),
-            ),
+          mobileSecurityAction(
+            context,
+            mobile: widget.mobile,
+            onPressed: () => unawaited(_loadSecurity()),
             child: const Text('重试'),
           ),
         ],
@@ -129,7 +128,9 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         if (_operationError case final error?) ...<Widget>[
-          InfoBar(
+          mobileSecurityNotice(
+            context,
+            mobile: widget.mobile,
             title: const Text('操作失败'),
             content: Text(error),
             severity: InfoBarSeverity.error,
@@ -137,6 +138,7 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
           const SizedBox(height: 12),
         ],
         _SecurityTile(
+          mobile: widget.mobile,
           icon: FluentIcons.code,
           title: 'GitHub 登录',
           description: security.githubBound
@@ -146,7 +148,9 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
                   : '未绑定；绑定后可免输账号密码登录',
           status: security.githubBound ? '已绑定' : '未绑定',
           action: security.githubBound
-              ? Button(
+              ? mobileSecurityAction(
+                  context,
+                  mobile: widget.mobile,
                   key: const ValueKey('account-security-github-unbind'),
                   onPressed: auth.accountSecurityBusy
                       ? null
@@ -155,10 +159,10 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
                 )
               : !security.githubAvailable
                   ? null
-                  : Button(
-                      key: const ValueKey(
-                        'account-security-github-bind',
-                      ),
+                  : mobileSecurityAction(
+                      context,
+                      mobile: widget.mobile,
+                      key: const ValueKey('account-security-github-bind'),
                       onPressed: auth.accountSecurityBusy
                           ? null
                           : () => unawaited(_bindGitHub(security)),
@@ -167,6 +171,7 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
         ),
         const SizedBox(height: 12),
         _SecurityTile(
+          mobile: widget.mobile,
           icon: FluentIcons.shield,
           title: '两步验证（2FA）',
           description: security.twoFactorEnabled
@@ -178,14 +183,18 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
             runSpacing: 8,
             children: <Widget>[
               if (security.twoFactorEnabled) ...<Widget>[
-                Button(
+                mobileSecurityAction(
+                  context,
+                  mobile: widget.mobile,
                   key: const ValueKey('account-security-recovery-regenerate'),
                   onPressed: auth.accountSecurityBusy
                       ? null
                       : () => unawaited(_regenerateRecoveryCodes()),
                   child: const Text('重生成恢复码'),
                 ),
-                Button(
+                mobileSecurityAction(
+                  context,
+                  mobile: widget.mobile,
                   key: const ValueKey('account-security-2fa-disable'),
                   onPressed: auth.accountSecurityBusy
                       ? null
@@ -193,7 +202,10 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
                   child: const Text('关闭'),
                 ),
               ] else
-                FilledButton(
+                mobileSecurityAction(
+                  context,
+                  mobile: widget.mobile,
+                  primary: true,
                   key: const ValueKey('account-security-2fa-enable'),
                   onPressed: auth.accountSecurityBusy
                       ? null
@@ -208,9 +220,11 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
           const ProgressBar(),
         ],
         const SizedBox(height: 14),
-        const InfoBar(
-          title: Text('恢复码只显示一次'),
-          content: Text('开启或重生成 2FA 后，请立即将恢复码保存到安全的位置。'),
+        mobileSecurityNotice(
+          context,
+          mobile: widget.mobile,
+          title: const Text('恢复码只显示一次'),
+          content: const Text('开启或重生成 2FA 后，请立即将恢复码保存到安全的位置。'),
           severity: InfoBarSeverity.warning,
         ),
       ],
@@ -331,6 +345,7 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
 
 class _SecurityTile extends StatelessWidget {
   const _SecurityTile({
+    required this.mobile,
     required this.icon,
     required this.title,
     required this.description,
@@ -338,6 +353,7 @@ class _SecurityTile extends StatelessWidget {
     required this.action,
   });
 
+  final bool mobile;
   final IconData icon;
   final String title;
   final String description;
@@ -346,6 +362,36 @@ class _SecurityTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (mobile) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              title,
+              style: material.Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              status,
+              style: TextStyle(
+                color: material.Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(description),
+            if (action != null) ...<Widget>[
+              const SizedBox(height: 14),
+              action!,
+            ],
+            const SizedBox(height: 12),
+            const material.Divider(height: 1),
+          ],
+        ),
+      );
+    }
     final theme = FluentTheme.of(context);
     return Container(
       padding: const EdgeInsets.all(14),
@@ -365,10 +411,7 @@ class _SecurityTile extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text(
-                      title,
-                      style: theme.typography.bodyStrong,
-                    ),
+                    Text(title, style: theme.typography.bodyStrong),
                     const SizedBox(height: 3),
                     Text(description, style: theme.typography.caption),
                   ],
@@ -384,10 +427,7 @@ class _SecurityTile extends StatelessWidget {
             children: <Widget>[
               header,
               const SizedBox(height: 12),
-              Align(
-                alignment: AlignmentDirectional.centerEnd,
-                child: action!,
-              ),
+              Align(alignment: AlignmentDirectional.centerEnd, child: action!),
             ],
           );
         },
@@ -422,7 +462,9 @@ Future<_Credentials?> _showCredentialDialog(
         mobile: mobile,
       );
   if (mobile) {
-    return showMobileSheet<_Credentials>(context: context, builder: builder);
+    return Navigator.of(context).push<_Credentials>(
+      material.MaterialPageRoute<_Credentials>(builder: builder),
+    );
   }
   return showDialog<_Credentials>(context: context, builder: builder);
 }
@@ -484,7 +526,9 @@ class _CredentialDialogState extends State<_CredentialDialog> {
         const SizedBox(height: 14),
         InfoLabel(
           label: '当前密码',
-          child: TextBox(
+          child: mobileSecurityInput(
+            context,
+            mobile: widget.mobile,
             key: const ValueKey('security-current-password'),
             controller: _passwordController,
             obscureText: true,
@@ -496,7 +540,9 @@ class _CredentialDialogState extends State<_CredentialDialog> {
           const SizedBox(height: 12),
           InfoLabel(
             label: '验证器代码或恢复码',
-            child: TextBox(
+            child: mobileSecurityInput(
+              context,
+              mobile: widget.mobile,
               key: const ValueKey('security-current-code'),
               controller: _codeController,
               autocorrect: false,
@@ -507,7 +553,9 @@ class _CredentialDialogState extends State<_CredentialDialog> {
         ],
         if (_error case final error?) ...<Widget>[
           const SizedBox(height: 10),
-          InfoBar(
+          mobileSecurityNotice(
+            context,
+            mobile: widget.mobile,
             title: const Text('请检查输入'),
             content: Text(error),
             severity: InfoBarSeverity.error,
@@ -516,24 +564,35 @@ class _CredentialDialogState extends State<_CredentialDialog> {
       ],
     );
     final actions = <Widget>[
-      Button(
+      mobileSecurityAction(
+        context,
+        mobile: widget.mobile,
         onPressed: () => Navigator.of(context).pop(),
         child: const Text('取消'),
       ),
-      FilledButton(
+      mobileSecurityAction(
+        context,
+        mobile: widget.mobile,
+        primary: true,
         key: const ValueKey('security-credentials-submit'),
         onPressed: _submit,
         child: const Text('继续'),
       ),
     ];
     if (widget.mobile) {
-      return MobileSheet(
+      return MobileSettingsPage(
         title: widget.title,
-        onClose: () => Navigator.of(context).pop(),
-        actions: actions,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(18),
-          child: content,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            content,
+            const SizedBox(height: 24),
+            material.FilledButton(
+              key: const ValueKey('security-credentials-submit'),
+              onPressed: _submit,
+              child: const Text('继续'),
+            ),
+          ],
         ),
       );
     }
@@ -550,16 +609,12 @@ Future<bool?> _showEnableTwoFactorDialog(
   required AuthController auth,
   required bool mobile,
 }) {
-  Widget builder(BuildContext routeContext) => _EnableTwoFactorDialog(
-        auth: auth,
-        mobile: mobile,
-      );
+  Widget builder(BuildContext routeContext) =>
+      _EnableTwoFactorDialog(auth: auth, mobile: mobile);
   if (mobile) {
-    return showMobileSheet<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: builder,
-    );
+    return Navigator.of(
+      context,
+    ).push<bool>(material.MaterialPageRoute<bool>(builder: builder));
   }
   return showDialog<bool>(
     context: context,
@@ -683,34 +738,27 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
     final canClose = !_busy;
     late final Widget shell;
     if (widget.mobile) {
-      shell = MobileSheet(
+      shell = MobileSettingsPage(
         title: '开启两步验证',
-        subtitle: _stepLabel,
-        onClose: canClose ? close : null,
-        child: SizedBox(
-          height:
-              (MediaQuery.sizeOf(context).height * 0.78).clamp(430.0, 700.0),
-          child: body,
-        ),
+        canClose: canClose,
+        onClose: close,
+        child: _body(context),
       );
     } else {
       shell = ContentDialog(
         title: const Text('开启两步验证'),
         content: SizedBox(width: 470, height: 530, child: body),
         actions: <Widget>[
-          Button(
+          mobileSecurityAction(
+            context,
+            mobile: widget.mobile,
             onPressed: canClose ? close : null,
-            child: Text(
-              _step == _TwoFactorSetupStep.recovery ? '完成' : '取消',
-            ),
+            child: Text(_step == _TwoFactorSetupStep.recovery ? '完成' : '取消'),
           ),
         ],
       );
     }
-    return PopScope<void>(
-      canPop: canClose,
-      child: shell,
-    );
+    return PopScope<void>(canPop: canClose, child: shell);
   }
 
   String get _stepLabel => switch (_step) {
@@ -729,7 +777,9 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
             const SizedBox(height: 14),
             InfoLabel(
               label: '当前密码',
-              child: TextBox(
+              child: mobileSecurityInput(
+                context,
+                mobile: widget.mobile,
                 key: const ValueKey('2fa-setup-password'),
                 controller: _passwordController,
                 obscureText: true,
@@ -744,7 +794,9 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
       },
       if (_error case final error?) ...<Widget>[
         const SizedBox(height: 12),
-        InfoBar(
+        mobileSecurityNotice(
+          context,
+          mobile: widget.mobile,
           title: const Text('设置失败'),
           content: Text(error),
           severity: InfoBarSeverity.error,
@@ -754,16 +806,17 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
       if (_busy)
         const ProgressBar()
       else
-        FilledButton(
+        mobileSecurityAction(
+          context,
+          mobile: widget.mobile,
+          primary: true,
           key: const ValueKey('2fa-setup-continue'),
           onPressed: _continue,
-          child: Text(
-            switch (_step) {
-              _TwoFactorSetupStep.password => '验证密码',
-              _TwoFactorSetupStep.verify => '验证并开启',
-              _TwoFactorSetupStep.recovery => '我已安全保存',
-            },
-          ),
+          child: Text(switch (_step) {
+            _TwoFactorSetupStep.password => '验证密码',
+            _TwoFactorSetupStep.verify => '验证并开启',
+            _TwoFactorSetupStep.recovery => '我已安全保存',
+          }),
         ),
     ];
     return Column(
@@ -808,7 +861,9 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
         ),
       ),
       const SizedBox(height: 8),
-      Button(
+      mobileSecurityAction(
+        context,
+        mobile: widget.mobile,
         key: const ValueKey('2fa-setup-copy-uri'),
         onPressed: () => _copy(setup.otpauthUri),
         child: const Text('复制验证器 URI'),
@@ -816,7 +871,9 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
       const SizedBox(height: 12),
       InfoLabel(
         label: '6 位验证码',
-        child: TextBox(
+        child: mobileSecurityInput(
+          context,
+          mobile: widget.mobile,
           key: const ValueKey('2fa-setup-code'),
           controller: _codeController,
           keyboardType: TextInputType.number,
@@ -833,10 +890,12 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
     final codes = _recoveryCodes!.values;
     final text = codes.join('\n');
     return <Widget>[
-      const InfoBar(
-        key: ValueKey('2fa-recovery-warning'),
-        title: Text('恢复码只显示这一次'),
-        content: Text('每个恢复码只能使用一次。请立即复制并离线保存。'),
+      mobileSecurityNotice(
+        context,
+        mobile: widget.mobile,
+        key: const ValueKey('2fa-recovery-warning'),
+        title: const Text('恢复码只显示这一次'),
+        content: const Text('每个恢复码只能使用一次。请立即复制并离线保存。'),
         severity: InfoBarSeverity.warning,
       ),
       const SizedBox(height: 12),
@@ -853,7 +912,9 @@ class _EnableTwoFactorDialogState extends State<_EnableTwoFactorDialog> {
         ),
       ),
       const SizedBox(height: 10),
-      Button(
+      mobileSecurityAction(
+        context,
+        mobile: widget.mobile,
         key: const ValueKey('2fa-recovery-copy-all'),
         onPressed: () => _copy(text),
         child: const Text('复制全部恢复码'),
@@ -873,9 +934,11 @@ Future<void> _showRecoveryCodesDialog(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        const InfoBar(
-          title: Text('旧恢复码已失效'),
-          content: Text('新恢复码只显示这一次，请立即保存。'),
+        mobileSecurityNotice(
+          context,
+          mobile: mobile,
+          title: const Text('旧恢复码已失效'),
+          content: const Text('新恢复码只显示这一次，请立即保存。'),
           severity: InfoBarSeverity.warning,
         ),
         const SizedBox(height: 12),
@@ -885,7 +948,9 @@ Future<void> _showRecoveryCodesDialog(
           style: const TextStyle(fontFamily: 'monospace'),
         ),
         const SizedBox(height: 10),
-        Button(
+        mobileSecurityAction(
+          context,
+          mobile: mobile,
           onPressed: () => Clipboard.setData(ClipboardData(text: text)),
           child: const Text('复制全部恢复码'),
         ),
@@ -894,12 +959,18 @@ Future<void> _showRecoveryCodesDialog(
   );
   Widget builder(BuildContext routeContext) {
     if (mobile) {
-      return MobileSheet(
+      return MobileSettingsPage(
         title: '新的恢复码',
-        onClose: () => Navigator.of(routeContext).pop(),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(18),
-          child: content,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            content,
+            const SizedBox(height: 20),
+            material.FilledButton(
+              onPressed: () => Navigator.of(routeContext).pop(),
+              child: const Text('我已保存'),
+            ),
+          ],
         ),
       );
     }
@@ -907,7 +978,10 @@ Future<void> _showRecoveryCodesDialog(
       title: const Text('新的恢复码'),
       content: SizedBox(width: 420, child: content),
       actions: <Widget>[
-        FilledButton(
+        mobileSecurityAction(
+          context,
+          mobile: mobile,
+          primary: true,
           onPressed: () => Navigator.of(routeContext).pop(),
           child: const Text('我已保存'),
         ),
@@ -916,11 +990,9 @@ Future<void> _showRecoveryCodesDialog(
   }
 
   if (mobile) {
-    return showMobileSheet<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: builder,
-    );
+    return Navigator.of(
+      context,
+    ).push<void>(material.MaterialPageRoute<void>(builder: builder));
   }
   return showDialog<void>(
     context: context,

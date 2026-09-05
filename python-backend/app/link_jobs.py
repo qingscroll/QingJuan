@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Lock
 from uuid import uuid4
 
 from .models import (
@@ -33,6 +34,28 @@ class LinkJobStore:
 
     def __init__(self) -> None:
         self._jobs: dict[str, _StoredLinkJob] = {}
+        self._idempotency_keys: dict[tuple[str, str], str] = {}
+        self._creation_lock = Lock()
+
+    def create_or_get(
+        self,
+        mode: LinkJobMode,
+        payload: AddBookPayload,
+        owner_id: str = DEFAULT_ADMIN_USER_ID,
+        idempotency_key: str | None = None,
+    ) -> tuple[LinkJobRecord, bool]:
+        """Deduplicate one client operation for the lifetime of its stored job."""
+        with self._creation_lock:
+            key = (owner_id, idempotency_key) if idempotency_key is not None else None
+            if key is not None and key in self._idempotency_keys:
+                existing = self._require(self._idempotency_keys[key])
+                if existing.record.mode != mode or existing.payload != payload:
+                    raise ValueError("Idempotency-Key 已用于不同的链接任务，请为新操作生成新的键。")
+                return existing.record.model_copy(deep=True), False
+            job = self.create(mode, payload, owner_id)
+            if key is not None:
+                self._idempotency_keys[key] = job.id
+            return job, True
 
     def create(
         self,

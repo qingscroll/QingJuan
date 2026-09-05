@@ -445,7 +445,9 @@ install -o root -g root -m 0755 "$REPO_DIR/deploy/linux/uninstall.sh" "$UNINSTAL
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" qingjuan-updater.path
-systemctl start "$SERVICE_NAME"
+# Reinstallation can rotate credentials or change the listener. An already
+# running process must reload EnvironmentFile before reporting installation success.
+systemctl restart "$SERVICE_NAME"
 systemctl start qingjuan-updater.path
 
 print_initial_admin_password() {
