@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
 import 'package:qingjuan/app/app_theme.dart';
 import 'package:qingjuan/core/api/api_client.dart';
 import 'package:qingjuan/features/manga_translation/editor/manga_text_editor_page.dart';
@@ -16,9 +17,10 @@ void main() {
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 960));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    const file = MangaTranslationFile(
-      path: r'C:\fixtures\page-0001.png',
-      sourceRoot: r'C:\fixtures',
+    final fixturePath = path.join('fixtures', 'page-0001.png');
+    final file = MangaTranslationFile(
+      path: fixturePath,
+      sourceRoot: path.dirname(fixturePath),
       relativePath: 'page-0001.png',
       hasProject: true,
     );
@@ -58,9 +60,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
 
     final editButton = find.byKey(
-      const ValueKey<String>(
-        r'edit-manga-file-C:\fixtures\page-0001.png',
-      ),
+      ValueKey<String>('edit-manga-file-${file.path}'),
     );
     expect(editButton, findsOneWidget);
     await tester.tap(editButton);
