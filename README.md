@@ -15,6 +15,11 @@
 Windows 与 Android 共用业务能力，但采用两套独立界面：Windows 保持 v1.3.4 的 Fluent/Windows 仿原生桌面风格，
 Android 使用触控优先的移动端风格；窗口宽度变化不会让两种平台界面互相切换。
 
+Android 使用「书库 / 发现 / 任务 / 我的」四个入口，采用中性纸白、层次分明的黑色表面与青瓷绿强调色。
+手机使用小液态胶囊底部导航，局部模糊在减少动态效果或高对比模式下关闭；平板使用移动侧栏与作品/目录双栏。
+继续阅读直达正文，下载、导出、翻译与异步导入有明确状态；浅色、深色和跟随系统均可在“我的 → 外观”切换。
+完整设计、能力边界、截图和验证记录见[移动端重构交付](docs/design/mobile-redesign.md)。
+
 > 项目仍在持续开发。网站规则变化时，部分下载功能可能暂时失效。请只保存你有权访问的内容。
 
 ## 功能
@@ -25,7 +30,7 @@ Android 使用触控优先的移动端风格；窗口宽度变化不会让两种
 - 使用 OpenAI 兼容接口翻译小说和漫画
 - 在桌面漫画翻译工作台中批量处理图片，并支持正常翻译、导出译文、导出原文、仅翻译工程 JSON、导入译文并渲染、仅上色、仅超分、仅修复和替换翻译九种工作流
 - 导出 `TXT`、`DOCX`、`EPUB`、`PDF` 或图片压缩包
-- 阅读原文和译文，保存阅读进度
+- 阅读原文和译文，按章节与页码继续阅读；连续阅读按当前排版计算页码并保存段落位置，调整字号或窗口后按正文位置恢复
 - 使用设备系统 TTS 听书
 - 支持亮色、深色和跟随系统主题
 
@@ -53,6 +58,7 @@ Windows ZIP 包含本机后端，可在“本机后端 / Linux 远程后端”�
 从 [Releases](https://github.com/Tavre/QingJuan/releases/latest) 下载对应平台的安装包：
 
 - Windows：完整解压 Windows x64 ZIP，运行 `qingjuan.exe`。需要单机使用时在设置中选择“本机后端”。
+- 后台运行：Windows 顶栏点击“收起到托盘”，窗口隐藏但下载与翻译继续；点击右下角青卷图标恢复，右键可选择“显示青卷”或“退出青卷”。普通最小化与关闭按钮保持原有行为。
 - Android：下载 APK，在手机或平板确认来源后安装。
 
 ### 2. 可选：部署 Linux 后端
@@ -84,7 +90,7 @@ sudo qingjuan-password --generate
 
 ### 3. 选择后端
 
-打开 **设置 → 后端连接**：
+Windows 打开 **设置 → 后端连接**；Android 首次使用直接进入连接流程，也可从 **我的 → 服务连接** 修改：
 
 - Windows 本机模式：选择“本机后端”并保存，应用会按需启动安装包内的后端，无需 Token；本机后端不启动浏览器管理界面，
   翻译模型、API 密钥、系统提示词和外部 OCR 直接在客户端“设置 → 翻译服务”中配置。
@@ -173,8 +179,4 @@ Windows 客户端连接到可用后端后，可从侧栏进入“漫画翻译”
 本项目使用 [GNU GPL v3](./LICENSE) 许可证。
 
 感谢[所有贡献者](https://github.com/Tavre/QingJuan/graphs/contributors)，包括[Linux do](https://linux.do) 社区，以及Flutter、FastAPI、RapidOCR、
-`fluent_ui`、[fanqie-assistant](https://github.com/naiyQAQ/fanqie-assistant) 等开源项目。
-
-桌面端漫画翻译工作台的工作流模式、工程目录约定和交互设计借用并复刻自
-[hgmzhn/manga-translator-ui](https://github.com/hgmzhn/manga-translator-ui)。原项目以 GPL-3.0 发布；
-本项目已取得原作者授权，并在此保留借用与来源声明。
+`fluent_ui`、[fanqie-assistant](https://github.com/naiyQAQ/fanqie-assistant)、[hgmzhn/manga-translator-ui](https://github.com/hgmzhn/manga-translator-ui) 等开源项目。

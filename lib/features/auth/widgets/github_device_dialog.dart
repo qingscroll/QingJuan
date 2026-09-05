@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/material.dart' as material;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/models/user_account.dart';
-import '../../../shared/mobile_sheet.dart';
+import '../../../mobile/mobile_settings_route.dart';
+import '../../../mobile/mobile_security_controls.dart';
 import '../../../shared/responsive.dart';
 import '../auth_controller.dart';
 
@@ -25,10 +27,8 @@ Future<GitHubDevicePollResult?> showGitHubDeviceAuthorization({
         mobile: mobile,
       );
   if (mobile) {
-    return showMobileSheet<GitHubDevicePollResult>(
-      context: context,
-      barrierDismissible: false,
-      builder: builder,
+    return Navigator.of(context).push<GitHubDevicePollResult>(
+      material.MaterialPageRoute<GitHubDevicePollResult>(builder: builder),
     );
   }
   return showDialog<GitHubDevicePollResult>(
@@ -181,16 +181,20 @@ class _GitHubDeviceDialogState extends State<_GitHubDeviceDialog> {
   Widget build(BuildContext context) {
     final content = _body(context);
     if (widget.mobile) {
-      return MobileSheet(
+      return MobileSettingsPage(
         title: widget.purpose == 'bind' ? '绑定 GitHub' : '使用 GitHub 登录',
-        subtitle: '设备授权期间可随时取消',
         onClose: _close,
-        child: SizedBox(
-          height: (MediaQuery.sizeOf(context).height * 0.58).clamp(330, 560),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
-            child: content,
-          ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            content,
+            const SizedBox(height: 20),
+            material.OutlinedButton(
+              key: const ValueKey('github-device-cancel'),
+              onPressed: _close,
+              child: const Text('取消授权'),
+            ),
+          ],
         ),
       );
     }
@@ -198,7 +202,9 @@ class _GitHubDeviceDialogState extends State<_GitHubDeviceDialog> {
       title: Text(widget.purpose == 'bind' ? '绑定 GitHub' : '使用 GitHub 登录'),
       content: SizedBox(width: 460, child: content),
       actions: <Widget>[
-        Button(
+        mobileSecurityAction(
+          context,
+          mobile: widget.mobile,
           key: const ValueKey('github-device-cancel'),
           onPressed: _close,
           child: const Text('取消'),
@@ -213,13 +219,18 @@ class _GitHubDeviceDialogState extends State<_GitHubDeviceDialog> {
         key: const ValueKey('github-device-error'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          InfoBar(
+          mobileSecurityNotice(
+            context,
+            mobile: widget.mobile,
             title: const Text('GitHub 授权失败'),
             content: Text(error),
             severity: InfoBarSeverity.error,
           ),
           const SizedBox(height: 12),
-          FilledButton(
+          mobileSecurityAction(
+            context,
+            mobile: widget.mobile,
+            primary: true,
             onPressed: widget.purpose == 'bind'
                 ? _close
                 : () {
@@ -273,12 +284,17 @@ class _GitHubDeviceDialogState extends State<_GitHubDeviceDialog> {
           spacing: 8,
           runSpacing: 8,
           children: <Widget>[
-            Button(
+            mobileSecurityAction(
+              context,
+              mobile: widget.mobile,
               key: const ValueKey('github-device-copy-code'),
               onPressed: _copyCode,
               child: Text(_copied ? '已复制代码' : '复制代码'),
             ),
-            FilledButton(
+            mobileSecurityAction(
+              context,
+              mobile: widget.mobile,
+              primary: true,
               key: const ValueKey('github-device-open-browser'),
               onPressed: _openTrustedVerificationPage,
               child: const Text('打开 GitHub'),
@@ -300,9 +316,11 @@ class _GitHubDeviceDialogState extends State<_GitHubDeviceDialog> {
           style: FluentTheme.of(context).typography.caption,
         ),
         const SizedBox(height: 10),
-        const InfoBar(
-          title: Text('安全提示'),
-          content: Text(
+        mobileSecurityNotice(
+          context,
+          mobile: widget.mobile,
+          title: const Text('安全提示'),
+          content: const Text(
             '只在 github.com/login/device 输入本窗口本次显示的代码；不要替他人输入代码。青卷不会持久化设备代码，GitHub 访问令牌也不会下发到客户端。',
           ),
           severity: InfoBarSeverity.info,

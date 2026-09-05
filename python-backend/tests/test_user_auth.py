@@ -363,6 +363,64 @@ def test_two_users_are_isolated_across_books_files_tasks_and_logs(user_database:
         assert own_logs.json()[0]["message"] == "私有任务日志"
 
 
+def test_pagination_progress_remains_private_and_appears_on_owners_shelf(user_database: Path) -> None:
+    with TestClient(_application()) as client:
+        first = _register(client, "page_reader_one")
+        second = _register(client, "page_reader_two")
+        first_headers = {"X-QingJuan-User-Token": first["token"]}
+        second_headers = {"X-QingJuan-User-Token": second["token"]}
+        book = _save_book(
+            user_database, owner_id=first["user"]["id"], book_id="book-pages", title="甲的分页",
+        )
+        endpoint = f"{API_PREFIX}/books/{book.id}/progress"
+        payload = {
+            "chapterIndex": 1, "pageIndex": 2, "pageCount": 10,
+            "layoutKey": "reader-layout-v1", "contentMode": "original", "characterOffset": 90,
+        }
+        assert client.put(endpoint, headers=first_headers, json=payload).status_code == 200
+        other_write = client.put(endpoint, headers=second_headers, json={**payload, "pageIndex": 5})
+        assert other_write.status_code == 404
+        assert db.load_reading_progress(book.id, first["user"]["id"]).lastPageIndex == 2
+        owner_books = client.get(f"{API_PREFIX}/books", headers=first_headers).json()
+        assert owner_books[0]["lastReadPageIndex"] == 2
+        assert owner_books[0]["lastReadPageCount"] == 10
+        assert client.get(f"{API_PREFIX}/books", headers=second_headers).json() == []
+
+
+def test_same_link_idempotency_key_creates_separate_jobs_for_different_users(
+    user_database: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LinkJobStore()
+    started: list[str] = []
+
+    async def fake_run(job_id: str) -> None:
+        started.append(job_id)
+        store.start(job_id, "开始测试")
+
+    monkeypatch.setattr(main, "LINK_JOB_STORE", store)
+    monkeypatch.setattr(main, "_run_link_job", fake_run)
+    monkeypatch.setattr(main.app.state, "link_job_tasks", set(), raising=False)
+    with TestClient(_application()) as client:
+        first = _register(client, "link_reader_one")
+        second = _register(client, "link_reader_two")
+        first_headers = {"X-QingJuan-User-Token": first["token"], "Idempotency-Key": "same-key"}
+        second_headers = {"X-QingJuan-User-Token": second["token"], "Idempotency-Key": "same-key"}
+        payload = {
+            "mode": "import",
+            "payload": {"sourceUrl": "https://example.com/book/1", "bookKind": "长小说", "language": "中文"},
+        }
+        endpoint = f"{API_PREFIX}/books/link-jobs"
+        first_job = client.post(endpoint, headers=first_headers, json=payload)
+        repeated = client.post(endpoint, headers=first_headers, json=payload)
+        second_job = client.post(endpoint, headers=second_headers, json=payload)
+        assert first_job.status_code == repeated.status_code == second_job.status_code == 200
+        assert first_job.json()["id"] == repeated.json()["id"]
+        assert first_job.json()["id"] != second_job.json()["id"]
+        assert set(started) == {first_job.json()["id"], second_job.json()["id"]}
+        assert len(started) == 2
+        assert client.get(f"{endpoint}/{first_job.json()['id']}", headers=second_headers).status_code == 404
+
+
 def test_admin_user_management_disables_sessions_and_reports_book_count(
     user_database: Path,
 ) -> None:

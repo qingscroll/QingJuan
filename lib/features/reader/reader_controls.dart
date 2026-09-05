@@ -21,43 +21,42 @@ class ReaderBottomAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final selectedText = palette.accent;
     return Expanded(
-      child: Semantics(
-        button: true,
-        selected: selected,
-        label: label,
-        child: Button(
-          style: ButtonStyle(
-            padding: const WidgetStatePropertyAll(EdgeInsets.zero),
-            elevation: const WidgetStatePropertyAll(0),
-            shadowColor: const WidgetStatePropertyAll(Color(0x00000000)),
-            foregroundColor: WidgetStatePropertyAll(
-              selected ? palette.accent : palette.text,
-            ),
-            backgroundColor: WidgetStateProperty.resolveWith((states) {
-              if (states.contains(WidgetState.pressed)) {
-                return palette.controlFill.withAlpha(190);
-              }
-              return const Color(0x00000000);
-            }),
-            shape: WidgetStatePropertyAll(
-              RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: const BorderSide(color: Color(0x00000000)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: Semantics(
+          button: true,
+          selected: selected,
+          label: label,
+          child: Button(
+            style: ButtonStyle(
+              padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+              elevation: const WidgetStatePropertyAll(0),
+              shadowColor: const WidgetStatePropertyAll(Color(0x00000000)),
+              foregroundColor: WidgetStatePropertyAll(
+                selected ? selectedText : palette.text,
+              ),
+              backgroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.pressed)) {
+                  return selected
+                      ? palette.accent.withAlpha(48)
+                      : palette.controlFill.withAlpha(190);
+                }
+                return selected
+                    ? palette.accent.withAlpha(24)
+                    : const Color(0x00000000);
+              }),
+              shape: WidgetStatePropertyAll(
+                RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Color(0x00000000)),
+                ),
               ),
             ),
-          ),
-          onPressed: onPressed,
-          child: SizedBox(
-            height: 64,
-            child: TweenAnimationBuilder<double>(
-              duration: QjMotion.duration(context),
-              curve: QjMotion.enterCurve,
-              tween: Tween<double>(begin: 0, end: selected ? 1 : 0),
-              builder: (context, progress, child) => Transform.scale(
-                scale: 1 + progress * 0.045,
-                child: child,
-              ),
+            onPressed: onPressed,
+            child: SizedBox(
+              height: 64,
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: <Widget>[
@@ -66,7 +65,7 @@ class ReaderBottomAction extends StatelessWidget {
                   Text(
                     label,
                     style: TextStyle(
-                      color: selected ? palette.accent : palette.secondaryText,
+                      color: selected ? selectedText : palette.secondaryText,
                       fontSize: 12.5,
                       fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                     ),
@@ -99,6 +98,9 @@ class ReaderChoiceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final foreground = selected
+        ? (palette.isDark ? const Color(0xFF000000) : const Color(0xFFFFFFFF))
+        : palette.text;
     return Semantics(
       button: true,
       selected: selected,
@@ -110,26 +112,26 @@ class ReaderChoiceChip extends StatelessWidget {
           padding: WidgetStatePropertyAll(
             EdgeInsets.symmetric(
               horizontal: compact ? 13 : 18,
-              vertical: compact ? 8 : 10,
+              vertical: compact ? 14 : 14,
             ),
           ),
-          foregroundColor: WidgetStatePropertyAll(
-            selected ? palette.accent : palette.text,
-          ),
+          foregroundColor: WidgetStatePropertyAll(foreground),
           backgroundColor: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.pressed)) {
-              return palette.controlFill.withAlpha(220);
+              return selected
+                  ? palette.accent.withAlpha(190)
+                  : palette.controlFill.withAlpha(190);
             }
             return selected
-                ? palette.accent.withAlpha(palette.isDark ? 42 : 28)
+                ? palette.accent
                 : palette.controlFill.withAlpha(175);
           }),
           shape: WidgetStatePropertyAll(
             RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(999),
+              borderRadius: BorderRadius.circular(10),
               side: BorderSide(
                 color: selected ? palette.accent : const Color(0x00000000),
-                width: selected ? 1.4 : 0,
+                width: selected ? 1 : 0,
               ),
             ),
           ),
@@ -138,11 +140,11 @@ class ReaderChoiceChip extends StatelessWidget {
         child: AnimatedDefaultTextStyle(
           duration: QjMotion.duration(context),
           curve: QjMotion.enterCurve,
-          style: TextStyle(
-            color: selected ? palette.accent : palette.text,
-            fontSize: compact ? 13 : 14,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          ),
+          style: DefaultTextStyle.of(context).style.copyWith(
+                color: foreground,
+                fontSize: compact ? 13 : 14,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
           child: Text(label),
         ),
       ),
@@ -187,13 +189,13 @@ class ReaderPaletteSwatch extends StatelessWidget {
                   color: palette.background,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: selected ? palette.accent : palette.divider,
-                    width: selected ? 2.5 : 1,
+                    color: selected ? palette.text : palette.divider,
+                    width: selected ? 2 : 1,
                   ),
                   boxShadow: selected
                       ? <BoxShadow>[
                           BoxShadow(
-                            color: palette.accent.withAlpha(55),
+                            color: palette.text.withAlpha(20),
                             blurRadius: 8,
                             spreadRadius: 1,
                           ),

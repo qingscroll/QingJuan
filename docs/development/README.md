@@ -96,8 +96,8 @@
 | --- | --- | --- |
 | Windows 10 / 11 x64 | 客户端运行与 Windows 开发主机 | 构建、运行、调试 Windows / Android 客户端 |
 | Linux / macOS | 受支持的开发主机 | Android 客户端开发（可选） |
-| Flutter | `3.24.3` **stable** | 正式包禁止用 master / beta | 
-| Dart | `3.5.3` | 随 Flutter 3.24.3 提供，不单独安装 |
+| Flutter | `3.44.4` **stable** | 正式包禁止用 master / beta |
+| Dart | `3.12.2` | 随 Flutter 3.44.4 提供，不单独安装 |
 | JDK | 17 | Gradle 与 Android 构建 |
 | Python | CPython `3.13.x` x64 | 后端开发与测试；别用 Store 重定向别名 |
 | Node.js | `20.19.x` 或 `22.12+` | 仅构建 / 测试 `admin-web/` |
@@ -109,7 +109,7 @@
 ```powershell
 flutter config --enable-android
 flutter config --enable-windows-desktop
-flutter doctor -v          # 确认 Flutter 3.24.3、Android toolchain 无错误
+flutter doctor -v          # 确认 Flutter 3.44.4、Android toolchain 无错误
 flutter pub get
 flutter devices            # 能看到模拟器或开启了 USB 调试的真机
 ```
@@ -150,7 +150,7 @@ flutter run -d windows
 
 ## 6. 当前发布基线（读代码前先看这个）
 
-- 已发布版本：**v2.0.0（build 32）**；仓库当前开发版本：**`2.0.2+34`**（优化移动端阅读体验与性能，修复书页偶发空白与卡顿）。
+- 已发布版本：**v2.1.0（build 40）**；仓库当前开发版本：**`2.1.0+40`**（移动端重设计、漫画文本工作台、书架译文写回与 Windows 托盘体验）。
 - Windows 发布包**必须包含** PyInstaller 构建的本机伴随后端；本机模式只监听回环地址，不用 Token。
 - 既有功能要求：本地文件导入、单章 / 多章导出、设备 TTS、链接任务与实时日志、单一 OpenAI 兼容翻译配置，以及 RapidOCR 漫画翻译链路。
 - 后续版本升级**不得破坏**：现有后端数据、导入导出格式、阅读进度与设置；必须保证兼容（特殊场景要提供迁移说明 + 测试）。

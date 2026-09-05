@@ -4,20 +4,42 @@ import 'package:flutter_miuix/miuix.dart';
 import '../app/app_scope.dart';
 import '../core/models/book.dart';
 import '../core/state/load_state.dart';
-import 'mobile_detail_page.dart';
+import '../features/detail/book_detail_page.dart';
+import '../features/library/library_controller.dart';
+import 'mobile_action_button.dart';
+import 'mobile_import_progress.dart';
 import 'mobile_import_sheet.dart';
+import 'mobile_library_tiles.dart';
 import 'mobile_page.dart';
+import 'mobile_search_field.dart';
+import 'mobile_sheet.dart';
 import 'mobile_state.dart';
+import 'mobile_widgets.dart';
 
 class MobileLibraryPage extends StatefulWidget {
   const MobileLibraryPage({super.key});
-
   @override
   State<MobileLibraryPage> createState() => _MobileLibraryPageState();
 }
 
 class _MobileLibraryPageState extends State<MobileLibraryPage> {
   final _queryController = TextEditingController();
+  final _selected = <String>{};
+  _ShelfFilter _filter = _ShelfFilter.all;
+  _ShelfSort _sort = _ShelfSort.recent;
+  bool _showSearch = false;
+  bool _selecting = false;
+  bool _deleting = false;
+  bool _initialized = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_initialized) return;
+    _initialized = true;
+    _queryController.text = AppScope.of(context).library.query;
+    _showSearch = _queryController.text.isNotEmpty;
+  }
 
   @override
   void dispose() {
@@ -28,207 +50,381 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
   Future<void> _addBook() async {
     final book = await showMobileImportSheet(context);
     if (!mounted || book == null) return;
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => MobileBookDetailPage(bookId: book.id),
-      ),
-    );
+    _openBook(book);
   }
 
-  void _openBook(Book book) {
-    Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => MobileBookDetailPage(bookId: book.id),
-      ),
+  void _openBook(Book book, {bool read = false}) {
+    Navigator.of(context).push<void>(MaterialPageRoute<void>(
+      builder: (_) => BookDetailPage(bookId: book.id, openReaderOnLoad: read),
+    ));
+  }
+
+  void _toggleSelection(Book book) => setState(() {
+        _selecting = true;
+        if (!_selected.add(book.id)) _selected.remove(book.id);
+      });
+
+  Future<void> _options() async {
+    final value = await showMobileSheet<String>(
+      context: context,
+      title: '书库整理',
+      child: Column(children: <Widget>[
+        for (final sort in _ShelfSort.values)
+          ListTile(
+            minVerticalPadding: 12,
+            title: Text(sort.label),
+            trailing: _sort == sort ? const Icon(Icons.check_rounded) : null,
+            onTap: () => Navigator.pop(context, sort.name),
+          ),
+        const Divider(height: 1),
+        ListTile(
+          minVerticalPadding: 12,
+          leading: const Icon(Icons.checklist_rounded),
+          title: const Text('批量管理'),
+          subtitle: const Text('选择作品并从书库删除'),
+          onTap: () => Navigator.pop(context, 'select'),
+        ),
+      ]),
     );
+    if (!mounted || value == null) return;
+    setState(() {
+      if (value == 'select') {
+        _selecting = true;
+      } else {
+        _sort = _ShelfSort.values.byName(value);
+      }
+    });
+  }
+
+  Future<void> _deleteSelected() async {
+    final library = AppScope.of(context).library;
+    final books =
+        library.books.where((book) => _selected.contains(book.id)).toList();
+    if (books.isEmpty || _deleting) return;
+    final confirmed = await showMobileSheet<bool>(
+      context: context,
+      title: '删除 ${books.length} 本作品？',
+      child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(books.take(4).map((book) => '《${book.title}》').join('、') +
+                (books.length > 4 ? '等作品' : '')),
+            const SizedBox(height: 12),
+            const Text('将删除作品、已下载章节与阅读记录。此操作无法撤销，需要重新导入后才能再次阅读。'),
+            const SizedBox(height: 20),
+            MiuixButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text('确认删除',
+                    style:
+                        TextStyle(color: MiuixTheme.of(context).colors.error))),
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('保留作品')),
+          ]),
+    );
+    if (!mounted || confirmed != true) return;
+    setState(() => _deleting = true);
+    var removed = 0;
+    try {
+      for (final book in books) {
+        await library.delete(book.id);
+        _selected.remove(book.id);
+        removed++;
+      }
+      if (mounted) setState(() => _selecting = false);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已删除 $removed 本，其余作品未删除：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _deleting = false);
+    }
+  }
+
+  List<Book> _books(LibraryController library) {
+    final books = library.filteredBooks.where(_filter.matches).toList();
+    if (_sort == _ShelfSort.title) {
+      books.sort((a, b) => a.title.compareTo(b.title));
+    } else if (_sort == _ShelfSort.recent) {
+      final order = {
+        for (var i = 0; i < library.books.length; i++) library.books[i].id: i
+      };
+      books.sort((a, b) {
+        final recent = (b.lastReadAt ?? '').compareTo(a.lastReadAt ?? '');
+        return recent == 0 ? order[a.id]!.compareTo(order[b.id]!) : recent;
+      });
+    }
+    return books;
   }
 
   @override
   Widget build(BuildContext context) {
     final library = AppScope.of(context).library;
-    return AnimatedBuilder(
-      animation: library,
-      builder: (context, _) {
-        final books = library.filteredBooks;
-        return MobilePage(
-          title: '书架',
-          subtitle: library.books.isEmpty
-              ? '把想读的故事放在这里'
-              : '${library.books.length} 本作品 · 阅读进度已同步',
+    final theme = MiuixTheme.of(context);
+    return PopScope(
+      canPop: !_selecting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !_deleting) {
+          setState(() {
+            _selecting = false;
+            _selected.clear();
+          });
+        }
+      },
+      child: AnimatedBuilder(
+        animation: library,
+        builder: (context, _) => MobilePage(
+          title: _selecting ? '选择作品' : '书库',
           actions: <Widget>[
-            MiuixIconButton(
-              onPressed: () => library.load(),
-              child: MiuixIcon(
-                vector: MiuixIcons.extended.byName('refresh')!,
-                contentDescription: '刷新书架',
+            if (_selecting)
+              TextButton(
+                  onPressed: _deleting
+                      ? null
+                      : () => setState(() {
+                            _selecting = false;
+                            _selected.clear();
+                          }),
+                  child: const Text('完成'))
+            else ...<Widget>[
+              IconButton(
+                key: const ValueKey('mobile-library-search-toggle'),
+                tooltip: _showSearch ? '收起书库搜索' : '搜索书库',
+                onPressed: () => setState(() {
+                  _showSearch = !_showSearch;
+                  if (!_showSearch) FocusScope.of(context).unfocus();
+                }),
+                icon: const Icon(Icons.search_outlined),
               ),
-            ),
-            const SizedBox(width: 8),
-            MiuixIconButton(
-              onPressed: _addBook,
-              backgroundColor: MiuixTheme.of(context).colors.primary,
-              child: MiuixIcon(
-                vector: MiuixIcons.extended.byName('add')!,
-                tint: MiuixTheme.of(context).colors.onPrimary,
-                contentDescription: '添加书籍',
-              ),
-            ),
+              IconButton(
+                  key: const ValueKey('mobile-library-add'),
+                  tooltip: '导入作品',
+                  onPressed: _addBook,
+                  icon: const Icon(Icons.add_rounded)),
+            ],
           ],
           child: Column(
-            children: <Widget>[
-              MiuixTextField(
-                controller: _queryController,
-                label: '搜索书名或简介',
-                useLabelAsPlaceholder: true,
-                singleLine: true,
-                leadingIcon: MiuixIcon(
-                  vector: MiuixIcons.extended.byName('search')!,
-                  size: 20,
-                ),
-                onChanged: library.setQuery,
-              ),
-              const SizedBox(height: 14),
-              Expanded(child: _buildContent(library, books)),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildContent(dynamic library, List<Book> books) {
-    if (library.state == LoadState.idle || library.state == LoadState.loading) {
-      return const MobileLoadingView('正在整理书架');
-    }
-    if (library.state == LoadState.error) {
-      return MobileEmptyView(
-        icon: MiuixIcon(vector: MiuixIcons.extended.byName('help')!),
-        title: '暂时无法加载书架',
-        message: library.error ?? '未知错误',
-        action: MiuixTextButton('重试', onPressed: () => library.load()),
-      );
-    }
-    if (books.isEmpty) {
-      return MobileEmptyView(
-        icon: MiuixIcon(vector: MiuixIcons.extended.byName('contactsBook')!),
-        title: library.state == LoadState.empty ? '书架还是空的' : '没有匹配结果',
-        message: library.state == LoadState.empty
-            ? '导入网页作品或本地文本，阅读进度会保存在当前后端。'
-            : '试试更短的书名、作者或简介关键词。',
-        action: library.state == LoadState.empty
-            ? MiuixButton(
-                onPressed: _addBook,
-                colors: MiuixButtonDefaults.buttonColorsPrimary(context),
-                child: const MiuixText('添加第一本书'),
-              )
-            : null,
-      );
-    }
-    return GridView.builder(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.only(bottom: 18),
-      itemCount: books.length,
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 176,
-        mainAxisExtent: 250,
-        crossAxisSpacing: 13,
-        mainAxisSpacing: 16,
-      ),
-      itemBuilder: (context, index) => _BookCard(
-        book: books[index],
-        onOpen: () => _openBook(books[index]),
-      ),
-    );
-  }
-}
-
-
-class _BookCard extends StatelessWidget {
-  const _BookCard({required this.book, required this.onOpen});
-
-  final Book book;
-  final VoidCallback onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = MiuixTheme.of(context);
-    final progress = book.chapterCount <= 0
-        ? 0.0
-        : (book.lastReadChapterIndex / book.chapterCount)
-            .clamp(0.0, 1.0)
-            .toDouble();
-    return MiuixPressable(
-      onPressed: onOpen,
-      feedbackType: MiuixPressFeedbackType.sink,
-      borderRadius: BorderRadius.circular(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Expanded(child: _BookCover(book: book)),
-          const SizedBox(height: 8),
-          Text(
-            book.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textStyles.body2.copyWith(
-              color: theme.colors.onBackground,
-              fontWeight: FontWeight.w600,
-              height: 1.22,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            book.chapterCount <= 0
-                ? book.kind
-                : '${book.lastReadChapterIndex}/${book.chapterCount} 章',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textStyles.footnote2.copyWith(
-              color: theme.colors.onSurfaceVariantSummary,
-            ),
-          ),
-          const SizedBox(height: 6),
-          MiuixLinearProgressIndicator(progress: progress, height: 4),
-        ],
-      ),
-    );
-  }
-}
-
-
-class _BookCover extends StatelessWidget {
-  const _BookCover({required this.book});
-
-  final Book book;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = MiuixTheme.of(context);
-    final api = AppScope.of(context).api;
-    final cover = book.cover?.trim();
-    final placeholder = ColoredBox(
-      color: theme.colors.secondaryContainer,
-      child: Center(
-        child: MiuixIcon(
-          vector: MiuixIcons.extended.byName('contactsBook')!,
-          tint: theme.colors.primary,
-          size: 30,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (_showSearch) ...<Widget>[
+                  MobileSearchField(
+                      key: const ValueKey('mobile-library-query'),
+                      controller: _queryController,
+                      hintText: '搜索书名或简介',
+                      autofocus: true,
+                      onChanged: library.setQuery),
+                  const SizedBox(height: 8),
+                ],
+                if (library.books.isNotEmpty)
+                  Row(children: <Widget>[
+                    Expanded(
+                        child: SizedBox(
+                      height:
+                          (MediaQuery.textScalerOf(context).scale(13) * 1.5 +
+                                  20)
+                              .clamp(48, double.infinity),
+                      child: ListView(
+                          scrollDirection: Axis.horizontal,
+                          children: <Widget>[
+                            for (final filter in _ShelfFilter.values)
+                              Semantics(
+                                  selected: _filter == filter,
+                                  child: TextButton(
+                                    key: ValueKey(
+                                        'mobile-library-filter-${filter.name}'),
+                                    onPressed: () =>
+                                        setState(() => _filter = filter),
+                                    style: TextButton.styleFrom(
+                                        foregroundColor: _filter == filter
+                                            ? theme.colors.primary
+                                            : theme.colors.onBackgroundVariant),
+                                    child: Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: <Widget>[
+                                          Text(
+                                              '${filter.label} ${library.books.where(filter.matches).length}',
+                                              style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: _filter == filter
+                                                      ? FontWeight.w700
+                                                      : FontWeight.w400)),
+                                          const SizedBox(height: 3),
+                                          Container(
+                                              height: 2,
+                                              width: 16,
+                                              color: _filter == filter
+                                                  ? theme.colors.primary
+                                                  : Colors.transparent),
+                                        ]),
+                                  )),
+                          ]),
+                    )),
+                    IconButton(
+                        key: const ValueKey('mobile-library-organize'),
+                        tooltip: '排序与批量管理',
+                        onPressed: _options,
+                        icon: const Icon(Icons.tune_rounded, size: 21)),
+                  ]),
+                if (_selecting)
+                  Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      children: <Widget>[
+                        Text('已选 ${_selected.length} 本',
+                            style: theme.textStyles.footnote1),
+                        TextButton(
+                            onPressed: _deleting
+                                ? null
+                                : () => setState(() => _selected.addAll(
+                                    _books(library).map((book) => book.id))),
+                            child: const Text('全选')),
+                        TextButton(
+                            onPressed: _deleting || _selected.isEmpty
+                                ? null
+                                : _deleteSelected,
+                            child: Text(_deleting ? '删除中' : '删除所选',
+                                style: TextStyle(color: theme.colors.error))),
+                      ]),
+                const SizedBox(height: 8),
+                Expanded(child: _content(library)),
+              ]),
         ),
       ),
     );
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: cover == null || cover.isEmpty
-          ? placeholder
-          : Image.network(
-              api.resolveUrl(cover),
-              headers: api.headersForUrl(cover),
-              fit: BoxFit.cover,
-              width: double.infinity,
-              height: double.infinity,
-              errorBuilder: (_, __, ___) => placeholder,
+  }
+
+  Widget _content(LibraryController library) {
+    if (library.state == LoadState.idle || library.state == LoadState.loading) {
+      return const MobileLoadingView('正在加载书库');
+    }
+    if (library.state == LoadState.error && library.books.isEmpty) {
+      return MobileEmptyView(
+          icon: const Icon(Icons.cloud_off_outlined),
+          title: '暂时无法加载书库',
+          message: library.error ?? '检查服务连接后重试。',
+          action: MobileActionButton(
+              onPressed: () => library.load(),
+              icon: Icons.refresh_rounded,
+              child: const Text('重新加载')));
+    }
+    final books = _books(library);
+    if (books.isEmpty && library.linkJob == null) {
+      final empty = library.books.isEmpty;
+      return MobileEmptyView(
+        icon: const Icon(Icons.auto_stories_outlined),
+        title: empty
+            ? '把想读的故事放进书库'
+            : library.query.trim().isNotEmpty
+                ? '没有找到这本书'
+                : '这里还没有${_filter.label}',
+        message: empty ? '在发现页搜索作品，或导入作品链接与本地文件。' : '调整关键词或类型，查看书库中的其他作品。',
+        action: empty
+            ? MobileActionButton(
+                onPressed: _addBook,
+                icon: Icons.library_add_outlined,
+                child: const Text('导入第一本作品'))
+            : MobileActionButton(
+                tonal: true,
+                onPressed: () {
+                  setState(() => _filter = _ShelfFilter.all);
+                  _queryController.clear();
+                  library.setQuery('');
+                },
+                child: const Text('查看全部藏书')),
+      );
+    }
+    final recents = library.books
+        .where((book) => book.lastReadAt?.isNotEmpty == true)
+        .toList()
+      ..sort((a, b) => b.lastReadAt!.compareTo(a.lastReadAt!));
+    final continueBook = !_selecting &&
+            _filter == _ShelfFilter.all &&
+            library.query.trim().isEmpty &&
+            recents.isNotEmpty
+        ? recents.first
+        : null;
+    return LayoutBuilder(builder: (context, constraints) {
+      final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+      final columns = constraints.maxWidth < 330 || scale > 1.5
+          ? (constraints.maxWidth / 170).floor().clamp(2, 5)
+          : (constraints.maxWidth / 112).floor().clamp(3, 7);
+      final coverWidth = (constraints.maxWidth - (columns - 1) * 16) / columns;
+      return RefreshIndicator(
+        onRefresh: () => library.load(silent: true),
+        child: CustomScrollView(
+          key: const PageStorageKey('mobile-library-grid'),
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: <Widget>[
+            SliverToBoxAdapter(
+                child: MobileImportProgress(onOpenBook: _openBook)),
+            if (library.state == LoadState.error)
+              SliverToBoxAdapter(
+                  child: Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text('刷新失败，正在显示已加载的书库。${library.error ?? ''}',
+                          style: TextStyle(
+                              color: MiuixTheme.of(context).colors.error)))),
+            if (continueBook != null)
+              SliverToBoxAdapter(
+                  child: MobileContinueReading(
+                      book: continueBook,
+                      onRead: () => _openBook(continueBook, read: true),
+                      onDetails: () => _openBook(continueBook))),
+            if (continueBook != null)
+              SliverToBoxAdapter(
+                  child: MobileSection(
+                      title: '全部作品',
+                      trailing: Text(_sort.label,
+                          style: MiuixTheme.of(context).textStyles.footnote1))),
+            SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  mainAxisExtent: coverWidth * 1.42 +
+                      12 +
+                      MediaQuery.textScalerOf(context).scale(14) * 4.3,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 18),
+              delegate: SliverChildBuilderDelegate((context, index) {
+                final book = books[index];
+                return MobileLibraryTile(
+                    key: ValueKey('mobile-library-book-${book.id}'),
+                    book: book,
+                    selecting: _selecting,
+                    selected: _selected.contains(book.id),
+                    onOpen: () =>
+                        _selecting ? _toggleSelection(book) : _openBook(book),
+                    onSelect: () => _toggleSelection(book));
+              }, childCount: books.length),
             ),
-    );
+            SliverToBoxAdapter(
+                child: SizedBox(height: mobileNavigationClearance(context))),
+          ],
+        ),
+      );
+    });
   }
 }
 
+enum _ShelfFilter {
+  all('全部'),
+  novels('小说'),
+  manga('漫画');
+
+  const _ShelfFilter(this.label);
+  final String label;
+  bool matches(Book book) => switch (this) {
+        _ShelfFilter.all => true,
+        _ShelfFilter.novels => book.kind != '漫画',
+        _ShelfFilter.manga => book.kind == '漫画'
+      };
+}
+
+enum _ShelfSort {
+  recent('最近阅读'),
+  title('按书名'),
+  server('书库顺序');
+
+  const _ShelfSort(this.label);
+  final String label;
+}

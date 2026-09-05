@@ -128,6 +128,7 @@ class QingJuanApp extends StatefulWidget {
 
 class _QingJuanAppState extends State<QingJuanApp> {
   final _navigatorKey = GlobalKey<NavigatorState>();
+  final _rootNavigatorKey = GlobalKey<NavigatorState>();
   String? _activeWorkspaceIdentity;
   int _workspaceGeneration = 0;
   int _backendActivationOperation = 0;
@@ -146,10 +147,10 @@ class _QingJuanAppState extends State<QingJuanApp> {
   Future<void> _initialize() async {
     await widget.backend.ensureReady();
     if (!mounted) return;
-    widget.appState.showNotice(widget.backend.message);
+    if (!Platform.isAndroid) widget.appState.showNotice(widget.backend.message);
     if (widget.backend.status == BackendStatus.ready) {
       await _activateReadyBackend();
-    } else {
+    } else if (!Platform.isAndroid) {
       widget.appState.selectSection(AppSection.settings);
     }
     if (!mounted) return;
@@ -207,7 +208,9 @@ class _QingJuanAppState extends State<QingJuanApp> {
           widget.backend.readyEpoch == readyEpoch) {
         _handledReadyEpoch = readyEpoch;
         widget.appState.showNotice('账号状态恢复失败：$error');
-        widget.appState.selectSection(AppSection.settings);
+        if (!Platform.isAndroid) {
+          widget.appState.selectSection(AppSection.settings);
+        }
       }
     } finally {
       if (_activationEpochInProgress == readyEpoch) {
@@ -231,7 +234,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     if (!mounted) return;
     final identity = widget.auth.workspaceIdentity;
     if (identity == _activeWorkspaceIdentity) {
-      if (identity == null) {
+      if (identity == null && !Platform.isAndroid) {
         widget.appState.selectSection(AppSection.settings);
       }
       return;
@@ -241,9 +244,14 @@ class _QingJuanAppState extends State<QingJuanApp> {
     _resetWorkspaceState();
     _returnToWorkspaceRoot();
     if (identity == null) {
-      widget.appState.selectSection(AppSection.settings);
+      if (Platform.isAndroid) {
+        widget.appState.selectSection(AppSection.library);
+      } else {
+        widget.appState.selectSection(AppSection.settings);
+      }
       return;
     }
+    if (Platform.isAndroid) widget.appState.selectSection(AppSection.library);
     await Future.wait<void>(<Future<void>>[
       widget.library.load(),
       widget.sources.load(),
@@ -269,12 +277,15 @@ class _QingJuanAppState extends State<QingJuanApp> {
       if (!mounted) return;
       final navigator = _navigatorKey.currentState;
       if (navigator != null) navigator.popUntil((route) => route.isFirst);
+      // Fluent dialogs can target the outer app while Android pages use the
+      // mobile navigator. Clear both when the active account/backend changes.
+      _rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
     });
   }
 
   Widget _buildPlatformHome() {
     if (Platform.isAndroid) {
-      return const MobileQingJuanApp();
+      return MobileQingJuanApp(navigatorKey: _navigatorKey);
     }
     return const AppShell();
   }
@@ -313,7 +324,8 @@ class _QingJuanAppState extends State<QingJuanApp> {
         animation: widget.appState.themeModeListenable,
         builder: (context, _) {
           return FluentApp(
-            navigatorKey: _navigatorKey,
+            navigatorKey:
+                Platform.isAndroid ? _rootNavigatorKey : _navigatorKey,
             debugShowCheckedModeBanner: false,
             title: '青卷',
             themeMode: widget.appState.themeModeListenable.value,

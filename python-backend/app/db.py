@@ -508,7 +508,12 @@ def init_db() -> None:
                 last_anchor_type TEXT NOT NULL DEFAULT 'top',
                 last_anchor_index INTEGER NOT NULL DEFAULT 0,
                 last_anchor_offset_ratio REAL NOT NULL DEFAULT 0,
-                last_read_at TEXT
+                last_read_at TEXT,
+                last_page_index INTEGER,
+                last_page_count INTEGER,
+                last_layout_key TEXT,
+                last_content_mode TEXT,
+                last_character_offset INTEGER
             )
             """
         )
@@ -642,6 +647,11 @@ def _ensure_reading_progress_columns(conn: sqlite3.Connection) -> None:
         "last_anchor_type": "ALTER TABLE reading_progress ADD COLUMN last_anchor_type TEXT NOT NULL DEFAULT 'top'",
         "last_anchor_index": "ALTER TABLE reading_progress ADD COLUMN last_anchor_index INTEGER NOT NULL DEFAULT 0",
         "last_anchor_offset_ratio": "ALTER TABLE reading_progress ADD COLUMN last_anchor_offset_ratio REAL NOT NULL DEFAULT 0",
+        "last_page_index": "ALTER TABLE reading_progress ADD COLUMN last_page_index INTEGER",
+        "last_page_count": "ALTER TABLE reading_progress ADD COLUMN last_page_count INTEGER",
+        "last_layout_key": "ALTER TABLE reading_progress ADD COLUMN last_layout_key TEXT",
+        "last_content_mode": "ALTER TABLE reading_progress ADD COLUMN last_content_mode TEXT",
+        "last_character_offset": "ALTER TABLE reading_progress ADD COLUMN last_character_offset INTEGER",
     }
     for column_name, statement in required_columns.items():
         if column_name not in existing_columns:
@@ -1538,7 +1548,8 @@ def list_books(owner_id: str | None = None) -> list[BookRecord]:
             f"""
             SELECT b.owner_id, b.id, b.title, b.source_url, b.book_kind, b.language, b.status,
                    b.chapter_count, b.translated, b.local_path, b.updated_at, b.synopsis,
-                   COALESCE(rp.last_chapter_index, 0), rp.last_read_at
+                   COALESCE(rp.last_chapter_index, 0), rp.last_read_at,
+                   rp.last_page_index, rp.last_page_count
             FROM books b
             LEFT JOIN reading_progress rp
               ON rp.book_id = b.id AND rp.owner_id = b.owner_id
@@ -1559,7 +1570,8 @@ def get_book(book_id: str, owner_id: str | None = None) -> BookRecord | None:
             f"""
             SELECT b.owner_id, b.id, b.title, b.source_url, b.book_kind, b.language, b.status,
                    b.chapter_count, b.translated, b.local_path, b.updated_at, b.synopsis,
-                   COALESCE(rp.last_chapter_index, 0), rp.last_read_at
+                   COALESCE(rp.last_chapter_index, 0), rp.last_read_at,
+                   rp.last_page_index, rp.last_page_count
             FROM books b
             LEFT JOIN reading_progress rp
               ON rp.book_id = b.id AND rp.owner_id = b.owner_id
@@ -1809,7 +1821,12 @@ def load_reading_progress(
                 last_anchor_type,
                 last_anchor_index,
                 last_anchor_offset_ratio,
-                last_read_at
+                last_read_at,
+                last_page_index,
+                last_page_count,
+                last_layout_key,
+                last_content_mode,
+                last_character_offset
             FROM reading_progress
             WHERE book_id = ?{owner_clause}
             """,
@@ -1833,6 +1850,11 @@ def load_reading_progress(
         lastAnchorIndex=row[5],
         lastAnchorOffsetRatio=row[6],
         lastReadAt=row[7],
+        lastPageIndex=row[8],
+        lastPageCount=row[9],
+        lastLayoutKey=row[10],
+        lastContentMode=row[11],
+        lastCharacterOffset=row[12],
     )
 
 
@@ -1848,9 +1870,14 @@ def save_reading_progress(progress: ReadingProgressRecord) -> ReadingProgressRec
                 last_anchor_type,
                 last_anchor_index,
                 last_anchor_offset_ratio,
-                last_read_at
+                last_read_at,
+                last_page_index,
+                last_page_count,
+                last_layout_key,
+                last_content_mode,
+                last_character_offset
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(book_id) DO UPDATE SET
                 owner_id = excluded.owner_id,
                 last_chapter_index = excluded.last_chapter_index,
@@ -1858,7 +1885,12 @@ def save_reading_progress(progress: ReadingProgressRecord) -> ReadingProgressRec
                 last_anchor_type = excluded.last_anchor_type,
                 last_anchor_index = excluded.last_anchor_index,
                 last_anchor_offset_ratio = excluded.last_anchor_offset_ratio,
-                last_read_at = excluded.last_read_at
+                last_read_at = excluded.last_read_at,
+                last_page_index = excluded.last_page_index,
+                last_page_count = excluded.last_page_count,
+                last_layout_key = excluded.last_layout_key,
+                last_content_mode = excluded.last_content_mode,
+                last_character_offset = excluded.last_character_offset
             """,
             (
                 progress.ownerId,
@@ -1869,6 +1901,11 @@ def save_reading_progress(progress: ReadingProgressRecord) -> ReadingProgressRec
                 progress.lastAnchorIndex,
                 progress.lastAnchorOffsetRatio,
                 progress.lastReadAt,
+                progress.lastPageIndex,
+                progress.lastPageCount,
+                progress.lastLayoutKey,
+                progress.lastContentMode,
+                progress.lastCharacterOffset,
             ),
         )
     return progress
@@ -2116,6 +2153,8 @@ def _row_to_book(row: sqlite3.Row | tuple) -> BookRecord:
         synopsis=row[11],
         lastReadChapterIndex=row[12] if len(row) > 12 else 0,
         lastReadAt=row[13] if len(row) > 13 else None,
+        lastReadPageIndex=row[14] if len(row) > 14 else None,
+        lastReadPageCount=row[15] if len(row) > 15 else None,
     )
 
 

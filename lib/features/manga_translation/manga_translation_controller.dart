@@ -331,6 +331,7 @@ class MangaTranslationController extends ChangeNotifier {
       final workspace = MangaWorkspacePaths.forSource(file.path);
       final projectExists = await File(workspace.projectPath).exists() ||
           await File(workspace.legacyProjectPath).exists();
+      final pendingRender = await File(workspace.pendingRenderPath).exists();
       final root = Directory(sourceRoot ?? file.parent.path).absolute.path;
       final relative = path.relative(file.path, from: root);
       additions.add(
@@ -341,6 +342,7 @@ class MangaTranslationController extends ChangeNotifier {
               ? path.basename(file.path)
               : path.normalize(relative),
           hasProject: projectExists,
+          message: pendingRender ? '文本修改已保存，等待重新渲染' : '',
         ),
       );
     }
@@ -479,6 +481,7 @@ class MangaTranslationController extends ChangeNotifier {
     final paths = MangaWorkspacePaths.forSource(item.path);
     await _ensureWorkspace(paths);
     await _ensureEditorBase(paths, force: true);
+    await _markPendingRender(paths);
     await _writeJson(paths.projectPath, project);
     _updateFile(
       item.path,
@@ -501,6 +504,7 @@ class MangaTranslationController extends ChangeNotifier {
     await _ensureEditorBase(paths, force: true);
     // Save first so manual edits remain recoverable even when rendering or
     // bookshelf publication subsequently fails.
+    await _markPendingRender(paths);
     await _writeJson(paths.projectPath, project);
     _updateFile(
       item.path,
@@ -775,12 +779,17 @@ class MangaTranslationController extends ChangeNotifier {
     bool persistProject = true,
   }) async {
     final resultMode = effectiveMode ?? _mode;
-    if (persistProject) {
-      final projectDocument =
-          _projectDocumentForSource(paths.sourcePath, result);
-      if (projectDocument != null) {
-        await _writeJson(paths.projectPath, projectDocument);
-      }
+    final projectDocument = persistProject
+        ? _projectDocumentForSource(paths.sourcePath, result)
+        : null;
+    if (projectDocument != null || result.outputImageBase64 != null) {
+      // Updating either half invalidates the persisted image/project pair.
+      // Keep this on disk so a restart cannot publish an older result image
+      // together with newly edited or exported text.
+      await _markPendingRender(paths);
+    }
+    if (projectDocument != null) {
+      await _writeJson(paths.projectPath, projectDocument);
     }
     if (resultMode == MangaWorkflowMode.exportOriginal &&
         result.original != null) {
@@ -801,18 +810,30 @@ class MangaTranslationController extends ChangeNotifier {
         base64Decode(result.inpaintedImageBase64!),
       );
     }
-    if (result.outputImageBase64 == null) return null;
-    final bytes = base64Decode(result.outputImageBase64!);
+    final encodedImage = result.outputImageBase64?.trim() ?? '';
+    if (encodedImage.isEmpty) return null;
+    final bytes = base64Decode(encodedImage);
     await _writeBytes(paths.resultPath, bytes);
-    if (_outputDirectory.isEmpty) return paths.resultPath;
-    final selectedOutput = path.join(
-      _outputDirectory,
-      _collisionSafeRelativeOutput(item),
-    );
+    final selectedOutput = _outputDirectory.isEmpty
+        ? paths.resultPath
+        : path.join(_outputDirectory, _collisionSafeRelativeOutput(item));
     if (_pathKey(selectedOutput) != _pathKey(paths.resultPath)) {
       await _writeBytes(selectedOutput, bytes);
     }
+    if (_writesBookshelfTranslation(resultMode) &&
+        (projectDocument != null || !persistProject)) {
+      final pending = File(paths.pendingRenderPath);
+      if (await pending.exists()) await pending.delete();
+    }
     return selectedOutput;
+  }
+
+  Future<void> _markPendingRender(MangaWorkspacePaths paths) async {
+    if (await File(paths.pendingRenderPath).exists()) return;
+    await _writeJson(paths.pendingRenderPath, <String, dynamic>{
+      'sourcePath': paths.sourcePath,
+      'pendingRender': true,
+    });
   }
 
   void _bindBookshelfPageTargets(MangaBookshelfImportResult result) {
@@ -862,9 +883,12 @@ class MangaTranslationController extends ChangeNotifier {
   }
 
   bool get _modeWritesBookshelfTranslation =>
-      _mode == MangaWorkflowMode.normal ||
-      _mode == MangaWorkflowMode.importTranslationRender ||
-      _mode == MangaWorkflowMode.replaceTranslation;
+      _writesBookshelfTranslation(_mode);
+
+  bool _writesBookshelfTranslation(MangaWorkflowMode mode) =>
+      mode == MangaWorkflowMode.normal ||
+      mode == MangaWorkflowMode.importTranslationRender ||
+      mode == MangaWorkflowMode.replaceTranslation;
 
   void _recordBookshelfWriteback(
     Map<_BookshelfChapterKey, _BookshelfChapterWriteback> writebacks,
@@ -984,11 +1008,16 @@ class MangaTranslationController extends ChangeNotifier {
     }
 
     final pages = <Map<String, dynamic>>[];
+    var pendingPages = 0;
     final orderedPageNumbers = expected.toList()..sort();
     for (final pageNumber in orderedPageNumbers) {
       final file = chapterFiles[pageNumber];
       if (file == null) continue;
       final paths = MangaWorkspacePaths.forSource(file.path);
+      if (await File(paths.pendingRenderPath).exists()) {
+        pendingPages += 1;
+        continue;
+      }
       final image = File(paths.resultPath);
       final projectFile = File(paths.projectPath);
       if (!await image.exists() || !await projectFile.exists()) continue;
@@ -1007,12 +1036,17 @@ class MangaTranslationController extends ChangeNotifier {
     }
     final missingPages = expected.length - pages.length;
     if (missingPages > 0) {
+      final notGeneratedPages = missingPages - pendingPages;
+      final unavailable = <String>[
+        if (notGeneratedPages > 0) '$notGeneratedPages 页未生成',
+        if (pendingPages > 0) '$pendingPages 页待重新渲染',
+      ].join('、');
       return _TextEditorBookshelfWriteback(
         bound: true,
         written: false,
         missingPages: missingPages,
         failed: false,
-        message: '已保存并重新渲染；本章还有 $missingPages 页未生成，暂未写入书架译文',
+        message: '已保存并重新渲染；本章还有 $unavailable，暂未写入书架译文',
       );
     }
 

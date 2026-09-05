@@ -69,6 +69,13 @@ try:
         TranslationSettings,
     )
     from .multi_user import multi_user_enabled
+    from .scraper_network_security import (
+        PublicBrowserProxy,
+        ScraperNetworkSecurityError,
+        create_public_http_client,
+        public_curl_get,
+        resolve_public_url,
+    )
     from .site_plugins import (
         is_manga_site_url,
         resolve_site_plugin,
@@ -100,6 +107,13 @@ except ImportError:
         TranslationSettings,
     )
     from app.multi_user import multi_user_enabled
+    from app.scraper_network_security import (
+        PublicBrowserProxy,
+        ScraperNetworkSecurityError,
+        create_public_http_client,
+        public_curl_get,
+        resolve_public_url,
+    )
     from app.site_plugins import (
         is_manga_site_url,
         resolve_site_plugin,
@@ -2915,6 +2929,29 @@ async def _notify_download_progress(
         await result
 
 
+def _write_chapter_text_atomic(target_path: Path, text: str) -> None:
+    if not text.strip():
+        raise ValueError("未能取得有效章节正文，请稍后重试")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_path.parent,
+            prefix=".chapter-",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(text)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, target_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 async def _download_single_chapter(
     client: httpx.AsyncClient,
     book_dir: Path,
@@ -2969,7 +3006,7 @@ async def _download_single_chapter(
         source_url,
         image_download_semaphore=image_download_semaphore,
     )
-    existing_path.write_text(result.text, encoding="utf-8")
+    _write_chapter_text_atomic(existing_path, result.text)
     return {
         "index": chapter_index,
         "file_name": filename,
@@ -4225,6 +4262,7 @@ def _erase_manga_source_text(
     dilation_radius = max(1, min(5, int(round(style.font_size * 0.08))))
     kernel_size = dilation_radius * 2 + 1
     removal_mask = mask.filter(ImageFilter.MaxFilter(kernel_size))
+    permitted_mask = Image.new("L", crop.size, 255)
     if limit_bbox is not None and limit_mask is not None:
         normalized_limit = _normalize_region_bbox(limit_bbox, canvas.size)
         intersection = _intersect_region_bboxes(clipped_bbox, normalized_limit)
@@ -4261,8 +4299,10 @@ def _erase_manga_source_text(
     rgb_crop = crop.convert("RGB")
     unmasked_pixels = [
         tuple(int(channel) for channel in pixel)
-        for pixel, mask_value in zip(_image_pixels(rgb_crop), _image_pixels(removal_mask), strict=True)
-        if mask_value == 0
+        for pixel, mask_value, permitted in zip(
+            _image_pixels(rgb_crop), _image_pixels(removal_mask), _image_pixels(permitted_mask), strict=True
+        )
+        if mask_value == 0 and permitted > 0
     ]
     average_background_delta = (
         sum(_color_difference(pixel, fill_color) for pixel in unmasked_pixels) / len(unmasked_pixels)
@@ -5163,84 +5203,125 @@ def _pixel_matches_bubble_fill(
     return distance_from_seed <= 56 or (distance_from_fill <= 78 and luminance_delta <= 36.0)
 
 
+def _bubble_mask_context(
+    image: Image.Image,
+    bbox: tuple[int, int, int, int],
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    # OCR/body rectangles can cut through letters or a balloon outline. Inspect
+    # a margin of ORIGINAL artwork so neither becomes an artificial closed hole.
+    x1, y1, x2, y2 = bbox
+    margin = max(8, min(40, round(min(x2 - x1, y2 - y1) * 0.18)))
+    left, top = max(0, x1 - margin), max(0, y1 - margin)
+    right, bottom = min(image.width, x2 + margin), min(image.height, y2 + margin)
+    return image.crop((left, top, right, bottom)).convert("RGB"), (
+        x1 - left,
+        y1 - top,
+        x2 - left,
+        y2 - top,
+    )
+
+
+def _bubble_mask_components(mask: Image.Image) -> tuple[list[int], list[tuple[int, int, int, int, int]]]:
+    """Four-connected labels and (area, left, top, right, bottom), including 0."""
+    width, height = mask.size
+    if cv2 is not None and np is not None:
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (np.asarray(mask) > 0).astype(np.uint8),
+            connectivity=4,
+        )
+        return labels.ravel().tolist(), [
+            (int(area), int(x), int(y), int(x + w), int(y + h)) for x, y, w, h, area in stats
+        ]
+    pixels = mask.tobytes()
+    labels = [0] * (width * height)
+    stats = [(0, 0, 0, 0, 0)]
+    for start, value in enumerate(pixels):
+        if not value or labels[start]:
+            continue
+        label = len(stats)
+        labels[start] = label
+        queue = deque([start])
+        area = 0
+        left = right = start % width
+        top = bottom = start // width
+        while queue:
+            index = queue.popleft()
+            x, y = index % width, index // width
+            area += 1
+            left, right = min(left, x), max(right, x)
+            top, bottom = min(top, y), max(bottom, y)
+            for neighbor in (
+                index - 1 if x else -1,
+                index + 1 if x + 1 < width else -1,
+                index - width if y else -1,
+                index + width if y + 1 < height else -1,
+            ):
+                if neighbor >= 0 and pixels[neighbor] and not labels[neighbor]:
+                    labels[neighbor] = label
+                    queue.append(neighbor)
+        stats.append((area, left, top, right + 1, bottom + 1))
+    return labels, stats
+
+
+def _finish_precise_bubble_mask(
+    candidate: Image.Image,
+    body: tuple[int, int, int, int],
+) -> Image.Image:
+    """Keep measured background and enclosed glyph holes, never a shape union.
+
+    Exterior-connected ink is balloon/panel/artwork, not text. Large enclosed
+    components are also retained: an open outline on white paper must not be
+    mistaken for one giant glyph. A failed measurement yields an empty mask.
+    """
+    width, height = candidate.size
+    left, top, right, bottom = body
+    labels, stats = _bubble_mask_components(candidate)
+    votes: dict[int, int] = {}
+    for x, y in _seed_positions_for_region((right - left, bottom - top)):
+        label = labels[(y + top) * width + x + left]
+        if label and stats[label][0] >= 24:
+            votes[label] = votes.get(label, 0) + 1
+    if not votes:
+        return Image.new("L", (right - left, bottom - top), 0)
+    selected = max(votes, key=lambda label: (votes[label], stats[label][0]))
+    background = Image.frombytes(
+        "L", candidate.size, bytes(255 if label == selected else 0 for label in labels)
+    )
+    hole_labels, holes = _bubble_mask_components(ImageChops.invert(background))
+    allowed = {0}
+    for label, (_, x1, y1, x2, y2) in enumerate(holes[1:], 1):
+        if x1 == 0 or y1 == 0 or x2 == width or y2 == height:
+            continue
+        if x2 - x1 > (right - left) * 0.65 or y2 - y1 > (bottom - top) * 0.65:
+            continue
+        allowed.add(label)
+    filled = Image.frombytes(
+        "L", candidate.size, bytes(255 if label in allowed else 0 for label in hole_labels)
+    )
+    return filled.crop(body)
+
+
 def _extract_precise_bubble_mask_python(
     image: Image.Image,
     bbox: tuple[int, int, int, int],
     fill_color: tuple[int, int, int],
     fill_shape: str,
 ) -> Image.Image:
-    x1, y1, x2, y2 = bbox
-    crop = image.crop((x1, y1, x2, y2)).convert("RGB")
-    width, height = crop.size
-    if width < 4 or height < 4:
-        return _build_region_shape_mask((width, height), fill_shape)
-
-    blur_radius = max(1.2, min(4.0, min(width, height) / 34.0))
-    blurred = crop.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    blurred_pixels = blurred.load()
-    shape_mask = _build_region_shape_mask((width, height), fill_shape)
-    shape_pixels = shape_mask.load()
-
-    seeds: list[tuple[float, int, int, tuple[int, int, int]]] = []
-    for seed_x, seed_y in _seed_positions_for_region((width, height)):
-        if shape_pixels[seed_x, seed_y] <= 0:
-            continue
-        seed_color = tuple(int(channel) for channel in blurred_pixels[seed_x, seed_y])
-        seeds.append((_score_bubble_seed(seed_color, fill_color), seed_x, seed_y, seed_color))
-    if not seeds:
-        return shape_mask
-    seeds.sort(key=lambda item: item[0], reverse=True)
-
-    best_mask: Image.Image | None = None
-    best_area = 0
-    neighbor_offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
-    for _, seed_x, seed_y, seed_color in seeds[:6]:
-        if shape_pixels[seed_x, seed_y] <= 0:
-            continue
-
-        visited: set[tuple[int, int]] = set()
-        queue: deque[tuple[int, int]] = deque([(seed_x, seed_y)])
-        component_mask = Image.new("L", (width, height), 0)
-        component_pixels = component_mask.load()
-        area = 0
-
-        while queue:
-            current_x, current_y = queue.popleft()
-            if (current_x, current_y) in visited:
-                continue
-            visited.add((current_x, current_y))
-
-            if current_x < 0 or current_x >= width or current_y < 0 or current_y >= height:
-                continue
-            if shape_pixels[current_x, current_y] <= 0:
-                continue
-
-            current_color = tuple(int(channel) for channel in blurred_pixels[current_x, current_y])
-            if not _pixel_matches_bubble_fill(current_color, seed_color, fill_color):
-                continue
-
-            if component_pixels[current_x, current_y] == 0:
-                component_pixels[current_x, current_y] = 255
-                area += 1
-            for offset_x, offset_y in neighbor_offsets:
-                queue.append((current_x + offset_x, current_y + offset_y))
-
-        if area > best_area:
-            best_mask = component_mask
-            best_area = area
-
-    min_area_ratio = 0.14 if fill_shape == "ellipse" else 0.10 if fill_shape == "roundrect" else 0.08
-    min_area = max(24, int(width * height * min_area_ratio))
-    if best_mask is None or best_area < min_area:
-        return shape_mask
-
-    expanded_mask = best_mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.MinFilter(3))
-    inner_shape_kernel = 7 if fill_shape == "ellipse" else 5
-    inner_shape_mask = shape_mask.filter(ImageFilter.MinFilter(inner_shape_kernel))
-    refined_mask = ImageChops.multiply(ImageChops.lighter(expanded_mask, inner_shape_mask), shape_mask)
-    if refined_mask.getbbox() is None:
-        return shape_mask
-    return refined_mask
+    del fill_shape  # Geometry is a layout hint, never permission to erase art.
+    crop, body = _bubble_mask_context(image, bbox)
+    blurred = crop.filter(ImageFilter.GaussianBlur(radius=1.2))
+    candidate = Image.frombytes(
+        "L",
+        crop.size,
+        bytes(
+            255
+            if _color_distance_manhattan(pixel, fill_color) <= 54
+            and _color_distance_manhattan(smooth, fill_color) <= 72
+            else 0
+            for pixel, smooth in zip(_image_pixels(crop), _image_pixels(blurred), strict=True)
+        ),
+    )
+    return _finish_precise_bubble_mask(candidate, body)
 
 
 def _extract_precise_bubble_mask_vectorized(
@@ -5249,77 +5330,14 @@ def _extract_precise_bubble_mask_vectorized(
     fill_color: tuple[int, int, int],
     fill_shape: str,
 ) -> Image.Image:
-    x1, y1, x2, y2 = bbox
-    crop = image.crop((x1, y1, x2, y2)).convert("RGB")
-    width, height = crop.size
-    if width < 4 or height < 4:
-        return _build_region_shape_mask((width, height), fill_shape)
-
-    blur_radius = max(1.2, min(4.0, min(width, height) / 34.0))
-    blurred = crop.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    pixels = np.asarray(blurred, dtype=np.int16)
-    shape_mask = _build_region_shape_mask((width, height), fill_shape)
-    shape_array = np.asarray(shape_mask, dtype=np.uint8) > 0
-
-    seeds: list[tuple[float, int, int, tuple[int, int, int]]] = []
-    for seed_x, seed_y in _seed_positions_for_region((width, height)):
-        if not shape_array[seed_y, seed_x]:
-            continue
-        seed_color = tuple(int(channel) for channel in pixels[seed_y, seed_x])
-        seeds.append((_score_bubble_seed(seed_color, fill_color), seed_x, seed_y, seed_color))
-    if not seeds:
-        return shape_mask
-    seeds.sort(key=lambda item: item[0], reverse=True)
-
+    del fill_shape
+    crop, body = _bubble_mask_context(image, bbox)
+    blurred = crop.filter(ImageFilter.GaussianBlur(radius=1.2))
     fill = np.asarray(fill_color, dtype=np.int16)
-    fill_luminance = _color_luminance(fill_color)
-    pixel_luminance = pixels[:, :, 0] * 0.299 + pixels[:, :, 1] * 0.587 + pixels[:, :, 2] * 0.114
-    distance_from_fill = np.abs(pixels - fill).sum(axis=2)
-    saturation = pixels.max(axis=2) - pixels.min(axis=2)
-    best_component: Any | None = None
-    best_area = 0
-
-    for _, seed_x, seed_y, seed_color in seeds[:6]:
-        seed = np.asarray(seed_color, dtype=np.int16)
-        seed_luminance = _color_luminance(seed_color)
-        distance_from_seed = np.abs(pixels - seed).sum(axis=2)
-        luminance_delta = np.abs(pixel_luminance - seed_luminance)
-        if fill_luminance >= 185:
-            matches = (distance_from_seed <= 72) | (
-                (distance_from_fill <= 112)
-                & (pixel_luminance >= max(148.0, seed_luminance - 44.0))
-                & (saturation <= 100)
-            )
-        elif fill_luminance >= 135:
-            matches = (distance_from_seed <= 62) | (
-                (distance_from_fill <= 90) & (luminance_delta <= 48.0) & (saturation <= 112)
-            )
-        else:
-            matches = (distance_from_seed <= 56) | ((distance_from_fill <= 78) & (luminance_delta <= 36.0))
-        candidate = (matches & shape_array).astype(np.uint8)
-        if not candidate[seed_y, seed_x]:
-            continue
-        _, labels = cv2.connectedComponents(candidate, connectivity=4)
-        label = int(labels[seed_y, seed_x])
-        if label <= 0:
-            continue
-        component = labels == label
-        area = int(np.count_nonzero(component))
-        if area > best_area:
-            best_component = component
-            best_area = area
-
-    min_area_ratio = 0.14 if fill_shape == "ellipse" else 0.10 if fill_shape == "roundrect" else 0.08
-    min_area = max(24, int(width * height * min_area_ratio))
-    if best_component is None or best_area < min_area:
-        return shape_mask
-
-    best_mask = Image.fromarray(np.where(best_component, 255, 0).astype(np.uint8), mode="L")
-    expanded_mask = best_mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.MinFilter(3))
-    inner_shape_kernel = 7 if fill_shape == "ellipse" else 5
-    inner_shape_mask = shape_mask.filter(ImageFilter.MinFilter(inner_shape_kernel))
-    refined_mask = ImageChops.multiply(ImageChops.lighter(expanded_mask, inner_shape_mask), shape_mask)
-    return refined_mask if refined_mask.getbbox() is not None else shape_mask
+    distance = np.abs(np.asarray(crop, dtype=np.int16) - fill).sum(axis=2)
+    smooth_distance = np.abs(np.asarray(blurred, dtype=np.int16) - fill).sum(axis=2)
+    candidate = Image.fromarray(((distance <= 54) & (smooth_distance <= 72)).astype(np.uint8) * 255)
+    return _finish_precise_bubble_mask(candidate, body)
 
 
 def _extract_precise_bubble_mask(
@@ -5443,8 +5461,7 @@ def _build_region_fill_area_mask(
     fill_shape: str,
     direction: str,
 ) -> Image.Image:
-    # 不收缩填充掩码，使用完整的气泡轮廓区域进行背景填充，
-    # 确保原文被完全擦除。高斯模糊已经提供了足够的边缘柔化。
+    # Only the measured interior is permitted; dilating it would eat outlines.
     del fill_shape, direction
     return outer_mask
 
@@ -5457,24 +5474,16 @@ def _resolve_manga_cleanup_limit_mask(
     safe_box: tuple[int, int, int, int] | None,
     explicit_shape: str | None,
 ) -> tuple[Image.Image, bool]:
-    """Return the artwork-safe mask used only for removing source glyphs.
+    """Use measured artwork even for legacy projects with only an OCR box.
 
-    Older upstream-compatible project files contain ``lines`` but no QingJuan
-    ``body_bbox`` metadata.  Parsing such a file necessarily falls back to the
-    tight OCR text box for the body box.  Applying an ellipse/roundrect mask to
-    that tight box clips glyphs near its corners, which leaves Japanese stroke
-    fragments behind.  A full rectangular permit mask is safe in this one
-    case: ``_erase_manga_source_text`` still edits only the detected/dilated ink
-    pixels and the rectangle cannot extend outside the OCR text box.
+    Context-aware extraction fills enclosed glyph holes at the box corners;
+    missing body metadata must never grant a full rectangular erasure permit.
+    The boolean retains diagnostics for this legacy compatibility path.
     """
     missing_container_geometry = (
-        explicit_shape is None
-        and body_bbox == text_bbox
-        and (safe_box is None or safe_box == text_bbox)
+        explicit_shape is None and body_bbox == text_bbox and (safe_box is None or safe_box == text_bbox)
     )
-    if missing_container_geometry:
-        return Image.new("L", bubble_fill_mask.size, 255), True
-    return bubble_fill_mask, False
+    return bubble_fill_mask, missing_container_geometry
 
 
 def _build_region_safe_text_mask(
@@ -8081,12 +8090,41 @@ def _manga_ink_mask_is_unsafe(mask: Image.Image) -> bool:
     return _mask_coverage_ratio(mask) >= 0.72
 
 
+def _manga_bubble_mask_is_unsafe(
+    ink_mask: Image.Image,
+    text_bbox: tuple[int, int, int, int],
+    body_bbox: tuple[int, int, int, int],
+    bubble_mask: Image.Image,
+) -> bool:
+    if bubble_mask.getbbox() is None:
+        return True
+    if _mask_coverage_ratio(bubble_mask) >= 0.40:
+        return False
+    permit = bubble_mask.crop(
+        (
+            text_bbox[0] - body_bbox[0],
+            text_bbox[1] - body_bbox[1],
+            text_bbox[2] - body_bbox[0],
+            text_bbox[3] - body_bbox[1],
+        )
+    )
+    if permit.size != ink_mask.size:
+        permit = permit.resize(ink_mask.size, Image.Resampling.NEAREST)
+    ink_pixels = sum(value > 0 for value in _image_pixels(ink_mask))
+    permitted_ink = sum(value > 0 for value in _image_pixels(ImageChops.multiply(ink_mask, permit)))
+    # Sparse flat background AND glyphs spilling outside it indicate free text
+    # on artwork/screentone, not a reliable balloon. Keep the original rather
+    # than partially smearing texture or squeezing a translation into a sliver.
+    return ink_pixels > 0 and permitted_ink < ink_pixels * 0.70
+
+
 def _render_translated_manga_page_to_image(
     image_path: Path,
     page_payload: MangaTranslatedPagePayload,
 ) -> tuple[bytes, str, dict[str, Any]]:
     with Image.open(image_path) as source_image:
         canvas = source_image.convert("RGBA")
+    original = canvas.copy()
 
     rendered_translations: list[str] = []
     rendered_region_count = 0
@@ -8138,7 +8176,7 @@ def _render_translated_manga_page_to_image(
             skipped_bbox_region_count += 1
             continue
         fill_color = _sample_region_fill_color(
-            canvas,
+            original,
             body_bbox,
             region.background,
             body_bbox=body_bbox,
@@ -8148,7 +8186,7 @@ def _render_translated_manga_page_to_image(
         source_direction = region.source_direction
         direction_hint = preferred_direction or source_direction
         style = _estimate_manga_text_style(
-            canvas,
+            original,
             bbox,
             fill_color,
             preferred_color=region.text_color,
@@ -8172,16 +8210,17 @@ def _render_translated_manga_page_to_image(
         )
         resolved_direction = str(initial_layout.get("direction") or "horizontal")
         fill_shape = _resolve_region_fill_shape(region_payload, body_bbox, resolved_direction)
-        bubble_outline_mask = _extract_precise_bubble_mask(canvas, body_bbox, fill_color, fill_shape)
+        bubble_outline_mask = _extract_precise_bubble_mask(original, body_bbox, fill_color, fill_shape)
+        if _manga_bubble_mask_is_unsafe(style.ink_mask, bbox, body_bbox, bubble_outline_mask):
+            skipped_unsafe_cleanup_region_count += 1
+            continue
         bubble_fill_mask = _build_region_fill_area_mask(bubble_outline_mask, fill_shape, resolved_direction)
         cleanup_limit_mask, used_tight_bbox_cleanup_fallback = _resolve_manga_cleanup_limit_mask(
             bbox,
             body_bbox,
             bubble_fill_mask,
             safe_box=(
-                _normalize_region_bbox(region.safe_box, canvas.size)
-                if region.safe_box is not None
-                else None
+                _normalize_region_bbox(region.safe_box, canvas.size) if region.safe_box is not None else None
             ),
             explicit_shape=region.shape,
         )
@@ -8838,37 +8877,23 @@ def _sync_fetch_with_httpx(url: str, referer: str | None = None) -> SyncFetchRes
     headers["Accept-Language"] = "ja,en;q=0.9"
     if referer:
         headers["Referer"] = referer
-    with httpx.Client(follow_redirects=True, timeout=30.0, headers=headers) as client:
-        client.cookies.set("over18", "yes", domain=".syosetu.com")
-        client.cookies.set("over18", "yes", domain=".novel18.syosetu.com")
-        response = client.get(url)
-        response.raise_for_status()
-        return SyncFetchResult(
-            text=response.text, resolved_url=str(response.url), status_code=response.status_code
-        )
+
+    async def fetch() -> SyncFetchResult:
+        async with create_public_http_client(timeout=30.0, headers=headers) as client:
+            client.cookies.set("over18", "yes", domain=".syosetu.com")
+            client.cookies.set("over18", "yes", domain=".novel18.syosetu.com")
+            response = await client.get(url)
+            response.raise_for_status()
+            return SyncFetchResult(
+                text=response.text, resolved_url=str(response.url), status_code=response.status_code
+            )
+
+    return asyncio.run(fetch())
 
 
 def _sync_fetch_with_requests(url: str, referer: str | None = None) -> SyncFetchResult:
-    if requests is None:
-        raise RuntimeError("requests 不可用")
-    session = requests.Session()
-    session.cookies.set("over18", "yes", domain=".syosetu.com")
-    session.cookies.set("over18", "yes", domain=".novel18.syosetu.com")
-    headers = {
-        "User-Agent": DEFAULT_HEADERS["User-Agent"],
-        "Accept": DEFAULT_HEADERS["Accept"],
-        "Accept-Language": "ja,en;q=0.9",
-        "Accept-Encoding": "identity",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    if referer:
-        headers["Referer"] = referer
-    response = session.get(url, headers=headers, timeout=40)
-    response.raise_for_status()
-    return SyncFetchResult(
-        text=response.text, resolved_url=str(response.url), status_code=response.status_code
-    )
+    # Keep the compatibility entry point while sharing the pinned transport.
+    return _sync_fetch_with_httpx(url, referer)
 
 
 def _sync_fetch_with_curl_cffi(url: str, referer: str | None = None) -> SyncFetchResult:
@@ -8881,7 +8906,8 @@ def _sync_fetch_with_curl_cffi(url: str, referer: str | None = None) -> SyncFetc
     if referer:
         headers["Referer"] = referer
     cookies = {"over18": "yes"} if _is_novel18_url(url) else None
-    response = curl_requests.get(url, impersonate="chrome124", timeout=40, headers=headers, cookies=cookies)
+    with curl_requests.Session(impersonate="chrome124", trust_env=False) as session:
+        response = public_curl_get(session, url, timeout=40, headers=headers, cookies=cookies)
     response.raise_for_status()
     return SyncFetchResult(
         text=response.text, resolved_url=str(response.url), status_code=response.status_code
@@ -8904,11 +8930,13 @@ def _sync_fetch_18comic_html(url: str, referer: str | None = None) -> SyncFetchR
     request_referer = url if is_photo_page else referer
     last_error: Exception | None = None
     for attempt in range(1, 4):
-        session = curl_requests.Session(impersonate="chrome124")
+        session = curl_requests.Session(impersonate="chrome124", trust_env=False)
         try:
             if warmup_url:
-                session.get(warmup_url, timeout=40)
-            response = session.get(url, headers=_18comic_session_headers(request_referer), timeout=40)
+                public_curl_get(session, warmup_url, timeout=40)
+            response = public_curl_get(
+                session, url, headers=_18comic_session_headers(request_referer), timeout=40
+            )
             response.raise_for_status()
             return SyncFetchResult(
                 text=response.text, resolved_url=str(response.url), status_code=response.status_code
@@ -8918,6 +8946,8 @@ def _sync_fetch_18comic_html(url: str, referer: str | None = None) -> SyncFetchR
             if attempt >= 3:
                 break
             time.sleep(1.0 * attempt)
+        finally:
+            session.close()
     raise last_error or RuntimeError(f"18Comic HTML fetch failed: {url}")
 
 
@@ -9014,7 +9044,8 @@ def _sync_fetch_18comic_binary(url: str, referer: str) -> bytes:
         candidates = _jm_image_candidate_urls(url)
         for candidate in candidates:
             try:
-                response = curl_requests.get(candidate, impersonate="chrome", timeout=40, headers=headers)
+                with curl_requests.Session(impersonate="chrome", trust_env=False) as session:
+                    response = public_curl_get(session, candidate, timeout=40, headers=headers)
                 response.raise_for_status()
                 image_bytes = bytes(response.content)
                 return _18comic_descramble_bytes(image_bytes, candidate, descramble_referer, scramble_id)
@@ -9074,6 +9105,8 @@ async def _fetch_site_html(url: str, referer: str | None = None) -> tuple[str, s
             if _looks_like_block_page(url, result):
                 raise ValueError("目标站点返回了拦截页面")
             return result.text, result.resolved_url
+        except ScraperNetworkSecurityError:
+            raise
         except Exception as exc:
             last_error = exc
 
@@ -9180,6 +9213,27 @@ async def _fetch_with_edge_cdp(
     timeout_seconds: float = EDGE_CDP_PAGE_TIMEOUT_SECONDS,
     blocked_message: str | None = None,
 ) -> EdgeSnapshot:
+    await resolve_public_url(url)
+    async with PublicBrowserProxy() as proxy:
+        return await _fetch_with_edge_cdp_using_proxy(
+            url,
+            proxy=proxy,
+            ready_expression=ready_expression,
+            headless=headless,
+            timeout_seconds=timeout_seconds,
+            blocked_message=blocked_message,
+        )
+
+
+async def _fetch_with_edge_cdp_using_proxy(
+    url: str,
+    *,
+    proxy: PublicBrowserProxy,
+    ready_expression: str,
+    headless: bool,
+    timeout_seconds: float = EDGE_CDP_PAGE_TIMEOUT_SECONDS,
+    blocked_message: str | None = None,
+) -> EdgeSnapshot:
     browser_path = _find_browser_executable()
     if browser_path is None:
         raise ValueError("未找到 Edge 或 Chromium，无法启用浏览器会话兜底抓取。")
@@ -9196,6 +9250,7 @@ async def _fetch_with_edge_cdp(
         "--no-first-run",
         "--no-default-browser-check",
         f"--user-data-dir={user_data_dir}",
+        *proxy.chromium_arguments,
         "about:blank",
     ]
     if headless or os.name != "nt":
@@ -9209,34 +9264,41 @@ async def _fetch_with_edge_cdp(
     try:
         ws_url = await _wait_for_edge_page_target(port, EDGE_CDP_BOOT_TIMEOUT_SECONDS)
         async with websockets.connect(ws_url, max_size=100_000_000) as websocket:
-            await _cdp_send_command(websocket, "Page.enable")
-            await _cdp_send_command(websocket, "Runtime.enable")
-            await _cdp_send_command(websocket, "Network.enable")
-            await _cdp_send_command(websocket, "Page.navigate", {"url": url})
+            try:
+                await _cdp_send_command(websocket, "Page.enable")
+                await _cdp_send_command(websocket, "Runtime.enable")
+                await _cdp_send_command(websocket, "Network.enable")
+                await _cdp_send_command(websocket, "Page.navigate", {"url": url})
 
-            deadline = time.monotonic() + timeout_seconds
-            last_title = ""
-            last_url = url
-            while time.monotonic() < deadline:
-                ready = bool(await _cdp_evaluate(websocket, ready_expression))
-                last_title = str(await _cdp_evaluate(websocket, "document.title || ''") or "")
-                last_url = str(await _cdp_evaluate(websocket, "location.href || ''") or url)
-                if ready:
-                    html = str(
-                        await _cdp_evaluate(websocket, "document.documentElement.outerHTML || ''") or ""
-                    )
-                    return EdgeSnapshot(html=html, resolved_url=last_url or url)
-                await asyncio.sleep(EDGE_CDP_POLL_INTERVAL_SECONDS)
+                deadline = time.monotonic() + timeout_seconds
+                last_title = ""
+                last_url = url
+                while time.monotonic() < deadline:
+                    ready = bool(await _cdp_evaluate(websocket, ready_expression))
+                    last_title = str(await _cdp_evaluate(websocket, "document.title || ''") or "")
+                    last_url = str(await _cdp_evaluate(websocket, "location.href || ''") or url)
+                    if ready:
+                        html = str(
+                            await _cdp_evaluate(websocket, "document.documentElement.outerHTML || ''") or ""
+                        )
+                        return EdgeSnapshot(html=html, resolved_url=last_url or url)
+                    await asyncio.sleep(EDGE_CDP_POLL_INTERVAL_SECONDS)
 
-            html = str(await _cdp_evaluate(websocket, "document.documentElement.outerHTML || ''") or "")
-            if "ERROR: The request could not be satisfied" in last_title or "403 ERROR" in html:
-                raise ValueError(blocked_message or "浏览器会话仍然被目标站点拦截。")
-            raise ValueError(f"浏览器会话抓取超时：{url}")
+                html = str(await _cdp_evaluate(websocket, "document.documentElement.outerHTML || ''") or "")
+                if "ERROR: The request could not be satisfied" in last_title or "403 ERROR" in html:
+                    raise ValueError(blocked_message or "浏览器会话仍然被目标站点拦截。")
+                raise ValueError(f"浏览器会话抓取超时：{url}")
+            finally:
+                with suppress(Exception):
+                    await _cdp_send_command(websocket, "Browser.close", timeout_seconds=3.0)
     finally:
-        with suppress(Exception):
-            process.kill()
-        with suppress(Exception):
-            process.wait(timeout=10)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            with suppress(Exception):
+                process.kill()
+            with suppress(Exception):
+                process.wait(timeout=10)
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
@@ -10720,21 +10782,13 @@ async def download_book(
                     chapter.url,
                     image_download_semaphore=image_download_semaphore,
                 )
+                _write_chapter_text_atomic(book_dir / filename, result.text)
             except Exception as exc:
                 if _is_manga_source_url(chapter.url):
                     raise RuntimeError(f"漫画章节下载失败：{chapter.title}：{exc}") from exc
-                if _is_fanqie_url(chapter.url):
-                    download_error = str(exc)
-                    result = None
-                else:
-                    result = ChapterFetchResult(
-                        text=f"章节抓取失败：{exc}\n原始链接：{chapter.url}",
-                        image_urls=[],
-                        illustration=False,
-                    )
+                download_error = str(exc)
+                result = None
 
-            if result is not None:
-                (book_dir / filename).write_text(result.text, encoding="utf-8")
             chapter_manifest.append(
                 {
                     "index": index,
@@ -11639,89 +11693,73 @@ async def _fetch_chapter_data(
     plugin = _require_enabled_site_plugin(chapter_url)
     if plugin.chapter_handler is None:
         raise ValueError(f"站点插件“{plugin.name}”当前只支持作品预览和搜索，尚未实现章节抓取")
-    try:
-        if plugin.chapter_handler == "fanqie":
-            return await _fetch_fanqie_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "qidian":
-            return await _fetch_qidian_chapter_data(
-                chapter_url,
-                qidian_cookies=qidian_cookies,
-            )
-        if plugin.chapter_handler == "quark":
-            return await _fetch_quark_chapter_data(client, chapter_url)
-        if plugin.chapter_handler == "biqvge":
-            return await _fetch_biqvge_chapter_data(client, chapter_url)
-        if plugin.chapter_handler == "18comic":
-            return await _fetch_18comic_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "bika":
-            return await _fetch_bika_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "copymanga":
-            return await _fetch_copymanga_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "ciweimao":
-            return await _fetch_ciweimao_chapter_data(client, chapter_url)
-        if plugin.chapter_handler == "shaoniandream":
-            return await _fetch_shaoniandream_chapter_data(client, chapter_url)
-        if plugin.chapter_handler == "sfacg":
-            return await _fetch_sfacg_chapter_data(client, chapter_url)
-        if plugin.chapter_handler == "ehentai":
-            return await _fetch_ehentai_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "pixiv_comic":
-            if _is_pixiv_comic_story_url(chapter_url):
-                return await _fetch_pixiv_comic_chapter_data(client, chapter_url, chapter_title)
-            raise ValueError("Pixiv Comic 作品页不是章节地址，请先解析作品目录")
-        if plugin.chapter_handler == "pixiv":
-            if _is_pixiv_manga_url(chapter_url):
-                return await _fetch_pixiv_manga_data(client, chapter_url, chapter_title)
-            return await _fetch_pixiv_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "generic_manga":
-            return await _fetch_generic_manga_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "linovelib":
-            return await _fetch_linovelib_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "kakuyomu":
-            return await _fetch_kakuyomu_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "yanmaga":
-            return await _fetch_yanmaga_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "syosetu":
-            return await _fetch_syosetu_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "hameln":
-            return await _fetch_hameln_chapter_data(client, chapter_url, chapter_title)
-        if plugin.chapter_handler == "novelup":
-            raise ValueError(
-                "Novelup 当前访问被 CloudFront 拦截（403），当前环境下即使使用浏览器会话也无法直接抓取章节。"
-            )
-        if plugin.chapter_handler == "alphapolis":
-            return await _fetch_alphapolis_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "fanqie":
+        return await _fetch_fanqie_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "qidian":
+        return await _fetch_qidian_chapter_data(
+            chapter_url,
+            qidian_cookies=qidian_cookies,
+        )
+    if plugin.chapter_handler == "quark":
+        return await _fetch_quark_chapter_data(client, chapter_url)
+    if plugin.chapter_handler == "biqvge":
+        return await _fetch_biqvge_chapter_data(client, chapter_url)
+    if plugin.chapter_handler == "18comic":
+        return await _fetch_18comic_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "bika":
+        return await _fetch_bika_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "copymanga":
+        return await _fetch_copymanga_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "ciweimao":
+        return await _fetch_ciweimao_chapter_data(client, chapter_url)
+    if plugin.chapter_handler == "shaoniandream":
+        return await _fetch_shaoniandream_chapter_data(client, chapter_url)
+    if plugin.chapter_handler == "sfacg":
+        return await _fetch_sfacg_chapter_data(client, chapter_url)
+    if plugin.chapter_handler == "ehentai":
+        return await _fetch_ehentai_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "pixiv_comic":
+        if _is_pixiv_comic_story_url(chapter_url):
+            return await _fetch_pixiv_comic_chapter_data(client, chapter_url, chapter_title)
+        raise ValueError("Pixiv Comic 作品页不是章节地址，请先解析作品目录")
+    if plugin.chapter_handler == "pixiv":
+        if _is_pixiv_manga_url(chapter_url):
+            return await _fetch_pixiv_manga_data(client, chapter_url, chapter_title)
+        return await _fetch_pixiv_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "generic_manga":
+        return await _fetch_generic_manga_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "linovelib":
+        return await _fetch_linovelib_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "kakuyomu":
+        return await _fetch_kakuyomu_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "yanmaga":
+        return await _fetch_yanmaga_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "syosetu":
+        return await _fetch_syosetu_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "hameln":
+        return await _fetch_hameln_chapter_data(client, chapter_url, chapter_title)
+    if plugin.chapter_handler == "novelup":
+        raise ValueError(
+            "Novelup 当前访问被 CloudFront 拦截（403），当前环境下即使使用浏览器会话也无法直接抓取章节。"
+        )
+    if plugin.chapter_handler == "alphapolis":
+        return await _fetch_alphapolis_chapter_data(client, chapter_url, chapter_title)
 
-        response = await client.get(chapter_url, headers=_request_headers(chapter_url))
-        response.raise_for_status()
-        json_text = _chapter_text_from_json_text(response.text)
-        if json_text:
-            return ChapterFetchResult(text=json_text, image_urls=[], illustration=False)
-        if _json_payload_from_text(response.text) is not None:
-            raise ValueError("书源返回 JSON 数据，但未能从中提取章节正文，请换用包含章节正文规则的书源")
-        _raise_if_blocked(response.text, chapter_url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = "\n".join(
-            item.get_text(" ", strip=True) for item in soup.select("p") if item.get_text(" ", strip=True)
-        ).strip()
-        if text:
-            return ChapterFetchResult(text=text, image_urls=[], illustration=False)
-        return ChapterFetchResult(
-            text=soup.get_text("\n", strip=True)[:15000], image_urls=[], illustration=False
-        )
-    except Exception as exc:
-        if (
-            _is_manga_source_url(chapter_url)
-            or _is_fanqie_url(chapter_url)
-            or _is_quark_url(chapter_url)
-            or _is_biqvge_url(chapter_url)
-        ):
-            raise
-        return ChapterFetchResult(
-            text=f"章节抓取失败：{exc}\n原始链接：{chapter_url}",
-            image_urls=[],
-            illustration=False,
-        )
+    response = await client.get(chapter_url, headers=_request_headers(chapter_url))
+    response.raise_for_status()
+    json_text = _chapter_text_from_json_text(response.text)
+    if json_text:
+        return ChapterFetchResult(text=json_text, image_urls=[], illustration=False)
+    if _json_payload_from_text(response.text) is not None:
+        raise ValueError("书源返回 JSON 数据，但未能从中提取章节正文，请换用包含章节正文规则的书源")
+    _raise_if_blocked(response.text, chapter_url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = "\n".join(
+        item.get_text(" ", strip=True) for item in soup.select("p") if item.get_text(" ", strip=True)
+    ).strip()
+    if text:
+        return ChapterFetchResult(text=text, image_urls=[], illustration=False)
+    return ChapterFetchResult(text=soup.get_text("\n", strip=True)[:15000], image_urls=[], illustration=False)
 
 
 def _is_probable_linovelib_page(soup: BeautifulSoup) -> bool:
@@ -11754,12 +11792,10 @@ def _create_async_http_client(
     headers: dict[str, str] | None = None,
     follow_redirects: bool = True,
 ) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
+    return create_public_http_client(
         follow_redirects=follow_redirects,
         timeout=timeout,
         headers=headers,
-        http2=False,
-        verify=ssl.create_default_context(),
     )
 
 

@@ -25,7 +25,7 @@ class MobilePreferenceGroup extends StatelessWidget {
             ),
           ),
         MiuixCard(
-          cornerRadius: 20,
+          cornerRadius: 18,
           colors: MiuixCardColors(
             color: theme.colors.surfaceContainer,
             contentColor: theme.colors.onSurfaceContainer,

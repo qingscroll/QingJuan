@@ -37,7 +37,7 @@ class _CompactBookCard extends StatelessWidget {
             .toDouble();
     return Semantics(
       button: true,
-      label: '${book.title}，读到第 ${book.lastReadChapterIndex} 章',
+      label: '${book.title}，读到${book.readingPositionLabel}',
       child: HoverButton(
         onPressed: onOpen,
         builder: (context, states) => AnimatedOpacity(
@@ -143,7 +143,7 @@ class _WideBookCard extends StatelessWidget {
                   runSpacing: 2,
                   children: <Widget>[
                     Text(
-                      '上次读到第 ${book.lastReadChapterIndex} 章',
+                      '上次读到${book.readingPositionLabel}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.typography.caption?.copyWith(

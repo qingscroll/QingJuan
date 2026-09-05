@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
 
+import 'mobile_widgets.dart';
+
 class MobileLoadingView extends StatelessWidget {
   const MobileLoadingView(this.label, {super.key});
 
@@ -9,23 +11,26 @@ class MobileLoadingView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = MiuixTheme.of(context);
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          const SizedBox(
-            width: 34,
-            height: 34,
-            child: MiuixInfiniteProgressIndicator(),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            label,
-            style: theme.textStyles.body2.copyWith(
-              color: theme.colors.onSurfaceVariantSummary,
+    return Semantics(
+      liveRegion: true,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const SizedBox(
+              width: 34,
+              height: 34,
+              child: MiuixInfiniteProgressIndicator(),
             ),
-          ),
-        ],
+            const SizedBox(height: 14),
+            Text(
+              label,
+              style: theme.textStyles.body2.copyWith(
+                color: theme.colors.onSurfaceVariantSummary,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -49,8 +54,9 @@ class MobileEmptyView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = MiuixTheme.of(context);
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 36),
+      child: SingleChildScrollView(
+        padding:
+            EdgeInsets.fromLTRB(28, 36, 28, mobileNavigationClearance(context)),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
@@ -84,7 +90,7 @@ class MobileEmptyView extends StatelessWidget {
               textAlign: TextAlign.center,
               style: theme.textStyles.body2.copyWith(
                 color: theme.colors.onSurfaceVariantSummary,
-                height: 1.45,
+                height: 1.55,
               ),
             ),
             if (action != null) ...<Widget>[

@@ -25,6 +25,8 @@ class Book {
     required this.lastReadChapterIndex,
     this.cover,
     this.lastReadAt,
+    this.lastReadPageIndex,
+    this.lastReadPageCount,
   });
 
   factory Book.fromJson(JsonMap json) => Book(
@@ -40,6 +42,8 @@ class Book {
         cover: json['cover'] as String?,
         lastReadChapterIndex: _int(json['lastReadChapterIndex'], 1),
         lastReadAt: json['lastReadAt'] as String?,
+        lastReadPageIndex: (json['lastReadPageIndex'] as num?)?.toInt(),
+        lastReadPageCount: (json['lastReadPageCount'] as num?)?.toInt(),
       );
 
   final String id;
@@ -54,6 +58,11 @@ class Book {
   final String? cover;
   final int lastReadChapterIndex;
   final String? lastReadAt;
+  final int? lastReadPageIndex;
+  final int? lastReadPageCount;
+
+  String get readingPositionLabel =>
+      '第 $lastReadChapterIndex 章${lastReadPageIndex == null ? '' : ' · 第 ${lastReadPageIndex! + 1} 页'}';
 }
 
 class Chapter {
@@ -87,15 +96,39 @@ class ReadingProgress {
   const ReadingProgress({
     required this.chapterIndex,
     required this.scrollRatio,
+    this.anchorType = 'top',
+    this.anchorIndex = 0,
+    this.anchorOffsetRatio = 0,
+    this.pageIndex,
+    this.pageCount,
+    this.layoutKey,
+    this.contentMode,
+    this.characterOffset,
   });
 
   factory ReadingProgress.fromJson(JsonMap json) => ReadingProgress(
         chapterIndex: _int(json['lastChapterIndex'], 1),
         scrollRatio: _double(json['lastScrollRatio']),
+        anchorType: _string(json['lastAnchorType'], 'top'),
+        anchorIndex: _int(json['lastAnchorIndex']),
+        anchorOffsetRatio: _double(json['lastAnchorOffsetRatio']),
+        pageIndex: (json['lastPageIndex'] as num?)?.toInt(),
+        pageCount: (json['lastPageCount'] as num?)?.toInt(),
+        layoutKey: json['lastLayoutKey'] as String?,
+        contentMode: json['lastContentMode'] as String?,
+        characterOffset: (json['lastCharacterOffset'] as num?)?.toInt(),
       );
 
   final int chapterIndex;
   final double scrollRatio;
+  final String anchorType;
+  final int anchorIndex;
+  final double anchorOffsetRatio;
+  final int? pageIndex;
+  final int? pageCount;
+  final String? layoutKey;
+  final String? contentMode;
+  final int? characterOffset;
 }
 
 class BookDetail {

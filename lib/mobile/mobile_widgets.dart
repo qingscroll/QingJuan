@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
+import 'mobile_tokens.dart';
+
+// Navigation occupies its own Scaffold slot; lists need only an end gutter.
+double mobileNavigationClearance(BuildContext context) => 24;
 
 class MobileCard extends StatelessWidget {
   const MobileCard({
@@ -18,20 +22,37 @@ class MobileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = MiuixTheme.of(context).colors;
-    return MiuixCard(
-      onPressed: onPressed,
-      feedbackType: onPressed == null
-          ? MiuixPressFeedbackType.none
-          : MiuixPressFeedbackType.sink,
-      cornerRadius: 18,
-      colors: MiuixCardColors(
+    return DecoratedBox(
+      decoration: BoxDecoration(
         color: color ?? colors.surfaceContainer,
-        contentColor: colors.onSurfaceContainer,
+        borderRadius: BorderRadius.circular(MobileTokens.surfaceRadius),
       ),
-      insideMargin: padding,
-      child: child,
+      child: MobilePressable(
+        onPressed: onPressed,
+        child: Padding(padding: padding, child: child),
+      ),
     );
   }
+}
+
+/// Shared touch feedback: a subtle opacity overlay, without scale or ripples.
+class MobilePressable extends StatelessWidget {
+  const MobilePressable({
+    required this.child,
+    required this.onPressed,
+    this.borderRadius = const BorderRadius.all(Radius.circular(16)),
+    super.key,
+  });
+  final Widget child;
+  final VoidCallback? onPressed;
+  final BorderRadius borderRadius;
+
+  @override
+  Widget build(BuildContext context) => MiuixPressable(
+        onPressed: onPressed,
+        borderRadius: borderRadius,
+        child: child,
+      );
 }
 
 class MobileSection extends StatelessWidget {
@@ -76,7 +97,7 @@ class MobilePill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: foreground.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
         label,

@@ -39,12 +39,14 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   Size _imageSize = const Size(1, 1);
   bool _loading = true;
   bool _saving = false;
+  bool _closing = false;
   bool _dirty = false;
   bool _showUntranslatedOnly = false;
   bool _showRendered = false;
   bool _addRegionMode = false;
   _CompactPane _compactPane = _CompactPane.canvas;
   String? _renderedPath;
+  int _imageRevision = 0;
   String? _error;
   String? _notice;
   InfoBarSeverity _noticeSeverity = InfoBarSeverity.info;
@@ -82,10 +84,16 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   }
 
   Future<void> _loadFile(int index, {bool saveCurrent = true}) async {
-    if (_saving || index < 0 || index >= _files.length) return;
+    if (!mounted ||
+        _saving ||
+        _closing ||
+        index < 0 ||
+        index >= _files.length) {
+      return;
+    }
     if (saveCurrent && _dirty) {
       final saved = await _saveProject(showNotice: false);
-      if (!saved) return;
+      if (!saved || !mounted || _closing) return;
     }
     setState(() {
       _fileIndex = index;
@@ -98,14 +106,15 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
       _renderedPath = null;
       _addRegionMode = false;
     });
+    final file = _files[index];
     try {
-      final document = await widget.controller.loadTextEditorProject(_file);
+      final document = await widget.controller.loadTextEditorProject(file);
       final project = MangaTextEditorProject.fromDocument(
         document,
-        sourcePath: _file.path,
+        sourcePath: file.path,
       );
       final imageSize = await _resolveImageSize(
-        _file.path,
+        file.path,
         width: project.originalWidth,
         height: project.originalHeight,
       );
@@ -157,7 +166,7 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   }
 
   void _markDirty({bool refresh = true}) {
-    if (!mounted) return;
+    if (!mounted || _saving || _closing) return;
     if (refresh) {
       setState(() {
         _dirty = true;
@@ -171,7 +180,8 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
 
   Future<bool> _saveProject({bool showNotice = true}) async {
     final project = _project;
-    if (project == null || _saving) return false;
+    if (!mounted || project == null || _saving) return false;
+    FocusScope.of(context).unfocus();
     setState(() {
       _saving = true;
       _error = null;
@@ -207,7 +217,8 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
 
   Future<void> _renderProject() async {
     final project = _project;
-    if (project == null || _saving) return;
+    if (!mounted || project == null || _saving || _closing) return;
+    FocusScope.of(context).unfocus();
     setState(() {
       _saving = true;
       _error = null;
@@ -219,6 +230,9 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
         _file,
         project.toDocument(),
       );
+      // Rendering replaces the file at the same path; invalidate both the
+      // shared file cache and the visible Image state before showing it again.
+      await FileImage(File(result.resultPath)).evict();
       if (!mounted) return;
       setState(() {
         _files[_fileIndex] = _file.copyWith(
@@ -229,6 +243,7 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
         _saving = false;
         _dirty = false;
         _renderedPath = result.resultPath;
+        _imageRevision += 1;
         _showRendered = true;
         _notice = result.message.isEmpty ? '已重新渲染译文。' : result.message;
         _noticeSeverity = result.bookshelfBound && !result.bookshelfWritten
@@ -246,7 +261,12 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   }
 
   Future<void> _close() async {
-    if (_dirty && !await _saveProject(showNotice: false)) return;
+    if (!mounted || _saving || _closing) return;
+    setState(() => _closing = true);
+    if (_dirty && !await _saveProject(showNotice: false)) {
+      if (mounted) setState(() => _closing = false);
+      return;
+    }
     if (mounted) Navigator.of(context).pop();
   }
 
@@ -262,7 +282,7 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
 
   void _addRegion(MangaTextRegionBounds bounds) {
     final project = _project;
-    if (project == null) return;
+    if (!mounted || _saving || _closing || project == null) return;
     final region = project.addRegion(bounds);
     setState(() {
       _selectedRegion = region;
@@ -279,7 +299,13 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   void _removeSelectedRegion() {
     final project = _project;
     final selected = _selectedRegion;
-    if (project == null || selected == null) return;
+    if (!mounted ||
+        _saving ||
+        _closing ||
+        project == null ||
+        selected == null) {
+      return;
+    }
     final currentRegions = project.regions;
     final index = currentRegions.indexWhere(
       (region) => identical(region.raw, selected.raw),
@@ -302,52 +328,59 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
-    return ScaffoldPage(
-      key: const ValueKey('manga-text-editor-page'),
-      padding: EdgeInsets.zero,
-      content: ColoredBox(
-        color: theme.micaBackgroundColor,
-        child: Column(
-          children: <Widget>[
-            _buildHeader(context),
-            if (_error != null || _notice != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                child: InfoBar(
-                  key: const ValueKey('manga-text-editor-message'),
-                  title: Text(_error == null ? '文本工作台' : '操作未完成'),
-                  content: Text(_error ?? _notice!),
-                  severity:
-                      _error == null ? _noticeSeverity : InfoBarSeverity.error,
-                  onClose: () => setState(() {
-                    _error = null;
-                    _notice = null;
-                  }),
+    return PopScope<void>(
+      canPop: !_dirty && !_saving && !_closing,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_close());
+      },
+      child: ScaffoldPage(
+        key: const ValueKey('manga-text-editor-page'),
+        padding: EdgeInsets.zero,
+        content: ColoredBox(
+          color: theme.micaBackgroundColor,
+          child: Column(
+            children: <Widget>[
+              _buildHeader(context),
+              if (_error != null || _notice != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                  child: InfoBar(
+                    key: const ValueKey('manga-text-editor-message'),
+                    title: Text(_error == null ? '文本工作台' : '操作未完成'),
+                    content: Text(_error ?? _notice!),
+                    severity: _error == null
+                        ? _noticeSeverity
+                        : InfoBarSeverity.error,
+                    onClose: () => setState(() {
+                      _error = null;
+                      _notice = null;
+                    }),
+                  ),
+                ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+                  child: _loading
+                      ? const Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              ProgressRing(),
+                              SizedBox(height: 12),
+                              Text('正在准备文本工程……'),
+                            ],
+                          ),
+                        )
+                      : _project == null
+                          ? _buildLoadFailure(theme)
+                          : LayoutBuilder(
+                              builder: (context, constraints) =>
+                                  _buildWorkbench(constraints.maxWidth),
+                            ),
                 ),
               ),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-                child: _loading
-                    ? const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            ProgressRing(),
-                            SizedBox(height: 12),
-                            Text('正在准备文本工程……'),
-                          ],
-                        ),
-                      )
-                    : _project == null
-                        ? _buildLoadFailure(theme)
-                        : LayoutBuilder(
-                            builder: (context, constraints) =>
-                                _buildWorkbench(constraints.maxWidth),
-                          ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -646,10 +679,11 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
           Expanded(
             child: _RegionCanvas(
               imagePath: _displayImagePath,
+              imageRevision: _imageRevision,
               imageSize: _imageSize,
               regions: _visibleRegions,
               selectedRegion: _selectedRegion,
-              addMode: _addRegionMode,
+              addMode: _addRegionMode && !_saving && !_closing,
               onSelected: _selectRegion,
               onRegionAdded: _addRegion,
             ),
@@ -723,6 +757,7 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
                 : _RegionInspector(
                     key: ObjectKey(_selectedRegion),
                     region: _selectedRegion!,
+                    readOnly: _saving || _closing,
                     onChanged: () => _markDirty(),
                   ),
           ),
@@ -925,11 +960,13 @@ class _RegionTile extends StatelessWidget {
 class _RegionInspector extends StatefulWidget {
   const _RegionInspector({
     required this.region,
+    required this.readOnly,
     required this.onChanged,
     super.key,
   });
 
   final MangaTextEditorRegion region;
+  final bool readOnly;
   final VoidCallback onChanged;
 
   @override
@@ -989,10 +1026,12 @@ class _RegionInspectorState extends State<_RegionInspector> {
           TextBox(
             key: const ValueKey('manga-region-source-text'),
             controller: _sourceController,
+            readOnly: widget.readOnly,
             minLines: 2,
             maxLines: 4,
             placeholder: 'OCR 没识别到时可留空，直接填写译文',
             onChanged: (value) {
+              if (widget.readOnly) return;
               widget.region.updateSourceText(value);
               widget.onChanged();
             },
@@ -1015,10 +1054,12 @@ class _RegionInspectorState extends State<_RegionInspector> {
           TextBox(
             key: const ValueKey('manga-region-translation-text'),
             controller: _translationController,
+            readOnly: widget.readOnly,
             minLines: 3,
             maxLines: 7,
             placeholder: '输入最终显示在图片上的文字',
             onChanged: (value) {
+              if (widget.readOnly) return;
               widget.region.updateTranslation(value);
               widget.onChanged();
               if (mounted) setState(() {});
@@ -1047,15 +1088,17 @@ class _RegionInspectorState extends State<_RegionInspector> {
               ToggleSwitch(
                 key: const ValueKey('manga-region-direction'),
                 checked: widget.region.direction == MangaTextDirection.vertical,
-                onChanged: (vertical) {
-                  widget.region.updateDirection(
-                    vertical
-                        ? MangaTextDirection.vertical
-                        : MangaTextDirection.horizontal,
-                  );
-                  widget.onChanged();
-                  setState(() {});
-                },
+                onChanged: widget.readOnly
+                    ? null
+                    : (vertical) {
+                        widget.region.updateDirection(
+                          vertical
+                              ? MangaTextDirection.vertical
+                              : MangaTextDirection.horizontal,
+                        );
+                        widget.onChanged();
+                        setState(() {});
+                      },
               ),
             ],
           ),
@@ -1091,6 +1134,7 @@ class _EmptyRegions extends StatelessWidget {
 class _RegionCanvas extends StatefulWidget {
   const _RegionCanvas({
     required this.imagePath,
+    required this.imageRevision,
     required this.imageSize,
     required this.regions,
     required this.selectedRegion,
@@ -1100,6 +1144,7 @@ class _RegionCanvas extends StatefulWidget {
   });
 
   final String imagePath;
+  final int imageRevision;
   final Size imageSize;
   final List<MangaTextEditorRegion> regions;
   final MangaTextEditorRegion? selectedRegion;
@@ -1198,7 +1243,9 @@ class _RegionCanvasState extends State<_RegionCanvas> {
                         children: <Widget>[
                           Image.file(
                             File(widget.imagePath),
-                            key: ValueKey<String>(widget.imagePath),
+                            key: ValueKey<String>(
+                              '${widget.imagePath}#${widget.imageRevision}',
+                            ),
                             fit: BoxFit.fill,
                             filterQuality: FilterQuality.medium,
                             errorBuilder: (_, __, ___) => ColoredBox(
@@ -1261,6 +1308,7 @@ class _RegionCanvasState extends State<_RegionCanvas> {
   }
 
   void _finishDrag(Size fittedSize) {
+    if (!widget.addMode) return;
     final rect = _dragRect;
     setState(() {
       _dragStart = null;

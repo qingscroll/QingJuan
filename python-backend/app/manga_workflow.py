@@ -368,9 +368,7 @@ def _project_region(
         "shape": region.shape,
         "padding_ratio": region.padding_ratio,
     }
-    project_region.update(
-        {key: value for key, value in optional_geometry.items() if value is not None}
-    )
+    project_region.update({key: value for key, value in optional_geometry.items() if value is not None})
     project_region = {key: value for key, value in project_region.items() if value is not None}
     for optional_key in (
         "translation_rich",
@@ -618,6 +616,7 @@ def _inpaint_regions(
 ) -> tuple[bytes, dict[str, Any]]:
     with Image.open(image_path) as source:
         canvas = source.convert("RGBA")
+    original = canvas.copy()
     erased_pixels = 0
     inpainted_count = 0
     unsafe_count = 0
@@ -627,13 +626,13 @@ def _inpaint_regions(
             continue
         body_bbox = scraper._normalize_region_bbox(region.body_bbox or bbox, canvas.size) or bbox
         fill_color = scraper._sample_region_fill_color(
-            canvas,
+            original,
             body_bbox,
             region.background,
             body_bbox=body_bbox,
         )
         style = scraper._estimate_manga_text_style(
-            canvas,
+            original,
             bbox,
             fill_color,
             preferred_color=region.text_color,
@@ -642,11 +641,23 @@ def _inpaint_regions(
         if scraper._manga_ink_mask_is_unsafe(style.ink_mask):
             unsafe_count += 1
             continue
+        direction = str(region.source_direction or region.direction or "horizontal")
+        fill_shape = scraper._resolve_region_fill_shape(
+            region.model_dump(exclude_none=True),
+            body_bbox,
+            direction,
+        )
+        bubble_mask = scraper._extract_precise_bubble_mask(original, body_bbox, fill_color, fill_shape)
+        if scraper._manga_bubble_mask_is_unsafe(style.ink_mask, bbox, body_bbox, bubble_mask):
+            unsafe_count += 1
+            continue
         region_erased, _ = scraper._erase_manga_source_text(
             canvas,
             bbox,
             style,
             fill_color,
+            limit_bbox=body_bbox,
+            limit_mask=bubble_mask,
         )
         if region_erased:
             erased_pixels += region_erased

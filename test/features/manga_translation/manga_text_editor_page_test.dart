@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -200,6 +202,211 @@ void main() {
     expect(find.text('识别原文'), findsOneWidget);
     expect(find.text('译文'), findsOneWidget);
   });
+
+  testWidgets('saving locks focused text, direction, and region drawing',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 960));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = _FakeTextEditorController(
+      file: _editorFile,
+      document: _editorDocument(),
+    )..saveCompletion = Completer<void>();
+    addTearDown(controller.dispose);
+    await _openEditor(tester, controller);
+    final translation =
+        find.byKey(const ValueKey('manga-region-translation-text'));
+    await tester.enterText(translation, '人工译文');
+    // Invoke the action while the text field still owns the input connection.
+    tester
+        .widget<Button>(find.byKey(const ValueKey('save-manga-text-project')))
+        .onPressed!();
+    await tester.pump();
+
+    expect(tester.widget<TextBox>(translation).readOnly, isTrue);
+    expect(
+      tester
+          .widget<TextBox>(
+              find.byKey(const ValueKey('manga-region-source-text')))
+          .readOnly,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<ToggleSwitch>(
+              find.byKey(const ValueKey('manga-region-direction')))
+          .onChanged,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<ToggleButton>(
+              find.byKey(const ValueKey('toggle-manga-region-draw')))
+          .onChanged,
+      isNull,
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(text: '保存中输入'),
+    );
+    await tester.pump();
+    expect(tester.widget<TextBox>(translation).controller!.text, '人工译文');
+    controller.saveCompletion!.complete();
+    await _pumpUntilFound(tester, find.textContaining('工程已保存'));
+    expect(tester.widget<TextBox>(translation).readOnly, isFalse);
+    expect(_savedRegion(controller)['translation'], '人工译文');
+  });
+
+  testWidgets('rendering locks edits and reloads repeated result paths',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 960));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final directory = await tester.runAsync(
+      () => Directory.systemTemp.createTemp('manga-editor-image-'),
+    );
+    final resultFile = File('${directory!.path}/result.png');
+    await tester.runAsync(() => resultFile.writeAsBytes(base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=',
+        )));
+    addTearDown(() => directory.delete(recursive: true));
+    final controller = _FakeTextEditorController(
+      file: _editorFile,
+      document: _editorDocument(),
+    )
+      ..renderPath = resultFile.path
+      ..renderCompletion = Completer<void>();
+    addTearDown(controller.dispose);
+    await _openEditor(tester, controller);
+    final translation =
+        find.byKey(const ValueKey('manga-region-translation-text'));
+    await tester.enterText(translation, '第一次译文');
+    final renderButton =
+        find.byKey(const ValueKey('render-manga-text-project'));
+    tester.widget<FilledButton>(renderButton).onPressed!();
+    await tester.pump();
+    expect(tester.widget<TextBox>(translation).readOnly, isTrue);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(text: '渲染中输入'),
+    );
+    await tester.pump();
+    expect(tester.widget<TextBox>(translation).controller!.text, '第一次译文');
+    controller.renderCompletion!.complete();
+    await _pumpUntilFound(
+      tester,
+      find.byKey(ValueKey<String>('${resultFile.path}#1')),
+    );
+    expect(_savedRegion(controller)['translation'], '第一次译文');
+
+    controller.renderCompletion = null;
+    await tester.enterText(translation, '第二次译文');
+    await tester.tap(renderButton);
+    await _pumpUntilFound(
+      tester,
+      find.byKey(ValueKey<String>('${resultFile.path}#2')),
+    );
+    expect(find.byKey(ValueKey<String>('${resultFile.path}#1')), findsNothing);
+    expect(controller.renderCount, 2);
+    expect(_savedRegion(controller)['translation'], '第二次译文');
+    await tester.pump(const Duration(milliseconds: 150));
+  });
+
+  testWidgets('route back saves unsaved changes and waits for completion',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 960));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = _FakeTextEditorController(
+      file: _editorFile,
+      document: _editorDocument(),
+    )..saveCompletion = Completer<void>();
+    addTearDown(controller.dispose);
+    final navigator = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(FluentApp(
+      navigatorKey: navigator,
+      theme: buildQingJuanTheme(
+        Brightness.light,
+        platform: TargetPlatform.windows,
+      ),
+      home: const Center(child: Text('书架页面')),
+    ));
+    unawaited(navigator.currentState!.push<void>(PageRouteBuilder<void>(
+      pageBuilder: (_, __, ___) => MangaTextEditorPage(
+        controller: controller,
+        files: const <MangaTranslationFile>[_editorFile],
+        initialFile: _editorFile,
+      ),
+    )));
+    await _pumpUntilFound(
+      tester,
+      find.byKey(const ValueKey('manga-text-region-inspector')),
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('manga-region-translation-text')),
+      '返回时自动保存',
+    );
+    await tester.pump();
+    await navigator.currentState!.maybePop();
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('manga-text-editor-page')), findsOneWidget);
+    expect(_savedRegion(controller)['translation'], '返回时自动保存');
+    await navigator.currentState!.maybePop();
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('manga-text-editor-page')), findsOneWidget);
+    controller.saveCompletion!.complete();
+    for (var i = 0; i < 10; i += 1) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.byKey(const ValueKey('manga-text-editor-page')), findsNothing);
+    expect(find.text('书架页面'), findsOneWidget);
+  });
+}
+
+const _editorFile = MangaTranslationFile(
+  path: r'C:\fixtures\editor.png',
+  sourceRoot: r'C:\fixtures',
+  relativePath: 'editor.png',
+  hasProject: true,
+);
+
+Map<String, dynamic> _editorDocument() => <String, dynamic>{
+      _editorFile.path: <String, dynamic>{
+        'original_width': 100,
+        'original_height': 140,
+        'regions': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'order': 1,
+            'bbox': <int>[10, 15, 70, 110],
+            'text': 'ねー',
+            'translation': '',
+            'direction': 'v',
+          },
+        ],
+      },
+    };
+
+Map<String, dynamic> _savedRegion(_FakeTextEditorController controller) =>
+    ((controller.savedDocument![_editorFile.path]
+            as Map<String, dynamic>)['regions'] as List)
+        .single as Map<String, dynamic>;
+
+Future<void> _openEditor(
+  WidgetTester tester,
+  _FakeTextEditorController controller,
+) async {
+  await tester.pumpWidget(FluentApp(
+    theme: buildQingJuanTheme(
+      Brightness.light,
+      platform: TargetPlatform.windows,
+    ),
+    home: MangaTextEditorPage(
+      controller: controller,
+      files: <MangaTranslationFile>[controller.file],
+      initialFile: controller.file,
+    ),
+  ));
+  await _pumpUntilFound(
+    tester,
+    find.byKey(const ValueKey('manga-text-region-inspector')),
+  );
 }
 
 Future<void> _pumpUntilFound(
@@ -238,6 +445,10 @@ class _FakeTextEditorController extends MangaTranslationController {
   final Map<String, dynamic> _document;
   final ApiClient _api;
   Map<String, dynamic>? savedDocument;
+  Completer<void>? saveCompletion;
+  Completer<void>? renderCompletion;
+  String? renderPath;
+  int renderCount = 0;
 
   @override
   List<MangaTranslationFile> get files => <MangaTranslationFile>[file];
@@ -258,6 +469,24 @@ class _FakeTextEditorController extends MangaTranslationController {
     Map<String, dynamic> project,
   ) async {
     savedDocument = _copy(project);
+    await saveCompletion?.future;
+  }
+
+  @override
+  Future<MangaTextEditorRenderResult> renderTextEditorProject(
+    MangaTranslationFile item,
+    Map<String, dynamic> project,
+  ) async {
+    savedDocument = _copy(project);
+    renderCount += 1;
+    await renderCompletion?.future;
+    return MangaTextEditorRenderResult(
+      resultPath: renderPath!,
+      bookshelfBound: false,
+      bookshelfWritten: false,
+      missingBookshelfPages: 0,
+      message: '已重新渲染译文。',
+    );
   }
 
   @override

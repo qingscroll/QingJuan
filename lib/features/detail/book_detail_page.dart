@@ -12,14 +12,20 @@ import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import '../audiobook/audiobook_page.dart';
-import '../library/widgets/book_card.dart';
 import '../manga_translation/manga_bookshelf_import.dart';
 import '../reader/reader_page.dart';
+import '../reader/reader_progress.dart';
+import 'mobile_book_detail_view.dart';
 
 class BookDetailPage extends StatefulWidget {
-  const BookDetailPage({required this.bookId, super.key});
+  const BookDetailPage({
+    required this.bookId,
+    this.openReaderOnLoad = false,
+    super.key,
+  });
 
   final String bookId;
+  final bool openReaderOnLoad;
 
   @override
   State<BookDetailPage> createState() => _BookDetailPageState();
@@ -37,6 +43,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
   bool _actionRunning = false;
   double? _exportProgress;
   bool _initialized = false;
+  bool _openedReaderOnLoad = false;
   String? _deleteError;
   final Set<int> _selected = <int>{};
   final Set<int> _exportingChapters = <int>{};
@@ -53,15 +60,38 @@ class _BookDetailPageState extends State<BookDetailPage> {
 
   Future<void> _load() async {
     setState(() {
-      _loading = true;
+      _loading = _detail == null;
       _error = null;
       _deleteError = null;
     });
     try {
       final detail = await _scope.api.fetchBookDetail(widget.bookId);
-      if (mounted) setState(() => _detail = detail);
+      if (mounted) {
+        setState(() => _detail = detail);
+        if (widget.openReaderOnLoad &&
+            !_openedReaderOnLoad &&
+            detail.chapters.isNotEmpty) {
+          _openedReaderOnLoad = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _openReader();
+          });
+        }
+      }
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted) {
+        if (_detail != null && usesMobileUi(context)) {
+          displayInfoBar(
+            context,
+            builder: (_, __) => InfoBar(
+              title: const Text('未能刷新作品'),
+              content: Text('$error。已保留当前目录，请检查连接后重试。'),
+              severity: InfoBarSeverity.warning,
+            ),
+          );
+        } else {
+          setState(() => _error = '$error');
+        }
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -133,6 +163,20 @@ class _BookDetailPageState extends State<BookDetailPage> {
   }
 
   void _startTranslation(BookDetail detail) {
+    if (usesMobileUi(context)) {
+      final check = _scope.backend.translationModelCheck;
+      if (check != null && !check.available) {
+        displayInfoBar(
+          context,
+          builder: (_, __) => InfoBar(
+            title: const Text('翻译服务暂不可用'),
+            content: Text('${check.message}。请在连接设置重新检查，或联系服务管理员。'),
+            severity: InfoBarSeverity.warning,
+          ),
+        );
+        return;
+      }
+    }
     if (_usesDedicatedMangaTranslation(detail)) {
       _openDedicatedMangaTranslation(detail);
       return;
@@ -147,7 +191,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
       confirmation = showMobileSheet<bool>(
         context: context,
         builder: (dialogContext) => MobileSheet(
-          title: '删除这本书？',
+          title: _detail == null ? '删除这本书？' : '删除《${_detail!.book.title}》？',
           onClose: () => Navigator.pop(dialogContext, false),
           actions: <Widget>[
             Button(
@@ -161,7 +205,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
           ],
           child: const Padding(
             padding: EdgeInsets.fromLTRB(18, 18, 18, 22),
-            child: Text('本地章节、翻译内容和阅读进度都将被删除，此操作无法撤销。'),
+            child: Text('此账号书库中的章节、翻译内容和阅读进度都将被删除，此操作无法撤销。'),
           ),
         ),
       );
@@ -266,19 +310,35 @@ class _BookDetailPageState extends State<BookDetailPage> {
     );
   }
 
-  void _openReader([int? chapterIndex]) {
+  Future<void> _openReader([int? chapterIndex]) async {
     final detail = _detail;
-    if (detail == null) return;
-    Navigator.of(context).push<void>(
+    if (detail == null || detail.chapters.isEmpty) return;
+    final writer = ReaderProgressWriter(_scope.api, detail.book.id);
+    final isCurrent = _scope.api.captureContextGuard();
+    await Navigator.of(context).push<void>(
       qjPageRoute<void>(
         context: context,
         beginOffset: const Offset(0, 0.025),
         builder: (_) => ReaderPage(
           detail: detail,
           initialChapterIndex: chapterIndex ?? detail.progress.chapterIndex,
+          progressWriter: writer,
         ),
       ),
     );
+    // Route teardown submits the final position. Wait for that write before
+    // fetching the detail again so Continue Reading cannot use stale progress.
+    await writer.flush();
+    writer.dispose();
+    if (mounted && isCurrent()) {
+      try {
+        final updated = await _scope.api.fetchBookDetail(widget.bookId);
+        if (mounted && isCurrent()) setState(() => _detail = updated);
+        if (mounted && isCurrent()) await _scope.library.load(silent: true);
+      } catch (_) {
+        // Returning to the directory retains the loaded book when disconnected.
+      }
+    }
   }
 
   void _openAudiobook([int? chapterIndex]) {
@@ -294,11 +354,8 @@ class _BookDetailPageState extends State<BookDetailPage> {
           style: _scope.appState.ttsSpeechStyle,
           onStyleChanged: _scope.appState.setTtsSpeechStyle,
           initialChapterIndex: chapterIndex ?? detail.progress.chapterIndex,
-          loadChapter: (index, mode) => _scope.api.fetchChapter(
-            detail.book.id,
-            index,
-            mode: mode,
-          ),
+          loadChapter: (index, mode) =>
+              _scope.api.fetchChapter(detail.book.id, index, mode: mode),
         ),
       ),
     );
@@ -320,8 +377,11 @@ class _BookDetailPageState extends State<BookDetailPage> {
     });
     try {
       final saved = await _exportFiles.save<Map<String, dynamic>>(
-        suggestedName:
-            _chapterExportFileName(detail, chapter, option.extension),
+        suggestedName: _chapterExportFileName(
+          detail,
+          chapter,
+          option.extension,
+        ),
         mimeType: option.mimeType,
         download: (targetPath) => _scope.api.exportChapter(
           bookId: widget.bookId,
@@ -380,7 +440,8 @@ class _BookDetailPageState extends State<BookDetailPage> {
         builder: (_, __) => InfoBar(
           title: const Text('存在尚未下载的章节'),
           content: Text(
-              '请先下载第 ${unavailable.map((chapter) => chapter.index).join('、')} 章。'),
+            '请先下载第 ${unavailable.map((chapter) => chapter.index).join('、')} 章。',
+          ),
           severity: InfoBarSeverity.warning,
         ),
       );
@@ -549,97 +610,6 @@ class _BookDetailPageState extends State<BookDetailPage> {
     return '${safeName.isEmpty ? '作品导出' : safeName}.$extension';
   }
 
-  Widget _buildOverview(BookDetail detail, bool compact) {
-    if (!compact) return _buildDesktopOverview(detail);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        _BookHero(detail: detail, compact: compact),
-        const SizedBox(height: 14),
-        AppSurface(
-          tone: AppSurfaceTone.muted,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-          child: _Stats(detail: detail),
-        ),
-        const SizedBox(height: 20),
-        if (_exportProgress case final progress?) ...<Widget>[
-          ProgressBar(value: (progress * 100).clamp(0, 100)),
-          const SizedBox(height: 6),
-          Text(
-              '正在接收导出文件 ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%'),
-          const SizedBox(height: 12),
-        ],
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: FilledButton(
-                onPressed: () => _openReader(),
-                child: const Text('继续阅读'),
-              ),
-            ),
-            if (detail.book.kind != '漫画' &&
-                detail.chapters.isNotEmpty) ...<Widget>[
-              const SizedBox(width: 10),
-              Expanded(
-                child: Button(
-                  onPressed: () => _openAudiobook(),
-                  child: const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Icon(FluentIcons.headset, size: 16),
-                      SizedBox(width: 8),
-                      Text('听小说'),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-        const SizedBox(height: 12),
-        AppSurface(
-          tone: AppSurfaceTone.muted,
-          padding: const EdgeInsets.all(10),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              Button(
-                onPressed: _actionRunning ? null : _exportSelectedChapters,
-                child: Text(_selected.isEmpty ? '下载全部' : '下载所选'),
-              ),
-              Button(
-                onPressed:
-                    _actionRunning ? null : () => _startTranslation(detail),
-                child: Text(_translationActionLabel(detail)),
-              ),
-              Button(
-                onPressed: () {
-                  setState(() {
-                    if (_selected.length == detail.chapters.length) {
-                      _selected.clear();
-                    } else {
-                      _selected
-                        ..clear()
-                        ..addAll(
-                          detail.chapters.map((chapter) => chapter.index),
-                        );
-                    }
-                  });
-                },
-                child: Text(
-                  _selected.length == detail.chapters.length ? '取消全选' : '全选章节',
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 30),
-        SectionTitle('章节', trailing: Text('已选择 ${_selected.length} 章')),
-      ],
-    );
-  }
-
   Widget _buildDesktopOverview(BookDetail detail) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -702,9 +672,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
                   } else {
                     _selected
                       ..clear()
-                      ..addAll(
-                        detail.chapters.map((chapter) => chapter.index),
-                      );
+                      ..addAll(detail.chapters.map((chapter) => chapter.index));
                   }
                 });
               },
@@ -734,31 +702,49 @@ class _BookDetailPageState extends State<BookDetailPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      const loading = NavigationView(
-        content: LoadingView(label: '正在加载作品详情'),
-      );
+      const loading = NavigationView(content: LoadingView(label: '正在加载作品详情'));
       return _withMobileSafeArea(loading);
     }
     if (_error != null) {
       return _buildErrorPage();
     }
     final detail = _detail!;
-    final compact = usesMobileUi(context);
+    if (usesMobileUi(context)) {
+      return MobileBookDetailView(
+        detail: detail,
+        selected: _selected,
+        busy: _actionRunning,
+        exportProgress: _exportProgress,
+        onRead: _openReader,
+        onListen: detail.book.kind != '漫画' && detail.chapters.isNotEmpty
+            ? () => _openAudiobook()
+            : null,
+        onDownload: () => _enqueue('download'),
+        onTranslate: () => _startTranslation(detail),
+        onExport: _exportSelectedChapters,
+        onExportChapter: _exportChapter,
+        onDelete: _delete,
+        onRefresh: _load,
+        onSelectionChanged: (selection) => setState(() {
+          _selected
+            ..clear()
+            ..addAll(selection);
+        }),
+      );
+    }
     final page = NavigationView(
-      appBar: compact
-          ? null
-          : NavigationAppBar(
-              automaticallyImplyLeading: false,
-              backgroundColor: FluentTheme.of(context).micaBackgroundColor,
-              leading: Tooltip(
-                message: '返回',
-                child: IconButton(
-                  icon: const Icon(FluentIcons.back, semanticLabel: '返回'),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ),
-              title: Text(detail.book.title),
-            ),
+      appBar: NavigationAppBar(
+        automaticallyImplyLeading: false,
+        backgroundColor: FluentTheme.of(context).micaBackgroundColor,
+        leading: Tooltip(
+          message: '返回',
+          child: IconButton(
+            icon: const Icon(FluentIcons.back, semanticLabel: '返回'),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+        title: Text(detail.book.title),
+      ),
       content: PageFrame(
         title: detail.book.title,
         subtitle: [
@@ -768,24 +754,15 @@ class _BookDetailPageState extends State<BookDetailPage> {
           '${detail.chapters.length} 章',
         ].join(' · '),
         command: Button(onPressed: _delete, child: const Text('删除')),
-        compactHeader: _DetailHeader(
-          title: detail.book.title,
-          subtitle: [
-            if (detail.author?.trim().isNotEmpty == true) detail.author!,
-            '${detail.chapters.length} 章',
-          ].join(' · '),
-          onBack: () => Navigator.pop(context),
-          onDelete: _delete,
-        ),
         scrollable: false,
         child: Expanded(
           child: Scrollbar(
             controller: _chapterScrollController,
             child: CustomScrollView(
               controller: _chapterScrollController,
-              cacheExtent: compact ? 360 : 600,
+              scrollCacheExtent: const ScrollCacheExtent.pixels(600),
               slivers: <Widget>[
-                SliverToBoxAdapter(child: _buildOverview(detail, compact)),
+                SliverToBoxAdapter(child: _buildDesktopOverview(detail)),
                 SliverFixedExtentList(
                   itemExtent: 48,
                   delegate: SliverChildBuilderDelegate(
@@ -834,10 +811,9 @@ class _DesktopBookSummary extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: 620),
       child: Text(
         detail.synopsis.trim().isEmpty ? '暂无简介。' : detail.synopsis,
-        style: FluentTheme.of(context)
-            .typography
-            .bodyLarge
-            ?.copyWith(height: 1.65),
+        style: FluentTheme.of(
+          context,
+        ).typography.bodyLarge?.copyWith(height: 1.65),
       ),
     );
   }
@@ -878,122 +854,6 @@ class _DesktopMetric extends StatelessWidget {
           Text(value, style: FluentTheme.of(context).typography.subtitle),
           const SizedBox(height: 3),
           Text(label, style: FluentTheme.of(context).typography.caption),
-        ],
-      ),
-    );
-  }
-}
-
-class _DetailHeader extends StatelessWidget {
-  const _DetailHeader({
-    required this.title,
-    required this.subtitle,
-    required this.onBack,
-    required this.onDelete,
-  });
-
-  final String title;
-  final String subtitle;
-  final VoidCallback onBack;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = FluentTheme.of(context);
-    return Row(
-      key: const ValueKey('detail-mobile-header'),
-      children: <Widget>[
-        Tooltip(
-          message: '返回书架',
-          child: IconButton(
-            icon: const Icon(FluentIcons.back, semanticLabel: '返回书架'),
-            onPressed: onBack,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.typography.title?.copyWith(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.typography.caption,
-              ),
-            ],
-          ),
-        ),
-        Tooltip(
-          message: '删除作品',
-          child: IconButton(
-            icon: const Icon(FluentIcons.delete, semanticLabel: '删除作品'),
-            onPressed: onDelete,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _BookHero extends StatelessWidget {
-  const _BookHero({required this.detail, required this.compact});
-
-  final BookDetail detail;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    return AppSurface(
-      tone: AppSurfaceTone.accent,
-      borderRadius: 18,
-      padding: const EdgeInsets.all(18),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          SizedBox(
-            width: compact ? 92 : 108,
-            height: compact ? 132 : 154,
-            child: BookCover(
-              book: detail.book,
-              borderRadius: 13,
-              showShadow: true,
-            ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: <Widget>[
-                    StatusPill(detail.book.kind, accented: true),
-                    StatusPill(detail.book.language),
-                    if (detail.book.translated) const StatusPill('已有译文'),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                _ScrollableSynopsis(
-                  text: detail.synopsis.trim().isEmpty
-                      ? '暂无简介。'
-                      : detail.synopsis,
-                  maxHeight: compact ? 128 : 150,
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -1054,28 +914,6 @@ class _ScrollableSynopsisState extends State<_ScrollableSynopsis> {
   }
 }
 
-class _Stats extends StatelessWidget {
-  const _Stats({required this.detail});
-
-  final BookDetail detail;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: <Widget>[
-        Expanded(child: AppMetric(label: '总字数', value: '${detail.totalWords}')),
-        Expanded(
-            child: AppMetric(
-                label: '已下载',
-                value: '${detail.downloadedCount}',
-                accented: true)),
-        Expanded(
-            child: AppMetric(label: '已翻译', value: '${detail.translatedCount}')),
-      ],
-    );
-  }
-}
-
 class _ChapterRow extends StatelessWidget {
   const _ChapterRow({
     required this.chapter,
@@ -1114,13 +952,13 @@ class _ChapterRow extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       decoration: BoxDecoration(
                         color: states.isPressed
-                            ? FluentTheme.of(context)
-                                .resources
-                                .subtleFillColorSecondary
+                            ? FluentTheme.of(
+                                context,
+                              ).resources.subtleFillColorSecondary
                             : states.isHovered
-                                ? FluentTheme.of(context)
-                                    .resources
-                                    .subtleFillColorTertiary
+                                ? FluentTheme.of(
+                                    context,
+                                  ).resources.subtleFillColorTertiary
                                 : const Color(0x00000000),
                         borderRadius: BorderRadius.circular(13),
                       ),

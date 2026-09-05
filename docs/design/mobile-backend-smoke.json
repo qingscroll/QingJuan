@@ -1,0 +1,183 @@
+{
+  "scope": "isolated real loopback HTTP service; not Android device validation",
+  "createdAt": "2026-09-05T15:15:38.302299+00:00",
+  "externalContentServicesUsed": false,
+  "paidTranslationServicesUsed": false,
+  "checks": [
+    {
+      "name": "connection metadata",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "multi-user capability advertised",
+      "passed": true
+    },
+    {
+      "name": "invalid connection token rejected",
+      "passed": true,
+      "httpStatus": 401
+    },
+    {
+      "name": "registration policy",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "isolated registration has no external mail requirement",
+      "passed": true
+    },
+    {
+      "name": "register reader",
+      "passed": true,
+      "httpStatus": 201
+    },
+    {
+      "name": "restore registered session",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "ordinary reader cannot import sources",
+      "passed": true,
+      "httpStatus": 403
+    },
+    {
+      "name": "upload TXT through multipart API",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "list personal library",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "imported work belongs to reader",
+      "passed": true
+    },
+    {
+      "name": "load work details and chapters",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "TXT chapter parsing",
+      "passed": true,
+      "chapterCount": 2
+    },
+    {
+      "name": "read original chapter",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "reader receives real text",
+      "passed": true
+    },
+    {
+      "name": "save anchored reading position",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "progress retained",
+      "passed": true
+    },
+    {
+      "name": "enqueue chapter download",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "task reaches completed",
+      "passed": true,
+      "taskType": "download",
+      "status": "completed",
+      "progress": 100.0
+    },
+    {
+      "name": "download counts agree with total",
+      "passed": true
+    },
+    {
+      "name": "read translation availability",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "unconfigured translation reported honestly",
+      "passed": true,
+      "status": "disabled"
+    },
+    {
+      "name": "remote reader cannot force admin probe",
+      "passed": true,
+      "httpStatus": 401
+    },
+    {
+      "name": "enqueue translation with disabled model",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "task reaches failed",
+      "passed": true,
+      "taskType": "translate",
+      "status": "failed",
+      "progress": 0.0
+    },
+    {
+      "name": "translation failure explains recovery",
+      "passed": true,
+      "errorCategory": "model not enabled/configured"
+    },
+    {
+      "name": "register second isolated reader",
+      "passed": true,
+      "httpStatus": 201
+    },
+    {
+      "name": "second reader library",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "libraries isolated between users",
+      "passed": true
+    },
+    {
+      "name": "other reader cannot access book",
+      "passed": true,
+      "httpStatus": 404
+    },
+    {
+      "name": "logout original reader",
+      "passed": true,
+      "httpStatus": 204
+    },
+    {
+      "name": "revoked session rejected",
+      "passed": true,
+      "httpStatus": 401
+    },
+    {
+      "name": "login reader again",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "restore reading context after login",
+      "passed": true,
+      "httpStatus": 200
+    },
+    {
+      "name": "chapter and paragraph position survive login",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "temporaryServerStopped": true,
+  "temporaryDataRemoved": true,
+  "elapsedSeconds": 2.48
+}

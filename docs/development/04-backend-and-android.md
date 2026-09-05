@@ -44,6 +44,13 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
   Bika 邮箱、密码与登录 Token 视为管理员配置的服务级抓取凭据，与翻译模型密钥一样由整台后端共享，不代表或同步任一用户的青卷书架；
   多用户模式未配置凭据时必须返回可执行错误，普通搜索、预览或下载请求不得自动注册账号或写回全局设置。Windows 单用户模式可保留自动建号。
 
+### 阅读定位与链接任务重试
+
+- `PUT /api/v1/books/{book_id}/progress` 兼容原有章节、滚动比例和段落/图片锚点，另接受可空的 `pageIndex`、`pageCount`、`layoutKey`、`contentMode`、`characterOffset`。响应使用对应的 `last*` 字段；书库记录提供 `lastReadPageIndex` 和 `lastReadPageCount`。页索引和字符偏移从零开始，页数为正，分页标识最多 256 字符，原文/译文模式为 `original` / `translated`。
+- SQLite 升级以可重复执行的新增可空列保留旧阅读数据。旧客户端保存时清空不再有效的新定位字段；章节被删除或缩减时同步清除失效页码和锚点。阅读进度继续严格按当前用户及其书籍授权。
+- 链接任务 POST 支持最长 128 字符的 `Idempotency-Key`，允许字母、数字和 `._:-`，按用户与键隔离。相同键与参数返回原任务，只调度一次；相同键但不同参数返回 409。去重与当前链接任务一致，仅在后端进程生命周期内有效，不承诺跨进程重启恢复同一操作。
+- 网站抓取必须校验所有解析地址并将连接固定到已验证的公网 IP；HTTP、curl 重定向和浏览器子资源均使用同一公网边界，不继承模型服务的内网白名单。失败信息保存在任务或章节状态，不能写作正文；正文经过成功校验后才原子替换旧文件，部分下载成功时据实际章节状态显示结果。
+
 ### 客户端设备登记与封禁
 
 - Flutter 客户端首次启动时在普通偏好中生成 128 位随机设备 ID，后续安装生命周期内保持稳定；卸载或清除应用数据后可生成新 ID。
@@ -280,7 +287,7 @@ Linux 服务或占用同一端口但不属于当前客户端的进程。开发�
 
 执行前先完成[开发环境与依赖基线](./README.md#开发环境与依赖基线)：
 
-1. 校验 Flutter `3.24.3`、JDK 17 和 Android toolchain；
+1. 校验 Flutter `3.44.4`、JDK 17 和 Android toolchain；
 2. `flutter pub get`；
 3. `dart format --output=none --set-exit-if-changed lib test`；
 4. `flutter analyze` 与 `flutter test`；

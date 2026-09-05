@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:fluent_ui/fluent_ui.dart';
 
 import 'motion.dart';
+import 'mobile_palette.dart';
 import 'responsive.dart';
 
 enum AppSurfaceTone { standard, muted, accent, elevated, danger }
@@ -105,7 +106,6 @@ class AppSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final mobile = usesMobileUi(context);
     if (onPressed == null) {
       return _SurfaceBody(
         padding: padding,
@@ -134,13 +134,7 @@ class AppSurface extends StatelessWidget {
           animate: true,
           child: child,
         );
-        if (!mobile) return body;
-        return AnimatedScale(
-          duration: QjMotion.duration(context, QjMotionSpeed.faster),
-          curve: QjMotion.enterCurve,
-          scale: states.isPressed ? 0.985 : 1,
-          child: body,
-        );
+        return body;
       },
     );
   }
@@ -199,13 +193,13 @@ class _SurfaceBody extends StatelessWidget {
     final fill = switch (tone) {
       AppSurfaceTone.standard => theme.cardColor,
       AppSurfaceTone.muted =>
-        dark ? const Color(0xFF20242B) : const Color(0xFFF0F3F7),
+        dark ? MobilePalette.nightInset : MobilePalette.inset,
       AppSurfaceTone.accent =>
-        dark ? const Color(0xFF182740) : const Color(0xFFEDF4FF),
+        dark ? MobilePalette.accentSoftDark : MobilePalette.accentSoft,
       AppSurfaceTone.elevated =>
-        dark ? const Color(0xFF20242B) : const Color(0xFFFFFFFF),
+        dark ? MobilePalette.nightCard : MobilePalette.card,
       AppSurfaceTone.danger =>
-        dark ? const Color(0xFF352326) : const Color(0xFFFFF1F2),
+        dark ? const Color(0xFF412928) : const Color(0xFFFCEAE7),
     };
     final borderColor = selected
         ? theme.accentColor.withAlpha(
@@ -216,8 +210,8 @@ class _SurfaceBody extends StatelessWidget {
             : tone == AppSurfaceTone.muted
                 ? const Color(0x00000000)
                 : dark
-                    ? const Color(0xFF303640)
-                    : const Color(0xFFE8ECF2);
+                    ? MobilePalette.nightLine
+                    : MobilePalette.line;
     final decoration = BoxDecoration(
       color: pressed
           ? theme.resources.subtleFillColorTertiary
@@ -229,7 +223,7 @@ class _SurfaceBody extends StatelessWidget {
       boxShadow: tone == AppSurfaceTone.elevated
           ? <BoxShadow>[
               BoxShadow(
-                color: const Color(0xFF101828).withAlpha(dark ? 22 : 9),
+                color: MobilePalette.ink.withAlpha(dark ? 22 : 9),
                 blurRadius: 12,
                 offset: const Offset(0, 3),
               ),
@@ -333,7 +327,7 @@ class StatusPill extends StatelessWidget {
                 theme.brightness == Brightness.dark ? 46 : 22,
               )
             : theme.resources.subtleFillColorSecondary,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(compact ? 6 : 999),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

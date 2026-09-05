@@ -37,17 +37,41 @@ TextSpan readerTextSpanForLayout(
   String text, {
   required double fontSize,
   TextScaler textScaler = TextScaler.noScaling,
+  double? paragraphSpacing,
 }) {
   final children = <InlineSpan>[];
+  void appendText(String value) {
+    if (paragraphSpacing == null) {
+      children.add(TextSpan(text: value));
+      return;
+    }
+    final paragraphs = value.split('\n\n');
+    for (var index = 0; index < paragraphs.length; index++) {
+      if (paragraphs[index].isNotEmpty) {
+        children.add(TextSpan(text: paragraphs[index]));
+      }
+      if (index < paragraphs.length - 1) {
+        children.add(const TextSpan(text: '\n'));
+        // A blank line carries the paragraph gap independently of body leading.
+        // Pagination uses this identical span so a font-size change cannot clip
+        // the final line or drop text at a page boundary.
+        children.add(TextSpan(
+          text: '\n',
+          style: TextStyle(height: paragraphSpacing / fontSize),
+        ));
+      }
+    }
+  }
+
   var start = 0;
   while (start < text.length) {
     final markerIndex = text.indexOf(readerParagraphStartMarker, start);
     if (markerIndex < 0) {
-      children.add(TextSpan(text: text.substring(start)));
+      appendText(text.substring(start));
       break;
     }
     if (markerIndex > start) {
-      children.add(TextSpan(text: text.substring(start, markerIndex)));
+      appendText(text.substring(start, markerIndex));
     }
     children.add(
       WidgetSpan(
@@ -114,6 +138,7 @@ List<String> paginateReaderTextForLayout(
   required double pageHeight,
   double? firstPageHeight,
   required TextStyle style,
+  double? paragraphSpacing,
   TextScaler textScaler = TextScaler.noScaling,
   TextDirection textDirection = TextDirection.ltr,
   Locale? locale,
@@ -162,6 +187,7 @@ List<String> paginateReaderTextForLayout(
           maxWidth: maxWidth,
           maxHeight: availableHeight,
           style: style,
+          paragraphSpacing: paragraphSpacing,
           textScaler: textScaler,
           textDirection: textDirection,
           locale: locale,
@@ -217,6 +243,7 @@ bool _readerTextFitsLayout(
   required double maxWidth,
   required double maxHeight,
   required TextStyle style,
+  double? paragraphSpacing,
   required TextScaler textScaler,
   required TextDirection textDirection,
   Locale? locale,
@@ -225,6 +252,7 @@ bool _readerTextFitsLayout(
     text,
     fontSize: style.fontSize ?? 14,
     textScaler: textScaler,
+    paragraphSpacing: paragraphSpacing,
   );
   final painter = TextPainter(
     text: TextSpan(style: style, children: span.children),
@@ -246,7 +274,9 @@ bool _readerTextFitsLayout(
     );
   }
   painter.layout(maxWidth: maxWidth);
-  return painter.height <= maxHeight;
+  final fits = painter.height <= maxHeight;
+  painter.dispose();
+  return fits;
 }
 
 bool _isBreakCharacter(int codeUnit) =>

@@ -34,7 +34,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from bs4 import BeautifulSoup, Tag, XMLParsedAsHTMLWarning
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 
@@ -181,6 +181,7 @@ try:
         translated_image_payload_is_current,
         translated_text_path,
     )
+    from .scraper_network_security import create_public_http_client
     from .security import API_PREFIX, API_VERSION, authentication_enabled
     from .site_plugins import (
         SitePlugin,
@@ -334,6 +335,7 @@ except ImportError:
         translated_image_payload_is_current,
         translated_text_path,
     )
+    from app.scraper_network_security import create_public_http_client
     from app.security import API_PREFIX, API_VERSION, authentication_enabled
     from app.site_plugins import (
         SitePlugin,
@@ -1572,6 +1574,11 @@ async def put_reading_progress(
         lastAnchorIndex=max(0, payload.anchorIndex),
         lastAnchorOffsetRatio=_clamp_unit_float(payload.anchorOffsetRatio),
         lastReadAt=_now(),
+        lastPageIndex=payload.pageIndex,
+        lastPageCount=payload.pageCount,
+        lastLayoutKey=payload.layoutKey,
+        lastContentMode=payload.contentMode,
+        lastCharacterOffset=payload.characterOffset,
     )
     return save_reading_progress(progress)
 
@@ -1850,9 +1857,23 @@ async def _run_link_job(job_id: str) -> None:
 
 
 @library_router.post("/books/link-jobs", response_model=PublicLinkJobRecord)
-async def post_link_job(payload: LinkJobStartPayload, request: Request) -> LinkJobRecord:
+async def post_link_job(
+    payload: LinkJobStartPayload,
+    request: Request,
+    idempotency_key: Annotated[
+        str | None,
+        Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    ] = None,
+) -> LinkJobRecord:
     owner_id = _effective_owner_id(require_user_access(request))
-    job = LINK_JOB_STORE.create(payload.mode, payload.payload, owner_id)
+    try:
+        job, created = LINK_JOB_STORE.create_or_get(
+            payload.mode, payload.payload, owner_id, idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created:
+        return job
     task = asyncio.create_task(_run_link_job(job.id))
     link_job_tasks: set[asyncio.Task[Any]] = getattr(app.state, "link_job_tasks", set())
     link_job_tasks.add(task)
@@ -2295,7 +2316,7 @@ async def _fetch_book_source_import_payload(url: str) -> str:
         read=SOURCE_IMPORT_TIMEOUT,
     )
     try:
-        async with httpx.AsyncClient(
+        async with create_public_http_client(
             follow_redirects=True,
             timeout=timeout,
             headers=SOURCE_IMPORT_HEADERS,
@@ -2702,8 +2723,8 @@ async def _search_legado_source(
     headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
     charset = str(request.get("charset") or "").strip()
     timeout = httpx.Timeout(LEGADO_SEARCH_SOURCE_TIMEOUT, connect=LEGADO_SEARCH_CONNECT_TIMEOUT)
-    async with httpx.AsyncClient(
-        follow_redirects=True, timeout=timeout, headers=headers, verify=False
+    async with create_public_http_client(
+        follow_redirects=True, timeout=timeout, headers=headers
     ) as client:
         if method == "POST":
             response = await client.post(search_target, data=body)
@@ -4211,7 +4232,16 @@ def _load_or_initialize_manifest(book: BookRecord, book_dir: Path) -> dict:
 
 
 def _hydrate_book_record(book: BookRecord) -> BookRecord:
-    manifest = _load_or_initialize_manifest(book, _resolve_book_dir(book))
+    book_dir = _resolve_book_dir(book)
+    manifest = _load_or_initialize_manifest(book, book_dir)
+    if book_dir.exists():
+        chapters = list(_build_manifest_lookup(manifest).values())
+        book = _update_book_chapter_counts(
+            book,
+            chapter_count=len(chapters),
+            downloaded_count=sum(bool(chapter.get("downloaded")) for chapter in chapters),
+            translated_count=sum(bool(chapter.get("translated")) for chapter in chapters),
+        )
     cover = _resolve_book_cover(book, manifest)
     if cover == book.cover:
         return book
@@ -4276,6 +4306,11 @@ def _build_book_detail(book: BookRecord) -> BookDetailResponse:
                 lastReadAt=progress.lastReadAt,
             )
         )
+        refreshed_book = refreshed_book.model_copy(update={
+            "lastReadChapterIndex": progress.lastChapterIndex,
+            "lastReadPageIndex": progress.lastPageIndex,
+            "lastReadPageCount": progress.lastPageCount,
+        })
 
     return BookDetailResponse(
         book=refreshed_book,
@@ -4306,23 +4341,33 @@ def _normalize_progress_anchor_type(value: str | None) -> str:
 
 
 def _refresh_book_state(book: BookRecord, chapters: list[ChapterRecord] | None = None) -> BookRecord:
-    current_chapters = chapters or _load_chapter_records(book)
-    translated = any(chapter.translated for chapter in current_chapters)
-    downloaded_count = len([chapter for chapter in current_chapters if chapter.downloaded])
-    if current_chapters and all(chapter.translated for chapter in current_chapters):
+    current_chapters = chapters if chapters is not None else _load_chapter_records(book)
+    return _update_book_chapter_counts(
+        book,
+        chapter_count=len(current_chapters),
+        downloaded_count=sum(chapter.downloaded for chapter in current_chapters),
+        translated_count=sum(chapter.translated for chapter in current_chapters),
+    )
+
+
+def _update_book_chapter_counts(
+    book: BookRecord, *, chapter_count: int, downloaded_count: int, translated_count: int,
+) -> BookRecord:
+    translated = translated_count > 0
+    if chapter_count > 0 and translated_count == chapter_count:
         status = "已完成"
-    elif current_chapters and downloaded_count == len(current_chapters):
+    elif chapter_count > 0 and downloaded_count == chapter_count:
         status = "已下载"
     elif downloaded_count > 0:
         status = "解析中"
     else:
         status = "待处理"
-    if book.chapterCount == len(current_chapters) and book.translated == translated and book.status == status:
+    if book.chapterCount == chapter_count and book.translated == translated and book.status == status:
         return book
 
     refreshed = book.model_copy(
         update={
-            "chapterCount": len(current_chapters),
+            "chapterCount": chapter_count,
             "translated": translated,
             "status": status,
             "updatedAt": _now(),

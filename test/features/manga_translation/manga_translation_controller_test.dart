@@ -966,6 +966,7 @@ void main() {
     expect(await File(paths.editorBasePath).readAsBytes(), <int>[1, 2, 3]);
     expect(controller.files.single.hasProject, isTrue);
     expect(controller.files.single.message, contains('等待重新渲染'));
+    expect(await File(paths.pendingRenderPath).exists(), isTrue);
   });
 
   test('text editor creates a project with export original when none exists',
@@ -1101,6 +1102,7 @@ void main() {
     expect(result.bookshelfBound, isFalse);
     expect(result.message, '已保存并重新渲染');
     expect(await File(paths.resultPath).readAsBytes(), <int>[9, 8, 7]);
+    expect(await File(paths.pendingRenderPath).exists(), isFalse);
     final saved = jsonDecode(await File(paths.projectPath).readAsString())
         as Map<String, dynamic>;
     expect((saved['_metadata'] as Map<String, dynamic>)['custom'], 'keep-root');
@@ -1112,7 +1114,7 @@ void main() {
         controller.files.single.status, MangaTranslationFileStatus.succeeded);
   });
 
-  test('text editor writes a complete bookshelf chapter in page order',
+  test('text editor only publishes matching project and result after reload',
       () async {
     final temporary = await Directory.systemTemp
         .createTemp('qingjuan-text-editor-bookshelf-');
@@ -1132,60 +1134,61 @@ void main() {
     final persisted = <List<Map<String, dynamic>>>[];
     final api = ApiClient(() => 'http://127.0.0.1:19453');
     addTearDown(api.close);
-    final controller = MangaTranslationController(
-      api,
-      importBookshelfBook: (
-        request, {
-        onProgress,
-        abortTrigger,
-      }) async =>
-          MangaBookshelfImportResult(
-        bookId: request.bookId,
-        bookTitle: request.bookTitle,
-        sourceRoot: temporary.path,
-        filePaths: <String>[pageTwo.path, pageOne.path],
-        chapterCount: 1,
-        pageTargets: <String, MangaBookshelfPageTarget>{
-          pageOne.path: const MangaBookshelfPageTarget(
-            bookId: 'manga-1',
-            chapterIndex: 3,
-            pageNumber: 1,
+    MangaTranslationController createController() => MangaTranslationController(
+          api,
+          importBookshelfBook: (
+            request, {
+            onProgress,
+            abortTrigger,
+          }) async =>
+              MangaBookshelfImportResult(
+            bookId: request.bookId,
+            bookTitle: request.bookTitle,
+            sourceRoot: temporary.path,
+            filePaths: <String>[pageTwo.path, pageOne.path],
+            chapterCount: 1,
+            pageTargets: <String, MangaBookshelfPageTarget>{
+              pageOne.path: const MangaBookshelfPageTarget(
+                bookId: 'manga-1',
+                chapterIndex: 3,
+                pageNumber: 1,
+              ),
+              pageTwo.path: const MangaBookshelfPageTarget(
+                bookId: 'manga-1',
+                chapterIndex: 3,
+                pageNumber: 2,
+              ),
+            },
           ),
-          pageTwo.path: const MangaBookshelfPageTarget(
-            bookId: 'manga-1',
-            chapterIndex: 3,
-            pageNumber: 2,
+          invokeWorkflow: ({
+            required String filePath,
+            required String mode,
+            String language = '中文',
+            String title = '',
+            Object? project,
+            Object? companion,
+            String? translatedFilePath,
+            int upscaleFactor = 2,
+            Future<void>? abortTrigger,
+          }) async =>
+              MangaWorkflowResult(
+            mode: mode,
+            imageKey: title,
+            mimeType: 'image/png',
+            outputImageBase64: base64Encode(<int>[9]),
           ),
-        },
-      ),
-      invokeWorkflow: ({
-        required String filePath,
-        required String mode,
-        String language = '中文',
-        String title = '',
-        Object? project,
-        Object? companion,
-        String? translatedFilePath,
-        int upscaleFactor = 2,
-        Future<void>? abortTrigger,
-      }) async =>
-          MangaWorkflowResult(
-        mode: mode,
-        imageKey: title,
-        mimeType: 'image/png',
-        outputImageBase64: base64Encode(<int>[9]),
-      ),
-      persistBookshelfTranslation: ({
-        required String bookId,
-        required int chapterIndex,
-        required String targetLanguage,
-        required List<Map<String, dynamic>> pages,
-      }) async {
-        expect(bookId, 'manga-1');
-        expect(chapterIndex, 3);
-        persisted.add(pages);
-      },
-    );
+          persistBookshelfTranslation: ({
+            required String bookId,
+            required int chapterIndex,
+            required String targetLanguage,
+            required List<Map<String, dynamic>> pages,
+          }) async {
+            expect(bookId, 'manga-1');
+            expect(chapterIndex, 3);
+            persisted.add(pages);
+          },
+        );
+    final controller = createController();
     addTearDown(controller.dispose);
     controller.enqueueBookshelfImport(
       MangaBookshelfImportRequest.fromBook(
@@ -1239,6 +1242,130 @@ void main() {
       base64Decode(persisted.single[1]['outputImageBase64'] as String),
       <int>[2],
     );
+
+    final changedPageOneProject = <String, dynamic>{
+      pageOne.absolute.path: <String, dynamic>{
+        'regions': <Map<String, dynamic>>[
+          <String, dynamic>{'translation': '第一页人工修改'},
+        ],
+      },
+    };
+    await controller.saveTextEditorProject(
+      controller.files.first,
+      changedPageOneProject,
+    );
+    final pageOnePaths = MangaWorkspacePaths.forSource(pageOne.path);
+    expect(await File(pageOnePaths.pendingRenderPath).exists(), isTrue);
+    // A new controller must observe the persisted pending state even though
+    // the previous render is still present on disk.
+    final reloadedController = createController();
+    addTearDown(reloadedController.dispose);
+    reloadedController.enqueueBookshelfImport(
+      MangaBookshelfImportRequest.fromBook(
+        _book(id: 'manga-1', title: '测试漫画'),
+        workspaceIdentity: 'local:user-1',
+      ),
+    );
+    await _waitUntil(() => reloadedController.selectedBookId == 'manga-1');
+    expect(reloadedController.files.first.message, contains('等待重新渲染'));
+    final secondPageOutcome = await reloadedController.renderTextEditorProject(
+      reloadedController.files.last,
+      await reloadedController.loadTextEditorProject(
+        reloadedController.files.last,
+      ),
+    );
+    expect(secondPageOutcome.bookshelfWritten, isFalse);
+    expect(secondPageOutcome.missingBookshelfPages, 1);
+    expect(secondPageOutcome.message, contains('1 页待重新渲染'));
+    expect(persisted, hasLength(1));
+
+    final firstPageOutcome = await reloadedController.renderTextEditorProject(
+      reloadedController.files.first,
+      await reloadedController.loadTextEditorProject(
+        reloadedController.files.first,
+      ),
+    );
+    expect(firstPageOutcome.bookshelfWritten, isTrue);
+    expect(firstPageOutcome.missingBookshelfPages, 0);
+    expect(await File(pageOnePaths.pendingRenderPath).exists(), isFalse);
+    expect(persisted, hasLength(2));
+    expect(persisted.last.first['pageTranslation'], '第一页人工修改');
+    expect(persisted.last.map((page) => page['pageNumber']), <int>[1, 2]);
+  });
+
+  test('pending manual render survives failure and non-translation batches',
+      () async {
+    final temporary =
+        await Directory.systemTemp.createTemp('qingjuan-text-editor-pending-');
+    addTearDown(() => temporary.delete(recursive: true));
+    final source = File('${temporary.path}${Platform.pathSeparator}page.jpg');
+    await source.writeAsBytes(<int>[1]);
+    final paths = MangaWorkspacePaths.forSource(source.path);
+    final manualProject = <String, dynamic>{
+      source.absolute.path: <String, dynamic>{
+        'regions': <Map<String, dynamic>>[
+          <String, dynamic>{'translation': '人工译文'},
+        ],
+      },
+    };
+    var failRender = true;
+    final api = ApiClient(() => 'http://127.0.0.1:19453');
+    addTearDown(api.close);
+    final controller = MangaTranslationController(
+      api,
+      invokeWorkflow: ({
+        required String filePath,
+        required String mode,
+        String language = '中文',
+        String title = '',
+        Object? project,
+        Object? companion,
+        String? translatedFilePath,
+        int upscaleFactor = 2,
+        Future<void>? abortTrigger,
+      }) async {
+        if (failRender) throw StateError('模拟渲染失败');
+        return MangaWorkflowResult(
+          mode: mode,
+          imageKey: filePath,
+          mimeType: 'image/png',
+          projectDocument: Map<String, dynamic>.from(project! as Map),
+          outputImageBase64:
+              mode == 'translate_json_only' ? null : base64Encode(<int>[9]),
+        );
+      },
+    );
+    addTearDown(controller.dispose);
+    await controller.addFiles(<String>[source.path]);
+    await File(paths.resultPath).parent.create(recursive: true);
+    await File(paths.resultPath).writeAsBytes(<int>[2]);
+
+    await expectLater(
+      controller.renderTextEditorProject(
+          controller.files.single, manualProject),
+      throwsStateError,
+    );
+    expect(await File(paths.pendingRenderPath).exists(), isTrue);
+    expect(await File(paths.resultPath).readAsBytes(), <int>[2]);
+    expect(jsonDecode(await File(paths.projectPath).readAsString()),
+        manualProject);
+
+    failRender = false;
+    for (final mode in <MangaWorkflowMode>[
+      MangaWorkflowMode.inpaintOnly,
+      MangaWorkflowMode.translateJsonOnly,
+    ]) {
+      await controller.selectMode(mode);
+      await controller.run();
+      expect(controller.runState, MangaTranslationRunState.completed);
+      expect(await File(paths.pendingRenderPath).exists(), isTrue);
+    }
+
+    await controller.selectMode(MangaWorkflowMode.normal);
+    await controller.run();
+    expect(controller.runState, MangaTranslationRunState.completed);
+    expect(await File(paths.pendingRenderPath).exists(), isFalse);
+    expect(await File(paths.resultPath).readAsBytes(), <int>[9]);
   });
 
   test('text editor keeps local result when a bookshelf chapter has gaps',

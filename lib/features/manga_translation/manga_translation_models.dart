@@ -200,6 +200,7 @@ class MangaWorkspacePaths {
 
   String get projectPath =>
       path.join(jsonDirectory, '${stem}_translations.json');
+  String get pendingRenderPath => '$projectPath.pending-render';
   String get legacyProjectPath =>
       path.join(sourceDirectory, '${stem}_translations.json');
   String get originalPath =>

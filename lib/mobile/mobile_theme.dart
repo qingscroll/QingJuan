@@ -1,28 +1,99 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_miuix/miuix.dart';
 
-const qjMobilePrimary = Color(0xFF3377F6);
+import '../shared/mobile_palette.dart';
 
-MiuixColors qjMobileLightColors() => lightColorScheme().copy(
-      primary: qjMobilePrimary,
-      background: const Color(0xFFF6F8FC),
-      surface: const Color(0xFFF9FBFE),
-      surfaceContainer: const Color(0xFFFFFFFF),
-      onBackground: const Color(0xFF171C24),
-      onSurface: const Color(0xFF171C24),
-      onBackgroundVariant: const Color(0xFF626C7B),
-      outline: const Color(0xFFE2E8F2),
-      dividerLine: const Color(0xFFE9EEF5),
-    );
+const qjMobilePrimary = MobilePalette.accent;
 
-MiuixColors qjMobileDarkColors() => darkColorScheme().copy(
-      primary: const Color(0xFF6E9FFF),
-      background: const Color(0xFF11141A),
-      surface: const Color(0xFF161A21),
-      surfaceContainer: const Color(0xFF1D222B),
-      onBackground: const Color(0xFFF2F5F9),
-      onSurface: const Color(0xFFF2F5F9),
-      onBackgroundVariant: const Color(0xFFA4AEBB),
-      outline: const Color(0xFF333B48),
-      dividerLine: const Color(0xFF2A313C),
-    );
+MiuixColors qjMobileLightColors() => _mobileColors(false);
+MiuixColors qjMobileDarkColors() => _mobileColors(true);
+
+MiuixColors _mobileColors(bool dark) {
+  final accent = dark ? MobilePalette.accentDark : MobilePalette.accent;
+  final accentSoft =
+      dark ? MobilePalette.accentSoftDark : MobilePalette.accentSoft;
+  final background = dark ? MobilePalette.night : MobilePalette.paper;
+  final card = dark ? MobilePalette.nightCard : MobilePalette.card;
+  final ink = dark ? MobilePalette.nightInk : MobilePalette.ink;
+  final muted = dark ? MobilePalette.nightMuted : MobilePalette.muted;
+  final inset = dark ? MobilePalette.nightInset : MobilePalette.inset;
+  final line = dark ? MobilePalette.nightLine : MobilePalette.line;
+  final onAccent = dark ? MobilePalette.night : MobilePalette.card;
+  return (dark ? darkColorScheme() : lightColorScheme()).copy(
+    error: dark ? MobilePalette.errorDark : MobilePalette.error,
+    onError: dark ? MobilePalette.night : MobilePalette.card,
+    errorContainer: dark ? const Color(0xFF412928) : const Color(0xFFFCEAE7),
+    onErrorContainer: dark ? MobilePalette.errorDark : MobilePalette.error,
+    primary: accent,
+    onPrimary: onAccent,
+    primaryVariant: accentSoft,
+    onPrimaryVariant: accent,
+    primaryContainer: accentSoft,
+    onPrimaryContainer: accent,
+    disabledPrimary: accentSoft,
+    disabledOnPrimary: muted,
+    disabledPrimaryButton: accentSoft,
+    disabledOnPrimaryButton: muted,
+    disabledPrimarySlider: accentSoft,
+    secondary: inset,
+    onSecondary: ink,
+    secondaryVariant: inset,
+    onSecondaryVariant: ink,
+    disabledSecondary: inset,
+    disabledOnSecondary: muted,
+    disabledSecondaryVariant: inset,
+    disabledOnSecondaryVariant: muted,
+    secondaryContainer: inset,
+    onSecondaryContainer: ink,
+    secondaryContainerVariant: inset,
+    onSecondaryContainerVariant: muted,
+    tertiaryContainer: inset,
+    onTertiaryContainer: ink,
+    tertiaryContainerVariant: inset,
+    background: background,
+    onBackground: ink,
+    onBackgroundVariant: muted,
+    surface: background,
+    onSurface: ink,
+    surfaceVariant: inset,
+    onSurfaceSecondary: muted,
+    onSurfaceVariantSummary: muted,
+    onSurfaceVariantActions: accent,
+    disabledOnSurface: muted.withValues(alpha: .5),
+    surfaceContainer: card,
+    onSurfaceContainer: ink,
+    onSurfaceContainerVariant: muted,
+    surfaceContainerHigh: inset,
+    onSurfaceContainerHigh: ink,
+    surfaceContainerHighest: line,
+    onSurfaceContainerHighest: ink,
+    outline: line,
+    dividerLine: line,
+    sliderKeyPoint: accent,
+    sliderKeyPointForeground: onAccent,
+    sliderBackground: inset,
+  );
+}
+
+MiuixTextStyles qjMobileTextStyles() {
+  TextStyle body(double size) =>
+      TextStyle(fontSize: size, height: 1.45, fontWeight: FontWeight.w400);
+  TextStyle title(double size) =>
+      TextStyle(fontSize: size, height: 1.45, fontWeight: FontWeight.w600);
+  return MiuixTextStyles(
+    main: body(16),
+    paragraph: body(16),
+    body1: body(16),
+    body2: body(14),
+    button: title(14),
+    footnote1: body(13),
+    footnote2: body(12),
+    headline1: title(17),
+    headline2: title(16),
+    subtitle: title(16),
+    title1: title(24),
+    title2: title(22),
+    title3: title(21),
+    title4: title(18),
+  );
+}

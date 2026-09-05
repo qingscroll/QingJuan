@@ -164,7 +164,7 @@ class _TaskList extends StatelessWidget {
       debugLabel: 'tasks',
       builder: (context, scrollController) => ListView(
         controller: scrollController,
-        cacheExtent: 360,
+        scrollCacheExtent: const ScrollCacheExtent.pixels(360),
         children: <Widget>[
           Wrap(
             spacing: 10,
