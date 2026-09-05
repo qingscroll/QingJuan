@@ -1,4 +1,5 @@
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/rendering.dart' as rendering;
 
 import '../../app/app_scope.dart';
 import '../../core/models/task.dart';
@@ -164,7 +165,7 @@ class _TaskList extends StatelessWidget {
       debugLabel: 'tasks',
       builder: (context, scrollController) => ListView(
         controller: scrollController,
-        scrollCacheExtent: const ScrollCacheExtent.pixels(360),
+        scrollCacheExtent: const rendering.ScrollCacheExtent.pixels(360),
         children: <Widget>[
           Wrap(
             spacing: 10,

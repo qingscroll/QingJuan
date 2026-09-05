@@ -1,4 +1,5 @@
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/rendering.dart' as rendering;
 
 import '../../app/app_scope.dart';
 import '../../app/app_state.dart';
@@ -760,7 +761,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
             controller: _chapterScrollController,
             child: CustomScrollView(
               controller: _chapterScrollController,
-              scrollCacheExtent: const ScrollCacheExtent.pixels(600),
+              scrollCacheExtent: const rendering.ScrollCacheExtent.pixels(600),
               slivers: <Widget>[
                 SliverToBoxAdapter(child: _buildDesktopOverview(detail)),
                 SliverFixedExtentList(

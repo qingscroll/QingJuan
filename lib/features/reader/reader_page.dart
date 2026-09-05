@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/material.dart' as material;
+import 'package:flutter/rendering.dart' as rendering;
 import 'package:flutter/services.dart';
 
 import '../../app/app_scope.dart';
@@ -1462,7 +1463,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
               ),
               math.max(28, viewPadding.bottom + 18),
             ),
-            scrollCacheExtent: const ScrollCacheExtent.pixels(420),
+            scrollCacheExtent: const rendering.ScrollCacheExtent.pixels(420),
             addAutomaticKeepAlives: false,
             itemCount: elements.length,
             itemBuilder: (context, index) => Center(
