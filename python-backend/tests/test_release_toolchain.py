@@ -39,6 +39,7 @@ $ErrorActionPreference = 'Stop'
 $AllowFlutterVersionMismatch = $false
 function flutter {{
     $global:LASTEXITCODE = 0
+    'Running pub upgrade...'
     '{machine_version}'
 }}
 {gate[0]}

@@ -17,7 +17,17 @@ function Assert-FlutterVersion {
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to query Flutter version; flutter exited with code $LASTEXITCODE."
     }
-    $version = $versionOutput | ConvertFrom-Json
+    $versionText = $versionOutput -join [Environment]::NewLine
+    $jsonStart = $versionText.IndexOf("{")
+    if ($jsonStart -lt 0) {
+        throw "Unable to parse Flutter version; machine output did not contain JSON."
+    }
+    try {
+        $version = $versionText.Substring($jsonStart) | ConvertFrom-Json
+    }
+    catch {
+        throw "Unable to parse Flutter version JSON: $($_.Exception.Message)"
+    }
     if ($version.frameworkVersion -eq $requiredFlutterVersion) {
         return
     }
