@@ -1,6 +1,7 @@
 import 'package:fluent_ui/fluent_ui.dart';
 
 import '../../app/app_scope.dart';
+import '../../app/app_state.dart';
 import '../../core/files/export_file_service.dart';
 import '../../core/models/book.dart';
 import '../../shared/app_surface.dart';
@@ -12,6 +13,7 @@ import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import '../audiobook/audiobook_page.dart';
 import '../library/widgets/book_card.dart';
+import '../manga_translation/manga_bookshelf_import.dart';
 import '../reader/reader_page.dart';
 
 class BookDetailPage extends StatefulWidget {
@@ -99,6 +101,43 @@ class _BookDetailPageState extends State<BookDetailPage> {
     } finally {
       if (mounted) setState(() => _actionRunning = false);
     }
+  }
+
+  bool _usesDedicatedMangaTranslation(BookDetail detail) {
+    return detail.book.kind == '漫画' &&
+        UiPlatformScope.of(context) == TargetPlatform.windows &&
+        _scope.mangaTranslation != null;
+  }
+
+  String _translationActionLabel(BookDetail detail) {
+    if (_usesDedicatedMangaTranslation(detail)) {
+      return _selected.isEmpty ? '漫画翻译' : '翻译所选到工作台';
+    }
+    return _selected.isEmpty ? '翻译全部' : '翻译所选';
+  }
+
+  void _openDedicatedMangaTranslation(BookDetail detail) {
+    final coordinator = _scope.mangaTranslation;
+    if (coordinator == null) return;
+    coordinator.controller.enqueueBookshelfImport(
+      MangaBookshelfImportRequest.fromBook(
+        detail.book,
+        workspaceIdentity: _scope.auth.workspaceIdentity ?? 'local',
+        chapterIndexes: _selected.isEmpty
+            ? detail.chapters.map((chapter) => chapter.index)
+            : _selected,
+      ),
+    );
+    _scope.appState.selectSection(AppSection.translator);
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  void _startTranslation(BookDetail detail) {
+    if (_usesDedicatedMangaTranslation(detail)) {
+      _openDedicatedMangaTranslation(detail);
+      return;
+    }
+    _enqueue('translate');
   }
 
   Future<void> _delete() async {
@@ -570,8 +609,9 @@ class _BookDetailPageState extends State<BookDetailPage> {
                 child: Text(_selected.isEmpty ? '下载全部' : '下载所选'),
               ),
               Button(
-                onPressed: _actionRunning ? null : () => _enqueue('translate'),
-                child: Text(_selected.isEmpty ? '翻译全部' : '翻译所选'),
+                onPressed:
+                    _actionRunning ? null : () => _startTranslation(detail),
+                child: Text(_translationActionLabel(detail)),
               ),
               Button(
                 onPressed: () {
@@ -650,8 +690,9 @@ class _BookDetailPageState extends State<BookDetailPage> {
               child: Text(_selected.isEmpty ? '下载全部' : '下载所选'),
             ),
             Button(
-              onPressed: _actionRunning ? null : () => _enqueue('translate'),
-              child: Text(_selected.isEmpty ? '翻译全部' : '翻译所选'),
+              onPressed:
+                  _actionRunning ? null : () => _startTranslation(detail),
+              child: Text(_translationActionLabel(detail)),
             ),
             Button(
               onPressed: () {

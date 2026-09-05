@@ -3,7 +3,33 @@ import 'dart:async';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'responsive.dart';
+
 const desktopTitleBarHeight = 32.0;
+
+/// Keeps the Windows window chrome outside the app [Navigator].
+///
+/// Routes are rendered in [child], so pushing a detail page or reader never
+/// replaces the title bar. Mobile platforms keep using their native system
+/// chrome and therefore receive [child] unchanged.
+class DesktopWindowFrame extends StatelessWidget {
+  const DesktopWindowFrame({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (UiPlatformScope.of(context) != TargetPlatform.windows) return child;
+    return Column(
+      key: const ValueKey('desktop-window-frame'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const DesktopTitleBar(),
+        Expanded(child: child),
+      ],
+    );
+  }
+}
 
 /// v1.3.4 Windows 自绘标题栏。
 class DesktopTitleBar extends StatefulWidget {

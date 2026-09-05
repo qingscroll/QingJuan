@@ -21,6 +21,17 @@ DevicePlatform = Literal["android", "windows", "linux", "macos", "ios", "other"]
 MangaTextDirection = Literal["vertical", "horizontal"]
 MangaRegionShape = Literal["ellipse", "roundrect", "rect"]
 MangaRenderMode = Literal["ocr_pipeline", "image_edit_fallback"]
+MangaWorkflowMode = Literal[
+    "normal",
+    "export_translation",
+    "export_original",
+    "translate_json_only",
+    "import_translation_render",
+    "colorize_only",
+    "upscale_only",
+    "inpaint_only",
+    "replace_translation",
+]
 UserRole = Literal["admin", "user"]
 UserStatus = Literal["active", "disabled"]
 
@@ -105,6 +116,44 @@ class MangaTranslatedPagePayload(BaseModel):
     page_translation: str = ""
     regions: list[MangaTranslatedRegion] = Field(default_factory=list)
     diagnostics: dict[str, Any] | None = None
+
+
+class MangaWorkflowResponse(BaseModel):
+    mode: MangaWorkflowMode
+    imageKey: str
+    mimeType: Literal["image/png"] = "image/png"
+    outputImageBase64: str | None = None
+    inpaintedImageBase64: str | None = None
+    project: dict[str, Any] = Field(default_factory=dict)
+    projectDocument: dict[str, Any] = Field(default_factory=dict)
+    original: dict[str, str] = Field(default_factory=dict)
+    translated: dict[str, str] = Field(default_factory=dict)
+    pageTranslation: str = ""
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class MangaChapterTranslationPagePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pageNumber: int = Field(ge=1)
+    outputImageBase64: str = Field(min_length=1)
+    project: dict[str, Any]
+    pageTranslation: str = ""
+
+
+class MangaChapterTranslationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    targetLanguage: str = Field(min_length=1)
+    pages: list[MangaChapterTranslationPagePayload] = Field(min_length=1)
+
+
+class MangaChapterTranslationResponse(BaseModel):
+    bookId: str
+    chapterIndex: int
+    translated: bool = True
+    pageCount: int
+    translatedImageFiles: list[str] = Field(default_factory=list)
 
 
 class AddBookPayload(BaseModel):

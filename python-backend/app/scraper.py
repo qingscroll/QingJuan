@@ -5449,6 +5449,34 @@ def _build_region_fill_area_mask(
     return outer_mask
 
 
+def _resolve_manga_cleanup_limit_mask(
+    text_bbox: tuple[int, int, int, int],
+    body_bbox: tuple[int, int, int, int],
+    bubble_fill_mask: Image.Image,
+    *,
+    safe_box: tuple[int, int, int, int] | None,
+    explicit_shape: str | None,
+) -> tuple[Image.Image, bool]:
+    """Return the artwork-safe mask used only for removing source glyphs.
+
+    Older upstream-compatible project files contain ``lines`` but no QingJuan
+    ``body_bbox`` metadata.  Parsing such a file necessarily falls back to the
+    tight OCR text box for the body box.  Applying an ellipse/roundrect mask to
+    that tight box clips glyphs near its corners, which leaves Japanese stroke
+    fragments behind.  A full rectangular permit mask is safe in this one
+    case: ``_erase_manga_source_text`` still edits only the detected/dilated ink
+    pixels and the rectangle cannot extend outside the OCR text box.
+    """
+    missing_container_geometry = (
+        explicit_shape is None
+        and body_bbox == text_bbox
+        and (safe_box is None or safe_box == text_bbox)
+    )
+    if missing_container_geometry:
+        return Image.new("L", bubble_fill_mask.size, 255), True
+    return bubble_fill_mask, False
+
+
 def _build_region_safe_text_mask(
     fill_mask: Image.Image,
     fill_shape: str,
@@ -7537,6 +7565,10 @@ def _build_manga_region_translation_prompt(
         "unescaped ASCII double quotes inside JSON strings. "
         "Translate only the text itself. Do not add notes, speaker labels, or explanations. "
         "Prefer concise, bubble-safe translations. "
+        "Translate short utterances, interjections, sentence particles, and sound effects too "
+        "(for example Japanese ‘ね’, ‘ねー’, ‘はぁ’, or ‘えっ’); never leave kana "
+        "unchanged when the target language is different. Pure punctuation or decorative "
+        "symbols may be kept unchanged. "
         "Each item includes box_size and max_chars_hint; when wording would likely overflow, compress it while keeping the original meaning, tone, and emphasis. "
         "For narrow or vertical bubbles, prefer shorter phrasing and avoid unnecessary punctuation. "
         "Keep names, tone, emphasis, and line intent natural for manga dialogue/captions. "
@@ -7545,49 +7577,108 @@ def _build_manga_region_translation_prompt(
     )
 
 
+def _build_manga_region_translation_repair_prompt(
+    *,
+    target_language: str,
+    chapter_title: str,
+    chapter_index: int,
+    page_number: int,
+    total_pages: int,
+    regions: list[MangaTranslatedRegion],
+) -> str:
+    repair_items = [
+        {
+            "order": region.order,
+            "source_text": region.source_text,
+            "previous_translation": region.translation,
+            "direction": region.direction or region.source_direction,
+            "max_chars_hint": _estimate_manga_region_char_budget(region),
+        }
+        for region in regions
+    ]
+    return (
+        "Repair only the unresolved manga translations below. "
+        f"Translate every source_text into {target_language} and return JSON only. "
+        'JSON schema: {"translations":[{"order":1,"translation":"..."}]}. '
+        "Keep each original order and return exactly one item for every input item. "
+        "The previous translation copied Japanese kana and is not acceptable. "
+        "Translate short utterances and sound effects too. If an item is cropped signage, "
+        "a partial sound effect, or an incomplete visible fragment, give the closest concise "
+        "Chinese equivalent or readable Chinese approximation without inventing hidden text. "
+        "Never copy the Japanese kana unchanged. Do not add notes or explanations. "
+        f"Context: chapter_title={chapter_title}, chapter_index={chapter_index}, "
+        f"page={page_number}/{total_pages}. "
+        f"Unresolved regions: {json.dumps(repair_items, ensure_ascii=False)}"
+    )
+
+
 def _coerce_manga_translated_regions(
     raw_payload: dict[str, Any],
     regions: list[MangaOcrRegion],
+    *,
+    target_language: str = "",
+    allow_untranslated_japanese: bool = False,
 ) -> list[MangaTranslatedRegion]:
     translations_value = raw_payload.get("translations")
     if not isinstance(translations_value, list):
         raise ValueError("漫画文本翻译模型返回缺少 translations 数组")
 
+    expected_by_order: dict[int, MangaOcrRegion] = {}
+    for region in regions:
+        if region.order in expected_by_order:
+            raise ValueError(f"漫画 OCR 区域包含重复 order：{region.order}")
+        expected_by_order[region.order] = region
+
     translations_by_order: dict[int, str] = {}
-    positional_translations: list[str] = []
-    for index, item in enumerate(translations_value, start=1):
-        if isinstance(item, dict):
-            try:
-                order = int(item.get("order") or index)
-            except (TypeError, ValueError):
-                order = index
-            translation = _normalize_manga_region_translation_text(
-                item.get("translation") or item.get("text") or ""
+    for item in translations_value:
+        if not isinstance(item, dict):
+            raise ValueError("漫画文本翻译模型的 translations 每项必须是包含 order 的对象")
+        try:
+            order = int(item["order"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("漫画文本翻译模型返回了缺失或无效的 order") from exc
+        if order not in expected_by_order:
+            raise ValueError(f"漫画文本翻译模型返回了未知 order：{order}")
+        if order in translations_by_order:
+            raise ValueError(f"漫画文本翻译模型返回了重复 order：{order}")
+
+        raw_translation = item.get("translation") if "translation" in item else item.get("text")
+        if raw_translation is not None and not isinstance(raw_translation, str):
+            raise ValueError(f"漫画文本翻译模型的 order={order} 译文必须是字符串")
+        translation = _normalize_manga_region_translation_text(raw_translation)
+        source_text = str(expected_by_order[order].source_text or "").strip()
+        source_has_linguistic_content = any(char.isalnum() for char in source_text)
+        if not translation and source_has_linguistic_content:
+            raise ValueError(f"漫画文本翻译模型遗漏了 order={order} 的译文")
+        if (
+            _manga_region_translation_needs_repair(
+                source_text,
+                translation,
+                target_language,
             )
-        else:
-            order = index
-            translation = _normalize_manga_region_translation_text(item)
-        positional_translations.append(translation)
-        if translation:
-            translations_by_order[order] = translation
+            and not allow_untranslated_japanese
+        ):
+            raise ValueError(f"漫画文本翻译模型未翻译 order={order} 的日文短句")
+        translations_by_order[order] = translation
+
+    missing_orders = set(expected_by_order) - set(translations_by_order)
+    if missing_orders:
+        missing_text = ", ".join(str(order) for order in sorted(missing_orders))
+        raise ValueError(f"漫画文本翻译模型缺少 order：{missing_text}")
 
     translated_regions: list[MangaTranslatedRegion] = []
-    for index, region in enumerate(regions, start=1):
-        translation = translations_by_order.get(region.order)
-        if translation is None and index - 1 < len(positional_translations):
-            translation = positional_translations[index - 1]
-        translated_regions.append(
-            MangaTranslatedRegion(
-                **region.model_dump(),
-                translation=_normalize_manga_region_translation_text(translation),
-            )
-        )
+    for region in regions:
+        region_data = region.model_dump()
+        region_data["translation"] = translations_by_order[region.order]
+        translated_regions.append(MangaTranslatedRegion.model_validate(region_data))
     return translated_regions
 
 
 def _build_manga_page_translation_diagnostics(
     ocr_payload: MangaOcrPagePayload,
     translated_regions: list[MangaTranslatedRegion],
+    *,
+    target_language: str,
 ) -> dict[str, Any]:
     non_empty_translation_count = sum(
         1 for region in translated_regions if str(region.translation or "").strip()
@@ -7609,12 +7700,23 @@ def _build_manga_page_translation_diagnostics(
         for region in translated_regions
         if _manga_translation_char_count(region.translation) > _estimate_manga_region_char_budget(region)
     )
+    unresolved_translation_orders = [
+        region.order
+        for region in translated_regions
+        if _manga_region_translation_needs_repair(
+            region.source_text,
+            region.translation,
+            target_language,
+        )
+    ]
     return {
         **dict(ocr_payload.diagnostics or {}),
         "region_count": len(translated_regions),
         "non_empty_translation_count": non_empty_translation_count,
         "empty_translation_count": max(0, len(translated_regions) - non_empty_translation_count),
         "unchanged_translation_count": unchanged_translation_count,
+        "unresolved_translation_region_count": len(unresolved_translation_orders),
+        "unresolved_translation_orders": unresolved_translation_orders,
         "vertical_region_count": vertical_region_count,
         "safe_box_region_count": safe_box_region_count,
         "over_budget_translation_count": over_budget_translation_count,
@@ -7642,8 +7744,9 @@ async def _translate_manga_region_batch(
     if not regions:
         return []
 
+    resolved_target_language = _resolve_translation_target_language(target_language)
     prompt = _build_manga_region_translation_prompt(
-        target_language=_resolve_translation_target_language(target_language),
+        target_language=resolved_target_language,
         chapter_title=chapter_title,
         chapter_index=chapter_index,
         page_number=page_number,
@@ -7671,7 +7774,7 @@ async def _translate_manga_region_batch(
             },
         ],
     }
-    raw_payload: dict[str, Any] | None = None
+    translated_regions: list[MangaTranslatedRegion] | None = None
     async with _create_model_http_client(timeout=float(timeout_seconds)) as client:
         for attempt in range(2):
             content = await _post_translation_completion_text(
@@ -7682,26 +7785,105 @@ async def _translate_manga_region_batch(
                 feature_name="漫画文本翻译模型",
                 expects_json=True,
             )
+            parsed_json = False
             try:
                 raw_payload = _extract_json_object_from_text(content)
+                parsed_json = True
+                translated_regions = _coerce_manga_translated_regions(
+                    raw_payload,
+                    regions,
+                    target_language=resolved_target_language,
+                    allow_untranslated_japanese=True,
+                )
                 break
             except ValueError as exc:
                 if attempt > 0:
-                    raise ValueError("漫画文本翻译模型连续两次返回了无效 JSON") from exc
+                    if not parsed_json:
+                        raise ValueError("漫画文本翻译模型连续两次返回了无效 JSON") from exc
+                    raise ValueError(f"漫画文本翻译模型连续两次返回了不完整或无效译文：{exc}") from exc
                 payload = json.loads(json.dumps(payload))
                 payload["temperature"] = 0
                 payload["messages"][0]["content"] += (
-                    " A previous response contained invalid JSON. Return one strictly valid JSON object."
+                    " A previous response contained invalid JSON or incomplete translations. "
+                    "Return one strictly valid JSON object with exactly one translation for every input order."
                 )
                 payload["messages"][1]["content"] += (
-                    "\nThe previous response contained invalid JSON. Retry from the source items and return "
-                    "strictly valid JSON with correctly escaped string values."
+                    "\nThe previous response contained invalid JSON or incomplete/invalid translations. "
+                    f"Retry from the source items and return exactly {len(regions)} translation items for "
+                    f"orders {[region.order for region in regions]}. Do not omit, duplicate, or invent orders. "
+                    "Every source item containing text must have a non-empty translated value; translate short "
+                    "utterances and kana too. Return strictly valid JSON with correctly escaped string values."
                 )
-    if raw_payload is None:
+        for repair_attempt in range(2):
+            if translated_regions is None:
+                break
+            unresolved_regions = [
+                region
+                for region in translated_regions
+                if _manga_region_translation_needs_repair(
+                    region.source_text,
+                    region.translation,
+                    resolved_target_language,
+                )
+            ]
+            if not unresolved_regions:
+                break
+            repair_payload = {
+                "model": model,
+                "temperature": 0,
+                "max_tokens": min(2000, max(500, len(unresolved_regions) * 180)),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You repair unresolved manga translations one region at a time. "
+                            "Output valid JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": _build_manga_region_translation_repair_prompt(
+                            target_language=resolved_target_language,
+                            chapter_title=chapter_title,
+                            chapter_index=chapter_index,
+                            page_number=page_number,
+                            total_pages=total_pages,
+                            regions=unresolved_regions,
+                        )
+                        + f"\nTargeted repair attempt {repair_attempt + 1} of 2.",
+                    },
+                ],
+            }
+            try:
+                repair_content = await _post_translation_completion_text(
+                    client,
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    payload=repair_payload,
+                    feature_name="漫画文本区域修复模型",
+                    expects_json=True,
+                )
+                repair_raw_payload = _extract_json_object_from_text(repair_content)
+                unresolved_by_order = {region.order: region for region in unresolved_regions}
+                repair_source_regions = [region for region in regions if region.order in unresolved_by_order]
+                repaired_regions = _coerce_manga_translated_regions(
+                    repair_raw_payload,
+                    repair_source_regions,
+                    target_language=resolved_target_language,
+                    allow_untranslated_japanese=True,
+                )
+            except Exception:
+                # Match manga-translator-ui's region-level recovery: a single
+                # stubborn fragment must not discard the rest of a valid page.
+                continue
+            repaired_by_order = {region.order: region for region in repaired_regions}
+            translated_regions = [
+                repaired_by_order.get(region.order, region) for region in translated_regions
+            ]
+    if translated_regions is None:
         raise ValueError("漫画文本翻译模型未返回可解析结果")
-    translated_regions = _coerce_manga_translated_regions(raw_payload, regions)
     compaction_prompt = _build_manga_translation_compaction_prompt(
-        target_language=_resolve_translation_target_language(target_language),
+        target_language=resolved_target_language,
         source_regions=regions,
         translated_regions=translated_regions,
     )
@@ -7745,6 +7927,7 @@ async def _translate_manga_region_batch(
         compact_regions = _coerce_manga_translated_regions(
             compact_raw_payload,
             compact_source_regions,
+            target_language=resolved_target_language,
         )
     except Exception:
         return translated_regions
@@ -7804,7 +7987,11 @@ async def _build_translated_manga_page_payload(
         regions=ocr_payload.regions,
         timeout_seconds=timeout_seconds,
     )
-    diagnostics = _build_manga_page_translation_diagnostics(ocr_payload, translated_regions)
+    diagnostics = _build_manga_page_translation_diagnostics(
+        ocr_payload,
+        translated_regions,
+        target_language=target_language,
+    )
     diagnostics["translation_model"] = model
     diagnostics["ocr_api_base"] = (
         str(settings.mangaOcr.baseUrl or "").strip().rstrip("/")
@@ -7846,6 +8033,20 @@ def _manga_translation_is_effectively_unchanged(source_text: str, translation: s
     return bool(source_key and source_key == translation_key)
 
 
+def _manga_region_translation_needs_repair(
+    source_text: str,
+    translation: str,
+    target_language: str,
+) -> bool:
+    return bool(
+        str(translation or "").strip()
+        and str(target_language or "").strip().casefold()
+        in {"中文", "chinese", "zh", "zh-cn", "zh-hans", "简体中文", "繁体中文"}
+        and re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", str(source_text or ""))
+        and _manga_translation_is_effectively_unchanged(source_text, translation)
+    )
+
+
 def _sanitize_manga_render_translation(value: str) -> str:
     return re.sub(r"[♪♫♬♩]+", "", str(value or "")).strip()
 
@@ -7857,7 +8058,15 @@ def _manga_region_is_likely_nonlinguistic(
     normalized = re.sub(r"\s+", "", str(source_text or ""))
     width = max(1, bbox[2] - bbox[0])
     height = max(1, bbox[3] - bbox[1])
-    return len(normalized) <= 2 and max(width, height) >= 64
+    if not normalized or max(width, height) < 64:
+        return False
+    if len(normalized) == 1:
+        # A single hiragana inside a speech bubble is commonly a short
+        # utterance or sentence particle (for example ね).  It must remain
+        # renderable when the model supplied a translation.  Keep the guard
+        # for isolated katakana/kanji artwork glyphs and punctuation.
+        return re.fullmatch(r"[\u3040-\u309f]", normalized) is None
+    return len(normalized) <= 2 and not any(char.isalnum() for char in normalized)
 
 
 def _mask_coverage_ratio(mask: Image.Image) -> float:
@@ -7900,6 +8109,7 @@ def _render_translated_manga_page_to_image(
     source_text_erased_region_count = 0
     solid_cleanup_region_count = 0
     inpaint_cleanup_region_count = 0
+    tight_bbox_cleanup_fallback_region_count = 0
     source_font_size_total = 0
 
     for region in page_payload.regions:
@@ -7964,6 +8174,17 @@ def _render_translated_manga_page_to_image(
         fill_shape = _resolve_region_fill_shape(region_payload, body_bbox, resolved_direction)
         bubble_outline_mask = _extract_precise_bubble_mask(canvas, body_bbox, fill_color, fill_shape)
         bubble_fill_mask = _build_region_fill_area_mask(bubble_outline_mask, fill_shape, resolved_direction)
+        cleanup_limit_mask, used_tight_bbox_cleanup_fallback = _resolve_manga_cleanup_limit_mask(
+            bbox,
+            body_bbox,
+            bubble_fill_mask,
+            safe_box=(
+                _normalize_region_bbox(region.safe_box, canvas.size)
+                if region.safe_box is not None
+                else None
+            ),
+            explicit_shape=region.shape,
+        )
         safe_text_mask = _build_region_safe_text_mask(bubble_fill_mask, fill_shape, resolved_direction)
         content_box = _resolve_region_text_box(
             region_payload,
@@ -8124,10 +8345,12 @@ def _render_translated_manga_page_to_image(
             style,
             fill_color,
             limit_bbox=body_bbox,
-            limit_mask=bubble_fill_mask,
+            limit_mask=cleanup_limit_mask,
         )
         if erased_pixels > 0:
             source_text_erased_region_count += 1
+            if used_tight_bbox_cleanup_fallback:
+                tight_bbox_cleanup_fallback_region_count += 1
         if cleanup_method == "solid":
             solid_cleanup_region_count += 1
         elif cleanup_method == "inpaint":
@@ -8169,6 +8392,7 @@ def _render_translated_manga_page_to_image(
             "source_text_erased_region_count": source_text_erased_region_count,
             "solid_cleanup_region_count": solid_cleanup_region_count,
             "inpaint_cleanup_region_count": inpaint_cleanup_region_count,
+            "tight_bbox_cleanup_fallback_region_count": tight_bbox_cleanup_fallback_region_count,
             "average_source_font_size": round(
                 source_font_size_total / max(1, style_estimated_region_count),
                 1,

@@ -8,7 +8,16 @@ import '../core/backend/connection_secret_store.dart';
 import '../core/models/tts_speech_style.dart';
 import '../core/models/tts_voice.dart';
 
-enum AppSection { library, search, sources, plugins, tasks, settings, about }
+enum AppSection {
+  library,
+  search,
+  sources,
+  plugins,
+  tasks,
+  translator,
+  settings,
+  about,
+}
 
 enum AppThemeMode { system, light, dark }
 

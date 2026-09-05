@@ -13,6 +13,8 @@ import 'package:qingjuan/core/backend/backend_connection_manager.dart';
 import 'package:qingjuan/features/auth/auth_controller.dart';
 import 'package:qingjuan/features/detail/book_detail_page.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
+import 'package:qingjuan/features/manga_translation/manga_bookshelf_import.dart';
+import 'package:qingjuan/features/manga_translation/manga_translation_coordinator.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
 import 'package:qingjuan/features/tasks/tasks_controller.dart';
@@ -233,6 +235,142 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('听小说'), findsNothing);
+  });
+
+  testWidgets(
+      'Windows manga sends every chapter to the dedicated translation workspace',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    var legacyTranslationRequests = 0;
+    final payload = _detailPayloadWithKind('漫画');
+    final harness = await _Harness.create(
+      MockClient((request) async {
+        if (request.method == 'GET' &&
+            request.url.path == '/api/v1/books/book-1') {
+          return _jsonResponse(payload);
+        }
+        if (request.url.path.contains('/chapters/translate')) {
+          legacyTranslationRequests += 1;
+        }
+        return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+      }),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('漫画翻译'), findsOneWidget);
+    await tester.tap(find.text('漫画翻译'));
+    await tester.pumpAndSettle();
+
+    expect(imports, hasLength(1));
+    expect(imports.single.bookId, 'book-1');
+    expect(imports.single.chapterIndexes, <int>[1, 2]);
+    expect(harness.appState.section, AppSection.translator);
+    expect(find.text('打开作品'), findsOneWidget);
+    expect(legacyTranslationRequests, 0);
+  });
+
+  testWidgets(
+      'Windows manga sends only checked chapters to the dedicated workspace',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final harness = await _Harness.create(
+      MockClient((request) async {
+        if (request.method == 'GET' &&
+            request.url.path == '/api/v1/books/book-1') {
+          return _jsonResponse(_detailPayloadWithKind('漫画'));
+        }
+        return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+      }),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.text('翻译所选到工作台'), findsOneWidget);
+    await tester.tap(find.text('翻译所选到工作台'));
+    await tester.pumpAndSettle();
+
+    expect(imports, hasLength(1));
+    expect(imports.single.chapterIndexes, <int>[1]);
+    expect(harness.appState.section, AppSection.translator);
+    expect(find.text('打开作品'), findsOneWidget);
+  });
+
+  testWidgets('Windows novels keep the legacy translation task action',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final legacyChapters = <List<int>>[];
+    final harness = await _Harness.create(
+      _legacyTranslationClient(
+        _detailPayloadWithKind('长小说'),
+        legacyChapters,
+      ),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.windows),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('翻译全部'), findsOneWidget);
+    await tester.tap(find.text('翻译全部'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    expect(legacyChapters, <List<int>>[
+      <int>[1, 2],
+    ]);
+    expect(imports, isEmpty);
+    expect(harness.appState.section, isNot(AppSection.translator));
+    expect(find.text('测试作品'), findsWidgets);
+  });
+
+  testWidgets('non-Windows manga keeps the legacy translation task action',
+      (tester) async {
+    final imports = <MangaBookshelfImportRequest>[];
+    final legacyChapters = <List<int>>[];
+    final harness = await _Harness.create(
+      _legacyTranslationClient(
+        _detailPayloadWithKind('漫画'),
+        legacyChapters,
+      ),
+      importBookshelfBook: _capturingImporter(imports),
+      child: _platformDetailLauncher(TargetPlatform.android),
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('打开作品'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('翻译全部'), findsOneWidget);
+    expect(find.text('漫画翻译'), findsNothing);
+    await tester.tap(find.text('翻译全部'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    expect(legacyChapters, <List<int>>[
+      <int>[1, 2],
+    ]);
+    expect(imports, isEmpty);
+    expect(harness.appState.section, isNot(AppSection.translator));
+    expect(find.text('测试作品'), findsWidgets);
   });
 
   testWidgets('opens import-compatible novel chapter export formats',
@@ -542,19 +680,127 @@ const _detailPayload = <String, Object?>{
   ],
 };
 
+Map<String, Object?> _detailPayloadWithKind(String kind) => <String, Object?>{
+      ..._detailPayload,
+      'book': <String, Object?>{
+        ...(_detailPayload['book']! as Map<String, Object?>),
+        'bookKind': kind,
+        'chapterCount': 2,
+      },
+      'downloadedChapterCount': 2,
+      'chapters': <Object?>[
+        <String, Object?>{
+          'index': 1,
+          'title': '第一章',
+          'downloaded': true,
+          'translated': false,
+          'wordCount': 1200,
+          'imageCount': kind == '漫画' ? 2 : 0,
+        },
+        <String, Object?>{
+          'index': 2,
+          'title': '第二章',
+          'downloaded': true,
+          'translated': false,
+          'wordCount': 900,
+          'imageCount': kind == '漫画' ? 3 : 0,
+        },
+      ],
+    };
+
+http.Response _jsonResponse(Object? payload, [int statusCode = 200]) =>
+    http.Response(
+      jsonEncode(payload),
+      statusCode,
+      headers: const <String, String>{
+        'content-type': 'application/json; charset=utf-8',
+      },
+    );
+
+MangaBookshelfImportInvoker _capturingImporter(
+  List<MangaBookshelfImportRequest> imports,
+) {
+  return (
+    request, {
+    onProgress,
+    abortTrigger,
+  }) async {
+    imports.add(request);
+    return MangaBookshelfImportResult(
+      bookId: request.bookId,
+      bookTitle: request.bookTitle,
+      sourceRoot: Directory.systemTemp.path,
+      filePaths: const <String>[],
+      chapterCount: request.chapterIndexes.length,
+    );
+  };
+}
+
+http.Client _legacyTranslationClient(
+  Map<String, Object?> detail,
+  List<List<int>> capturedChapters,
+) {
+  return MockClient((request) async {
+    if (request.method == 'GET' && request.url.path == '/api/v1/books/book-1') {
+      return _jsonResponse(detail);
+    }
+    if (request.method == 'POST' &&
+        request.url.path == '/api/v1/books/book-1/chapters/translate') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      capturedChapters.add(
+        (body['chapterIndexes'] as List<dynamic>)
+            .whereType<num>()
+            .map((value) => value.toInt())
+            .toList(),
+      );
+      return _jsonResponse(<String, Object?>{
+        'id': 'translate-1',
+        'bookId': 'book-1',
+        'taskType': 'translate',
+        'status': 'queued',
+        'totalCount': capturedChapters.last.length,
+        'completedCount': 0,
+        'progress': 0,
+        'message': '任务已创建',
+        'attempts': 0,
+        'updatedAt': '2026-08-30T00:00:00Z',
+      });
+    }
+    if (request.method == 'GET' && request.url.path == '/api/v1/tasks') {
+      return _jsonResponse(<Object?>[]);
+    }
+    return _jsonResponse(<String, String>{'detail': 'unexpected'}, 500);
+  });
+}
+
+Widget _platformDetailLauncher(TargetPlatform platform) => MediaQuery(
+      data: MediaQueryData(
+        size: platform == TargetPlatform.windows
+            ? const Size(1280, 800)
+            : const Size(390, 844),
+      ),
+      child: UiPlatformScope(
+        platform: platform,
+        child: const _DetailLauncher(),
+      ),
+    );
+
 class _Harness {
   _Harness({
     required this.widget,
+    required this.appState,
     required this.api,
     required this.library,
     required this.sources,
     required this.tasks,
     required this.settings,
+    required this.mangaTranslation,
   });
 
   static Future<_Harness> create(
     http.Client client, {
     Widget child = const BookDetailPage(bookId: 'book-1'),
+    MangaBookshelfImportInvoker? importBookshelfBook,
   }) async {
     final appState = AppState(await SharedPreferences.getInstance());
     final api = ApiClient(() => appState.backendUrl, client: client);
@@ -563,6 +809,12 @@ class _Harness {
     final sources = SourcesController(api);
     final tasks = TasksController(api);
     final settings = SettingsController(api);
+    final mangaTranslation = importBookshelfBook == null
+        ? null
+        : MangaTranslationCoordinator(
+            api,
+            importBookshelfBook: importBookshelfBook,
+          );
     final widget = FluentApp(
       theme: buildQingJuanTheme(Brightness.light),
       home: AppScope(
@@ -574,27 +826,33 @@ class _Harness {
         sources: sources,
         tasks: tasks,
         settings: settings,
+        mangaTranslation: mangaTranslation,
         child: child,
       ),
     );
     return _Harness(
       widget: widget,
+      appState: appState,
       api: api,
       library: library,
       sources: sources,
       tasks: tasks,
       settings: settings,
+      mangaTranslation: mangaTranslation,
     );
   }
 
   final Widget widget;
+  final AppState appState;
   final ApiClient api;
   final LibraryController library;
   final SourcesController sources;
   final TasksController tasks;
   final SettingsController settings;
+  final MangaTranslationCoordinator? mangaTranslation;
 
   void dispose() {
+    mangaTranslation?.dispose();
     library.dispose();
     sources.dispose();
     tasks.dispose();

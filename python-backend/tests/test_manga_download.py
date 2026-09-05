@@ -240,6 +240,76 @@ def test_manga_render_uses_detected_style_and_reports_cleanup(tmp_path) -> None:
     assert diagnostics["rendered_vertical_count"] == 0
 
 
+def test_manga_render_cleans_full_tight_ocr_bbox_without_shape_clipping(tmp_path) -> None:
+    source = tmp_path / "tight-vertical-ocr.png"
+    image = Image.new("RGB", (180, 180), "white")
+    draw = ImageDraw.Draw(image)
+    text_bbox = (48, 28, 132, 152)
+    # Simulate vertical glyph strokes touching the corners of a tight OCR box.
+    # The legacy ellipse cleanup mask used to clip precisely these fragments.
+    for block in (
+        (48, 28, 60, 40),
+        (120, 28, 132, 40),
+        (48, 140, 60, 152),
+        (120, 140, 132, 152),
+        (84, 62, 96, 118),
+    ):
+        draw.rectangle(block, fill="black")
+    image.save(source)
+    payload = MangaTranslatedPagePayload(
+        page_number=1,
+        image_size=image.size,
+        target_language="Chinese",
+        regions=[
+            MangaTranslatedRegion(
+                order=1,
+                bbox=text_bbox,
+                body_bbox=text_bbox,
+                safe_box=text_bbox,
+                source_text="縦書き原文",
+                source_direction="vertical",
+                direction="vertical",
+                translation="译文",
+            )
+        ],
+    )
+
+    translated_bytes, _, diagnostics = scraper._render_translated_manga_page_to_image(source, payload)
+
+    with Image.open(BytesIO(translated_bytes)) as translated:
+        result = translated.convert("RGB")
+        assert result.getpixel((52, 32)) == (255, 255, 255)
+        assert result.getpixel((128, 32)) == (255, 255, 255)
+        assert result.getpixel((52, 148)) == (255, 255, 255)
+        assert result.getpixel((128, 148)) == (255, 255, 255)
+        for current_y in range(image.height):
+            for current_x in range(image.width):
+                if text_bbox[0] <= current_x < text_bbox[2] and text_bbox[1] <= current_y < text_bbox[3]:
+                    continue
+                assert result.getpixel((current_x, current_y)) == image.getpixel(
+                    (current_x, current_y)
+                )
+    assert diagnostics["source_text_erased_region_count"] == 1
+    assert diagnostics["tight_bbox_cleanup_fallback_region_count"] == 1
+
+
+def test_manga_cleanup_does_not_override_an_explicit_container_shape() -> None:
+    text_bbox = (20, 10, 140, 110)
+    ellipse_mask = Image.new("L", (120, 100), 0)
+    ImageDraw.Draw(ellipse_mask).ellipse((0, 0, 119, 99), fill=255)
+
+    resolved, used_fallback = scraper._resolve_manga_cleanup_limit_mask(
+        text_bbox,
+        text_bbox,
+        ellipse_mask,
+        safe_box=text_bbox,
+        explicit_shape="ellipse",
+    )
+
+    assert used_fallback is False
+    assert list(resolved.get_flattened_data()) == list(ellipse_mask.get_flattened_data())
+
+
 def test_manga_render_never_changes_pixels_outside_original_bubble(tmp_path) -> None:
     source = tmp_path / "bounded-bubble.png"
     image = Image.new("RGB", (300, 190), (238, 238, 238))
@@ -448,6 +518,18 @@ def test_manga_render_skips_large_single_glyph_sound_effect(tmp_path) -> None:
     assert diagnostics["skipped_nonlinguistic_region_count"] == 1
     with Image.open(BytesIO(translated_bytes)) as translated:
         assert list(translated.convert("RGB").get_flattened_data()) == list(image.get_flattened_data())
+
+
+def test_manga_nonlinguistic_guard_keeps_short_utterances_renderable() -> None:
+    large_bbox = (20, 20, 120, 140)
+
+    assert scraper._manga_region_is_likely_nonlinguistic("ッ", large_bbox)
+    assert scraper._manga_region_is_likely_nonlinguistic("！！", large_bbox)
+    assert scraper._manga_region_is_likely_nonlinguistic("♪♫", large_bbox)
+    assert not scraper._manga_region_is_likely_nonlinguistic("ね", large_bbox)
+    assert not scraper._manga_region_is_likely_nonlinguistic("ねー", large_bbox)
+    assert not scraper._manga_region_is_likely_nonlinguistic("はぁ", large_bbox)
+    assert not scraper._manga_region_is_likely_nonlinguistic("A1", large_bbox)
 
 
 def test_manga_render_removes_unsupported_music_symbols() -> None:
@@ -1334,6 +1416,318 @@ async def test_deepseek_v4_translation_disables_thinking_and_retries_exhausted_o
     assert submitted_payloads[1]["response_format"] == {"type": "json_object"}
     assert int(submitted_payloads[1]["max_tokens"]) >= 8000
     assert translated[0].translation == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_replaces_existing_workflow_region_translation(
+    monkeypatch,
+) -> None:
+    async def fake_post(*_: object, **__: object) -> dict[str, object]:
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": '{"translations":[{"order":1,"translation":"新译文"}]}'},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+
+    translated = await scraper._translate_manga_region_batch(
+        settings=TranslationSettings(),
+        base_url="https://gateway.example.test/v1",
+        api_key="secret",
+        model="text-only-model",
+        target_language="Chinese",
+        chapter_title="",
+        chapter_index=1,
+        page_number=2,
+        total_pages=2,
+        regions=[
+            MangaTranslatedRegion(
+                order=1,
+                bbox=(20, 20, 180, 80),
+                source_text="SOURCE",
+                translation="旧译文",
+            )
+        ],
+        timeout_seconds=30,
+    )
+
+    assert translated[0].source_text == "SOURCE"
+    assert translated[0].translation == "新译文"
+
+
+@pytest.mark.parametrize(
+    "raw_payload, regions",
+    [
+        (
+            {"translations": [{"order": 2, "translation": "第二项"}]},
+            [
+                MangaOcrRegion(order=1, source_text="FIRST"),
+                MangaOcrRegion(order=2, source_text="SECOND"),
+            ],
+        ),
+        (
+            {"translations": [{"order": 2, "translation": "未知项"}]},
+            [MangaOcrRegion(order=1, source_text="FIRST")],
+        ),
+        (
+            {
+                "translations": [
+                    {"order": 1, "translation": "第一项"},
+                    {"order": 1, "translation": "重复项"},
+                ]
+            },
+            [
+                MangaOcrRegion(order=1, source_text="FIRST"),
+                MangaOcrRegion(order=2, source_text="SECOND"),
+            ],
+        ),
+        (
+            {"translations": [{"order": 1, "translation": ""}]},
+            [MangaOcrRegion(order=1, source_text="FIRST")],
+        ),
+    ],
+)
+def test_manga_translation_requires_exact_non_empty_order_coverage(
+    raw_payload: dict[str, object],
+    regions: list[MangaOcrRegion],
+) -> None:
+    with pytest.raises(ValueError):
+        scraper._coerce_manga_translated_regions(
+            raw_payload,
+            regions,
+            target_language="中文",
+        )
+
+
+def test_manga_translation_may_leave_punctuation_only_region_unchanged() -> None:
+    translated = scraper._coerce_manga_translated_regions(
+        {"translations": [{"order": 1, "translation": ""}]},
+        [MangaOcrRegion(order=1, source_text="……")],
+        target_language="中文",
+    )
+
+    assert translated[0].translation == ""
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_retries_incomplete_order_coverage_without_cross_assignment(
+    monkeypatch,
+) -> None:
+    submitted_payloads: list[dict[str, object]] = []
+
+    async def fake_post(*_: object, **kwargs: object) -> dict[str, object]:
+        submitted_payloads.append(dict(kwargs["payload"]))
+        if len(submitted_payloads) == 1:
+            content = '{"translations":[{"order":2,"translation":"第二项"}]}'
+        else:
+            content = (
+                '{"translations":[{"order":1,"translation":"第一项"},{"order":2,"translation":"第二项"}]}'
+            )
+        return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+
+    translated = await scraper._translate_manga_region_batch(
+        settings=TranslationSettings(),
+        base_url="https://gateway.example.test/v1",
+        api_key="secret",
+        model="text-only-model",
+        target_language="Chinese",
+        chapter_title="",
+        chapter_index=1,
+        page_number=1,
+        total_pages=1,
+        regions=[
+            MangaOcrRegion(order=1, bbox=(20, 20, 220, 100), source_text="FIRST"),
+            MangaOcrRegion(order=2, bbox=(20, 120, 220, 200), source_text="SECOND"),
+        ],
+        timeout_seconds=30,
+    )
+
+    assert len(submitted_payloads) == 2
+    retry_prompt = submitted_payloads[1]["messages"][1]["content"]
+    assert "Do not omit, duplicate, or invent orders" in retry_prompt
+    assert [region.translation for region in translated] == ["第一项", "第二项"]
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_still_rejects_missing_order_after_retry(
+    monkeypatch,
+) -> None:
+    submitted_payloads: list[dict[str, object]] = []
+
+    async def fake_post(*_: object, **kwargs: object) -> dict[str, object]:
+        submitted_payloads.append(dict(kwargs["payload"]))
+        content = '{"translations":[{"order":2,"translation":"第二项"}]}'
+        return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+
+    with pytest.raises(ValueError, match="缺少 order：1"):
+        await scraper._translate_manga_region_batch(
+            settings=TranslationSettings(),
+            base_url="https://gateway.example.test/v1",
+            api_key="secret",
+            model="text-only-model",
+            target_language="Chinese",
+            chapter_title="",
+            chapter_index=1,
+            page_number=1,
+            total_pages=1,
+            regions=[
+                MangaOcrRegion(order=1, bbox=(20, 20, 220, 100), source_text="FIRST"),
+                MangaOcrRegion(order=2, bbox=(20, 120, 220, 200), source_text="SECOND"),
+            ],
+            timeout_seconds=30,
+        )
+
+    assert len(submitted_payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_retries_unchanged_japanese_short_utterance_for_chinese(
+    monkeypatch,
+) -> None:
+    submitted_payloads: list[dict[str, object]] = []
+
+    async def fake_post(*_: object, **kwargs: object) -> dict[str, object]:
+        submitted_payloads.append(dict(kwargs["payload"]))
+        translation = "ねー" if len(submitted_payloads) == 1 else "对吧—"
+        content = scraper.json.dumps(
+            {"translations": [{"order": 1, "translation": translation}]},
+            ensure_ascii=False,
+        )
+        return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+
+    translated = await scraper._translate_manga_region_batch(
+        settings=TranslationSettings(),
+        base_url="https://gateway.example.test/v1",
+        api_key="secret",
+        model="text-only-model",
+        target_language="Chinese",
+        chapter_title="",
+        chapter_index=1,
+        page_number=1,
+        total_pages=1,
+        regions=[MangaOcrRegion(order=1, bbox=(20, 20, 220, 100), source_text="ねー")],
+        timeout_seconds=30,
+    )
+
+    assert len(submitted_payloads) == 2
+    first_prompt = submitted_payloads[0]["messages"][1]["content"]
+    assert "short utterances" in first_prompt
+    assert "Pure punctuation" in first_prompt
+    assert translated[0].translation == "对吧—"
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_repairs_only_the_unchanged_region(
+    monkeypatch,
+) -> None:
+    submitted_payloads: list[dict[str, object]] = []
+
+    async def fake_post(*_: object, **kwargs: object) -> dict[str, object]:
+        submitted_payloads.append(dict(kwargs["payload"]))
+        if len(submitted_payloads) == 1:
+            translations = [
+                {"order": 1, "translation": "小静今天休息"},
+                {"order": 2, "translation": "诶？"},
+                {"order": 3, "translation": "スク"},
+            ]
+        else:
+            translations = [{"order": 3, "translation": "唰"}]
+        content = scraper.json.dumps({"translations": translations}, ensure_ascii=False)
+        return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+
+    translated = await scraper._translate_manga_region_batch(
+        settings=TranslationSettings(),
+        base_url="https://gateway.example.test/v1",
+        api_key="secret",
+        model="deepseek-v4-flash",
+        target_language="中文",
+        chapter_title="しず子、熱を出す",
+        chapter_index=1,
+        page_number=2,
+        total_pages=8,
+        regions=[
+            MangaOcrRegion(order=1, bbox=(10, 10, 120, 220), source_text="しず子\nお休みなの"),
+            MangaOcrRegion(order=2, bbox=(929, 235, 1024, 334), source_text="之"),
+            MangaOcrRegion(order=3, bbox=(1139, 252, 1314, 377), source_text="スク"),
+        ],
+        timeout_seconds=30,
+    )
+
+    assert len(submitted_payloads) == 2
+    repair_prompt = submitted_payloads[1]["messages"][1]["content"]
+    assert '"order": 3' in repair_prompt
+    assert '"order": 1' not in repair_prompt
+    assert '"order": 2' not in repair_prompt
+    assert [region.translation for region in translated] == ["小静今天休息", "诶？", "唰"]
+
+
+@pytest.mark.asyncio
+async def test_manga_translation_keeps_stubborn_fragment_without_failing_page(
+    monkeypatch,
+) -> None:
+    submitted_payloads: list[dict[str, object]] = []
+
+    async def fake_post(*_: object, **kwargs: object) -> dict[str, object]:
+        submitted_payloads.append(dict(kwargs["payload"]))
+        translations = (
+            [
+                {"order": 1, "translation": "小静今天休息"},
+                {"order": 2, "translation": "诶？"},
+                {"order": 3, "translation": "スク"},
+            ]
+            if len(submitted_payloads) == 1
+            else [{"order": 3, "translation": "スク"}]
+        )
+        content = scraper.json.dumps({"translations": translations}, ensure_ascii=False)
+        return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(scraper, "_post_translation_json", fake_post)
+    source_regions = [
+        MangaOcrRegion(order=1, bbox=(10, 10, 120, 220), source_text="しず子\nお休みなの"),
+        MangaOcrRegion(order=2, bbox=(929, 235, 1024, 334), source_text="之"),
+        MangaOcrRegion(order=3, bbox=(1139, 252, 1314, 377), source_text="スク"),
+    ]
+
+    translated = await scraper._translate_manga_region_batch(
+        settings=TranslationSettings(),
+        base_url="https://gateway.example.test/v1",
+        api_key="secret",
+        model="deepseek-v4-flash",
+        target_language="中文",
+        chapter_title="しず子、熱を出す",
+        chapter_index=1,
+        page_number=2,
+        total_pages=8,
+        regions=source_regions,
+        timeout_seconds=30,
+    )
+
+    diagnostics = scraper._build_manga_page_translation_diagnostics(
+        MangaOcrPagePayload(
+            page_number=2,
+            image_size=(1433, 2024),
+            regions=source_regions,
+        ),
+        translated,
+        target_language="中文",
+    )
+    assert len(submitted_payloads) == 3
+    assert "Targeted repair attempt 2 of 2" in submitted_payloads[2]["messages"][1]["content"]
+    assert [region.translation for region in translated] == ["小静今天休息", "诶？", "スク"]
+    assert diagnostics["unresolved_translation_region_count"] == 1
+    assert diagnostics["unresolved_translation_orders"] == [3]
 
 
 @pytest.mark.asyncio

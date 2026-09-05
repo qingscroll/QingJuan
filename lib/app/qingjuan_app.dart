@@ -15,10 +15,13 @@ import '../core/backend/local_backend_process.dart';
 import '../core/backend/user_session_store.dart';
 import '../features/auth/auth_controller.dart';
 import '../features/library/library_controller.dart';
+import '../features/manga_translation/manga_translation_coordinator.dart';
 import '../features/settings/settings_controller.dart';
 import '../features/shell/app_shell.dart';
 import '../features/sources/sources_controller.dart';
 import '../features/tasks/tasks_controller.dart';
+import '../mobile/mobile_app.dart';
+import '../shared/desktop_title_bar.dart';
 import '../shared/responsive.dart';
 import 'app_scope.dart';
 import 'app_state.dart';
@@ -34,6 +37,7 @@ class QingJuanApp extends StatefulWidget {
     required this.sources,
     required this.tasks,
     required this.settings,
+    required this.mangaTranslation,
   });
 
   @visibleForTesting
@@ -46,6 +50,7 @@ class QingJuanApp extends StatefulWidget {
     required SourcesController sources,
     required TasksController tasks,
     required SettingsController settings,
+    MangaTranslationCoordinator? mangaTranslation,
   }) =>
       QingJuanApp._(
         appState: appState,
@@ -56,6 +61,7 @@ class QingJuanApp extends StatefulWidget {
         sources: sources,
         tasks: tasks,
         settings: settings,
+        mangaTranslation: mangaTranslation ?? MangaTranslationCoordinator(api),
       );
 
   static Future<QingJuanApp> bootstrap() async {
@@ -99,6 +105,10 @@ class QingJuanApp extends StatefulWidget {
       sources: SourcesController(api),
       tasks: TasksController(api),
       settings: SettingsController(api),
+      mangaTranslation: MangaTranslationCoordinator(
+        api,
+        preferences: preferences,
+      ),
     );
   }
 
@@ -110,6 +120,7 @@ class QingJuanApp extends StatefulWidget {
   final SourcesController sources;
   final TasksController tasks;
   final SettingsController settings;
+  final MangaTranslationCoordinator mangaTranslation;
 
   @override
   State<QingJuanApp> createState() => _QingJuanAppState();
@@ -247,6 +258,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     widget.sources.resetForBackendSwitch();
     widget.tasks.resetForBackendSwitch();
     widget.settings.resetForBackendSwitch();
+    widget.mangaTranslation.resetForBackendSwitch();
     PaintingBinding.instance.imageCache
       ..clear()
       ..clearLiveImages();
@@ -260,6 +272,13 @@ class _QingJuanAppState extends State<QingJuanApp> {
     });
   }
 
+  Widget _buildPlatformHome() {
+    if (Platform.isAndroid) {
+      return const MobileQingJuanApp();
+    }
+    return const AppShell();
+  }
+
   @override
   void dispose() {
     _backendActivationOperation += 1;
@@ -270,6 +289,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     widget.sources.dispose();
     widget.tasks.dispose();
     widget.settings.dispose();
+    widget.mangaTranslation.dispose();
     widget.auth.dispose();
     unawaited(widget.backend.dispose());
     widget.api.close();
@@ -288,6 +308,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
       sources: widget.sources,
       tasks: widget.tasks,
       settings: widget.settings,
+      mangaTranslation: widget.mangaTranslation,
       child: AnimatedBuilder(
         animation: widget.appState.themeModeListenable,
         builder: (context, _) {
@@ -311,10 +332,13 @@ class _QingJuanAppState extends State<QingJuanApp> {
               GlobalMaterialLocalizations.delegate,
               GlobalCupertinoLocalizations.delegate,
             ],
-            home: UiPlatformScope(
+            builder: (context, child) => UiPlatformScope(
               platform: defaultTargetPlatform,
-              child: const AppShell(),
+              child: DesktopWindowFrame(
+                child: child ?? const SizedBox.shrink(),
+              ),
             ),
+            home: _buildPlatformHome(),
           );
         },
       ),
