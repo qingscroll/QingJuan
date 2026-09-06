@@ -9,13 +9,23 @@ class LoadingView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final compact = usesMobileUi(context);
+    if (usesMobileUi(context)) {
+      return Semantics(
+        label: label,
+        liveRegion: true,
+        child: const ExcludeSemantics(
+          child: Center(
+            child: SizedBox.square(
+              dimension: 28,
+              child: ProgressRing(strokeWidth: 2),
+            ),
+          ),
+        ),
+      );
+    }
     return Center(
       child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: compact ? 24 : 48,
-          vertical: compact ? 16 : 48,
-        ),
+        padding: const EdgeInsets.all(48),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[

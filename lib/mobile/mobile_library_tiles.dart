@@ -50,18 +50,36 @@ class MobileContinueReading extends StatelessWidget {
                   style: theme.textStyles.subtitle
                       .copyWith(color: theme.colors.onBackground)),
               const SizedBox(height: 4),
-              Text(
-                  '读到${book.readingPositionLabel}${book.chapterCount > 0 ? ' · 共 ${book.chapterCount} 章' : ''}',
-                  style: theme.textStyles.footnote1
-                      .copyWith(color: theme.colors.onBackgroundVariant)),
-              const SizedBox(height: 8),
-              MobileActionButton(
-                  onPressed: onRead,
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Flexible(child: Text('接着读')),
-                    SizedBox(width: 10),
-                    Icon(Icons.arrow_forward_rounded, size: 16),
-                  ])),
+              LayoutBuilder(builder: (context, constraints) {
+                final progress = Text(
+                    '读到${book.readingPositionLabel}${book.chapterCount > 0 ? ' · 共 ${book.chapterCount} 章' : ''}',
+                    style: theme.textStyles.footnote1
+                        .copyWith(color: theme.colors.onBackgroundVariant));
+                final action = MobileActionButton(
+                    inline: true,
+                    onPressed: onRead,
+                    child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Flexible(child: Text('接着读')),
+                          SizedBox(width: 4),
+                          Icon(Icons.chevron_right_rounded, size: 16),
+                        ]));
+                if (constraints.maxWidth < 240 ||
+                    MediaQuery.textScalerOf(context).scale(14) > 18) {
+                  return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        progress,
+                        Align(alignment: Alignment.centerRight, child: action),
+                      ]);
+                }
+                return Row(children: <Widget>[
+                  Expanded(child: progress),
+                  const SizedBox(width: 12),
+                  action,
+                ]);
+              }),
             ])),
       ]),
     );

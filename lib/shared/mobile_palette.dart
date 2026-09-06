@@ -6,11 +6,12 @@ abstract final class MobilePalette {
   static const accentDark = Color(0xFFA6C6BB);
   static const accentSoft = Color(0xFFE8EFEB);
   static const accentSoftDark = Color(0xFF22342C);
-  static const action = Color(0xFF2F5148);
-  static const onAction = Color(0xFFFFFFFF);
-  static const actionDark = Color(0xFF263D34);
-  static const onActionDark = Color(0xFFD4E5DD);
-  static const actionLineDark = Color(0xFF466055);
+  static const action = Color(0xFFE8ECE9);
+  static const onAction = Color(0xFF202724);
+  static const actionDark = Color(0xFF242927);
+  static const onActionDark = Color(0xFFE0E5E2);
+  static const actionLine = Color(0xFFD5DDD8);
+  static const actionLineDark = Color(0xFF3B4440);
   static const paper = Color(0xFFF6F7F5);
   static const card = Color(0xFFFFFFFF);
   static const ink = Color(0xFF202724);

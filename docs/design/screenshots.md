@@ -1,6 +1,8 @@
 # 移动端最终截图
 
-本目录收录2026-09-05主操作按钮与配色统一后重新生成的47张 PNG，来源为本轮314项 Flutter 测试中的实际 Widget 渲染。页面接入生产 Widget、主题和控制器，网络返回、作品内容、账号及任务状态由测试 fixture 提供。图片可用于检查布局和深浅主题，不能作为 Android 真机、实际远端内容服务或原生插件运行成功的证据。归档文件已与 `build/mobile-ui-preview/` 逐一核对SHA256。
+更新日期：2026-09-06。本轮354项 Flutter 测试通过并生成59张截图：原47张场景更新后，增加12张实际详情 / 阅读器路由的加载与内容状态。归档已与 `build/mobile-ui-preview/` 逐文件核对SHA256一致。页面接入生产 Widget、主题和控制器，网络返回、作品内容、账号及任务状态仍由测试 fixture 提供。图片可用于检查布局和深浅主题，不能作为 Android 真机、实际远端内容服务或原生插件运行成功的证据。
+
+本轮移除 `mobile_app_test` 外层的 `FluentApp`，直接从实际 `MobileQingJuanApp` 打开二级路由。旧外层主题曾掩盖文字继承问题，原先孤立页面截图不能替代真实应用路由检查。新增截图用于确认详情 / 阅读器没有红色大字和黄色双下划线，加载仅显示轻量进度；“实际路由”描述的是生产应用导航结构，不代表使用了真实远端数据。
 
 手机主流程使用390 × 844逻辑像素；小屏额外覆盖320dp宽度与200%文字，账号安全使用320dp宽度与180%文字；平板图为1024 × 768逻辑像素。PNG以2倍像素比导出。截图使用本机可用的中文字体，不作为跨操作系统逐像素基准。
 
@@ -14,6 +16,17 @@
 | 我的：阅读偏好与账号服务 | [查看](screenshots/my-light.png) | [查看](screenshots/my-dark.png) | [320dp / 200%文字](screenshots/my-320-large-text.png) |
 | 作品详情与目录 | [查看](screenshots/detail-light.png) | [查看](screenshots/detail-dark.png) | — |
 | 作品的下载、翻译与导出操作 | [查看](screenshots/detail-actions-light.png) | [查看](screenshots/detail-actions-dark.png) | — |
+
+## 实际应用路由回归
+
+| 场景 | 浅色 | 深色 |
+| --- | --- | --- |
+| 详情路由：加载 | [查看](screenshots/detail-loading-route-light.png) | [查看](screenshots/detail-loading-route-dark.png) |
+| 详情路由：作品与目录 | [查看](screenshots/detail-real-route-light.png) | [查看](screenshots/detail-real-route-dark.png) |
+| 分页阅读路由：加载 | [查看](screenshots/reader-route-paged-loading-light.png) | [查看](screenshots/reader-route-paged-loading-dark.png) |
+| 分页阅读路由：正文 | [查看](screenshots/reader-route-paged-light.png) | [查看](screenshots/reader-route-paged-dark.png) |
+| 连续阅读路由：加载 | [查看](screenshots/reader-route-continuous-loading-light.png) | [查看](screenshots/reader-route-continuous-loading-dark.png) |
+| 连续阅读路由：正文 | [查看](screenshots/reader-route-continuous-light.png) | [查看](screenshots/reader-route-continuous-dark.png) |
 
 ## 导入、阅读与听书
 
@@ -56,6 +69,6 @@
 flutter test --no-pub --dart-define=QINGJUAN_CAPTURE_MOBILE_UI=true
 ```
 
-输出位于 `build/mobile-ui-preview/`。主流程见 [mobile_app_test.dart](../../test/mobile/mobile_app_test.dart)，安全流程见 [mobile_account_test.dart](../../test/mobile/mobile_account_test.dart)，作品与阅读见 [book_detail_page_test.dart](../../test/features/detail/book_detail_page_test.dart)、[reader_page_test.dart](../../test/features/reader/reader_page_test.dart) 和 [audiobook_page_test.dart](../../test/features/audiobook/audiobook_page_test.dart)。截图导出不会替代这些测试中的行为断言。
+输出位于 `build/mobile-ui-preview/`。主流程与实际详情路由见 [mobile_app_test.dart](../../test/mobile/mobile_app_test.dart)，实际阅读器路由见 [reader_mobile_app_test.dart](../../test/features/reader/reader_mobile_app_test.dart)，安全流程见 [mobile_account_test.dart](../../test/mobile/mobile_account_test.dart)。独立页面场景见 [book_detail_page_test.dart](../../test/features/detail/book_detail_page_test.dart)、[reader_page_test.dart](../../test/features/reader/reader_page_test.dart) 和 [audiobook_page_test.dart](../../test/features/audiobook/audiobook_page_test.dart)。截图导出不会替代这些测试中的行为断言。
 
-本目录保留最终产物；[before/](before/) 为重构前的早期证据，不计入47张最终截图。完整验收边界见 [验证报告](validation.md)。
+本目录保留交付产物；[before/](before/) 为重构前的早期证据，不计入本轮最终截图。完整验收边界见 [验证报告](validation.md)。

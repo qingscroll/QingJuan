@@ -1,8 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:fluent_ui/fluent_ui.dart' as fluent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +20,8 @@ import 'package:qingjuan/core/models/task.dart';
 import 'package:qingjuan/core/models/user_account.dart';
 import 'package:qingjuan/core/state/load_state.dart';
 import 'package:qingjuan/features/auth/auth_controller.dart';
+import 'package:qingjuan/features/detail/book_detail_page.dart';
+import 'package:qingjuan/features/detail/mobile_book_detail_view.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
@@ -74,6 +76,72 @@ void main() {
       'qingjuan.backendMode': 'remote',
       'qingjuan.theme': 'light',
     });
+  });
+
+  testWidgets('real mobile detail routes never inherit fallback text styles',
+      (tester) async {
+    for (final dark in [false, true]) {
+      final response = Completer<http.Response>();
+      final fixture =
+          await _Fixture.create(requestHandler: (_) => response.future);
+      if (dark) await fixture.app.setThemeMode(AppThemeMode.dark);
+      await _mount(tester, fixture);
+      await tester.tap(
+          find.byKey(const ValueKey('mobile-library-book-preview-book-0')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(BookDetailPage), findsOneWidget);
+      expect(find.text('正在加载作品详情'), findsNothing);
+      final inherited =
+          DefaultTextStyle.of(tester.element(find.byType(BookDetailPage)))
+              .style;
+      expect(inherited.fontSize, 14);
+      expect(inherited.fontWeight, FontWeight.w400);
+      expect(inherited.decoration, TextDecoration.none);
+      await _savePreview(
+          tester, 'detail-loading-route-${dark ? 'dark' : 'light'}',
+          settle: false);
+
+      const synopsis = '安静地读一会儿，故事就在这里。';
+      response.complete(http.Response(
+          jsonEncode({
+            'book': {
+              'id': 'preview-book-0',
+              'title': '山间的一封信',
+              'bookKind': '长小说',
+              'language': '中文',
+              'chapterCount': 12
+            },
+            'author': '示例作者',
+            'synopsis': synopsis,
+            'chapters': [
+              for (var i = 1; i <= 12; i++)
+                {'index': i, 'title': '第 $i 章', 'downloaded': true}
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'}));
+      await tester.pumpAndSettle();
+      final paragraphs = find.descendant(
+          of: find.byType(MobileBookDetailView),
+          matching: find.byType(RichText));
+      for (final paragraph in tester.widgetList<RichText>(paragraphs)) {
+        expect(
+            paragraph.text.style?.decoration
+                ?.contains(TextDecoration.underline),
+            isNot(true),
+            reason: paragraph.text.toPlainText());
+      }
+      final synopsisText = find.byWidgetPredicate((widget) =>
+          widget is RichText && widget.text.toPlainText() == synopsis);
+      expect(tester.widget<RichText>(synopsisText).text.style?.fontWeight,
+          FontWeight.w400);
+      await _savePreview(
+          tester, 'detail-real-route-${dark ? 'dark' : 'light'}');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      fixture.dispose();
+    }
   });
 
   testWidgets('four mobile destinations show real pages in both themes', (
@@ -334,21 +402,18 @@ Future<void> _mount(
   await tester.pumpWidget(
     RepaintBoundary(
       key: _previewBoundaryKey,
-      child: fluent.FluentApp(
-        debugShowCheckedModeBanner: false,
-        home: UiPlatformScope(
-          platform: TargetPlatform.android,
-          child: AppScope(
-            appState: fixture.app,
-            api: fixture.api,
-            backend: fixture.backend,
-            auth: fixture.auth,
-            library: fixture.library,
-            sources: fixture.sources,
-            tasks: fixture.tasks,
-            settings: fixture.settings,
-            child: const MobileQingJuanApp(),
-          ),
+      child: UiPlatformScope(
+        platform: TargetPlatform.android,
+        child: AppScope(
+          appState: fixture.app,
+          api: fixture.api,
+          backend: fixture.backend,
+          auth: fixture.auth,
+          library: fixture.library,
+          sources: fixture.sources,
+          tasks: fixture.tasks,
+          settings: fixture.settings,
+          child: const MobileQingJuanApp(),
         ),
       ),
     ),
@@ -374,9 +439,10 @@ Future<void> _showMyItem(
   await tester.pumpAndSettle();
 }
 
-Future<void> _savePreview(WidgetTester tester, String name) async {
+Future<void> _savePreview(WidgetTester tester, String name,
+    {bool settle = true}) async {
   if (!_capture) return;
-  await tester.pumpAndSettle();
+  if (settle) await tester.pumpAndSettle();
   final boundary = _previewBoundaryKey.currentContext!.findRenderObject()!
       as RenderRepaintBoundary;
   await tester.runAsync(() async {
@@ -414,7 +480,9 @@ class _Fixture {
   final TasksController tasks;
   final SettingsController settings;
 
-  static Future<_Fixture> create() async {
+  static Future<_Fixture> create({
+    Future<http.Response> Function(http.Request)? requestHandler,
+  }) async {
     final preferences = await SharedPreferences.getInstance();
     final app = AppState(
       preferences,
@@ -423,6 +491,7 @@ class _Fixture {
     final api = ApiClient(
       () => app.backendUrl,
       client: MockClient((request) async {
+        if (requestHandler != null) return requestHandler(request);
         if (request.url.path.endsWith('registration-policy')) {
           return http.Response(
             jsonEncode(<String, dynamic>{

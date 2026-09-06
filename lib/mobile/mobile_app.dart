@@ -185,6 +185,19 @@ class MobileQingJuanApp extends StatelessWidget {
                   GlobalMaterialLocalizations.delegate,
                   GlobalCupertinoLocalizations.delegate,
                 ],
+                // Fluent routes do not install Material's text defaults. Keep
+                // the Navigator (including overlays) inside a real text surface
+                // so raw Text/SelectableText never inherit WidgetsApp's red,
+                // yellow-underlined fallback style.
+                builder: (context, child) => Material(
+                  type: MaterialType.transparency,
+                  textStyle: Theme.of(context).textTheme.bodyMedium!.copyWith(
+                        inherit: false,
+                        fontWeight: FontWeight.w400,
+                        decoration: TextDecoration.none,
+                      ),
+                  child: child ?? const SizedBox.shrink(),
+                ),
                 home: const MobileHomeShell(),
               ),
             );
