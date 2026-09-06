@@ -38,10 +38,11 @@ Future<void> loadMobileCaptureFonts() async {
 Future<void> saveMobileFixture(
   WidgetTester tester,
   GlobalKey key,
-  String name,
-) async {
+  String name, {
+  bool settle = true,
+}) async {
   if (!captureMobileFixtures) return;
-  await tester.pumpAndSettle();
+  if (settle) await tester.pumpAndSettle();
   final boundary =
       key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
   await tester.runAsync(() async {

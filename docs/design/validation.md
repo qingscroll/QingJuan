@@ -1,47 +1,56 @@
 # 移动端重构验证报告
 
-验证日期：2026-09-05。本轮在小液态胶囊导航与黑色主题基础上统一主操作按钮及配色，重新执行全量 Flutter 检查、截图和双平台调试构建。这里区分自动化 Widget / 单元测试、真实 HTTP 服务验证、平台构建和设备验收。通过某一层不能推断其他层已通过。
+更新日期：2026-09-06。本轮根据安装包截图修复真实二级路由的文字继承、冗余加载文字及过重按钮。Flutter检查、59张截图与Android Release测试包已完成。这里区分自动化 Widget / 单元测试、真实 HTTP 服务验证、平台构建和设备验收，历史通过记录不替代本轮结果。
 
 ## 最终检查状态
 
 | 检查 | 结果 | 证据与范围 |
 | --- | --- | --- |
-| Dart 格式 | 通过 | `dart format --output=none --set-exit-if-changed lib test`，167个文件、0个更改；`build/action-format.log` |
-| Flutter 静态分析 | 通过 | `flutter analyze --no-pub`，无问题，8.2秒；本机日志 `build/action-analyze.log` |
-| Flutter 全量测试 | 通过 | `flutter test --no-pub --dart-define=QINGJUAN_CAPTURE_MOBILE_UI=true`，314项全部通过，25秒；本机日志 `build/action-full-tests.log` |
+| Dart 格式 | 通过 | `dart format --output=none --set-exit-if-changed lib test`，178个文件、0个更改；`build/text-fix-format.log` |
+| Flutter 静态分析 | 通过 | `flutter analyze --no-pub`，无问题，15.8秒；`build/text-fix-analyze.log` |
+| Flutter 全量测试 | 通过 | `flutter test --no-pub --dart-define=QINGJUAN_CAPTURE_MOBILE_UI=true`，354项全部通过，26秒；`build/text-fix-full-tests.log` |
 | 补丁空白检查 | 通过 | `git diff --check` |
-| UI 渲染产物 | 已生成并归档 | 47张最终 PNG，[截图清单](screenshots.md)；Widget fixture，非真机截图 |
+| UI 渲染产物 | 59张已生成并归档 | 原47张场景增加12张实际应用路由：详情4张、阅读器8张；归档SHA256一致，[截图清单](screenshots.md)；Widget fixture，非真机截图 |
 | 真实 HTTP 主路径 | 上一轮通过，本轮未重跑 | 35项检查全部通过；[机器可读报告](mobile-backend-smoke.json)保留原始运行时间 |
 | HTTP 脚本静态检查 | 上一轮通过，本轮未重跑 | `python -m ruff check --config python-backend/pyproject.toml tool/mobile_backend_smoke.py` |
-| Android debug APK | 通过 | `flutter build apk --debug --no-pub` 成功，17.9秒；`build/action-android-build.log` |
-| Windows debug 客户端 | 通过 | `flutter build windows --debug --no-pub` 成功，17.3秒；`build/action-windows-build.log` |
+| Android 测试APK | 通过 | `flutter build apk --release --no-pub`，204.7秒；v2.1.0 / build41，Release模式、本机测试签名；`build/text-fix-android-release.log` |
+| Windows debug 客户端 | 通过 | `flutter build windows --debug --no-pub`，58.4秒；`build/text-fix-windows-build.log` |
 | 后端全量 pytest | 本轮未运行 | 后端生产代码未改；上一轮独立35项 HTTP 检查不等同全量后端测试 |
 | React 管理端测试 / 构建 | 本轮未运行 | `admin-web` 与 `python-backend/app/admin_static` 无差异；不将只读审查视作运行验证 |
-| Android 设备验收 | 未运行 | 无已连接 Android 设备，也无可用 AVD |
+| Android 设备验收 | 未运行 | 本轮 `adb devices` 列表仍为空，无可用 AVD |
 
-上一轮记录为309项全量测试、平板布局调整后35项移动复测。本轮314项全量测试已包含平板修正和新的主操作按钮；报告使用本轮结果，不累计不同轮次的测试数。
+上一轮314项全量测试通过，167文件格式检查无更改，静态分析无问题，日志为 `build/action-{full-tests,format,analyze}.log`。旧主页面测试外层额外包裹的 `FluentApp` 掩盖了真实应用文字继承问题，本轮已移除并增加从实际移动根应用进入详情 / 阅读器的回归，不能用旧测试通过记录说明该问题此前已覆盖。
 
-## 可运行构建产物
+## 构建产物
 
 | 平台 | 本机产物 | 大小与使用方式 |
 | --- | --- | --- |
-| Android debug | `build/app/outputs/flutter-apk/app-debug.apk` | 195,496,649字节；为调试包，已构建但未安装到设备 |
-| Windows debug | `build/windows/x64/runner/Debug/` | `qingjuan.exe` 为1,361,408字节；运行时需要整个 Debug 目录，不能只复制EXE |
+| Android本轮测试包 | `release/android/QingJuan-v2.1.0-41-android.apk` | 66,208,120字节，Release模式、本机测试签名；2026-09-06 23:12:57生成 |
+| Windows本轮debug | `build/windows/x64/runner/Debug/` | 本轮增量构建通过；运行时需要整个 Debug 目录，不能只复制EXE |
 
-两者均包含本轮主操作按钮和配色。Android APK于本机时间2026-09-05 23:41:05生成。Windows 增量构建中原生EXE没有变化，Dart资源 `data/flutter_assets/kernel_blob.bin` 为75,770,224字节，已于23:41:19更新。这里交付的是调试构建验证，不是签名发布包、安装器或真机运行验收。
+上一轮Android调试APK为195,496,649字节，于2026-09-05 23:41:05生成，不作为本轮截图反馈修复的安装包。本轮Windows已重新增量构建，Dart资源随构建更新。
+
+本轮包以Release模式编译，使用本机测试证书签名（无 `android/key.properties`，与此前测试版本相同）。运行模式为Release，不是debug APK；该签名属于本地测试用途。
+
+当前正式发布候选已更新为 `2.1.1+41`。上表的 `2.1.0+41` APK 生成于语义版本切换前，仅作为同一代码改动的本机 UI 与打包验证证据；正式 `2.1.1` 版本元数据和签名产物以标签触发的发布工作流为准。
+
+`apksigner verify --verbose --print-certs` 校验通过，证书SHA256与此前测试包一致。`aapt dump badging` 确认包名 `com.tavre.qingjuan`、versionName `2.1.0`、versionCode `41`、minSdk26、targetSdk36，无 `application-debuggable` 标记；APK包含arm64-v8a、armeabi-v7a、x86_64三种AOT库，未包含调试kernel资源。日志为 `build/text-fix-apk-{signature,manifest}.log`。
+
+交付APK与构建输出SHA256一致：`eb37b510cafdebf9c04b2d954668dd0a508e14fa618623c4cdeb9e58c8a638d6`，同名 `.sha256` 文件随包提供。Release构建存在已有AGP / Kotlin未来支持及Android SDK XML版本提示，构建成功，本轮未改动这些工具链版本。
 
 ## 工具链与平台隔离
 
 本机执行使用 Flutter master 3.48、Dart 3.14。仓库 [CI 配置](../../.github/workflows/ci.yml) 使用 Flutter stable 3.44.4；本报告没有将 CI 配置视作 stable 渠道已经实际跑过的结果。`ScrollCacheExtent` 已在 Flutter 3.44 stable 提供，迁移依据见 [Flutter 官方说明](https://docs.flutter.dev/release/breaking-changes/scroll-cache-extent)。
 
-Android 使用移动壳层且依赖远程后端；Windows 保留 Fluent 桌面入口和本机 / 远程后端选择。平台分支不会因窗口变窄而互换。共享阅读与账号逻辑通过明确的移动分支适配，已有桌面阅读器和账号测试包含在314项全量测试中。React 管理界面没有界面重构改动。
+Android 使用移动壳层且依赖远程后端；Windows 保留 Fluent 桌面入口和本机 / 远程后端选择。平台分支不会因窗口变窄而互换。共享阅读与账号逻辑通过明确的移动分支适配，已有桌面阅读器和账号测试保留。React 管理界面没有界面重构改动。
 
 ## Widget 与交互验证
 
 | 场景 | 已执行的检查 | 未覆盖的设备行为 |
 | --- | --- | --- |
+| 真实应用路由与加载 | 从实际 `MobileQingJuanApp` 打开详情 / 阅读器的回归已通过；根正文w400、无文字装饰；移动加载只保留进度与读屏语义，Windows仍显示原标签 | 新安装包在用户设备上的复验 |
 | 导航与适配 | 320dp、200%文字、48dp目标、安全区、减少动态效果 / 高对比关闭模糊、语义点击、平板键盘边距下导航可达、系统返回路由 | Android 真实返回手势、系统导航栏和输入法 |
-| 深浅主题与按钮 | 主要文字、次文字、选中态、错误反馈和主操作按钮的被测颜色组合对比度至少4.5；47张实际 Widget 渲染；登录、来源导入和听书按钮流程保持可操作 | 不等同整个界面的无障碍认证，也未运行设备读屏逐项验收 |
+| 深浅主题与按钮 | 主要文字、次文字、选中态、错误反馈和按钮颜色对比度断言通过；首页为“接着读 ›”行内操作，常见按钮调整为中性灰、14字号 / w500 / 10dp圆角 | 不等同整个界面的无障碍认证，也未运行设备读屏逐项验收 |
 | 书库与发现 | 筛选、搜索、滚动上下文、账号 / 后端切换隔离、断连保留内容、导入及进度恢复入口 | 真实外部书源成功搜索、上游解析可用性 |
 | 任务与来源 | 服务端37.5%进度正确映射为控件0.375；失败仅重试一次；导入进行中关闭页面；普通用户来源只读 | 真实网络波动下的长期后台任务 |
 | 账号安全 | 密码登录衔接TOTP；注册遵循验证码和身份牌策略；错误重试；窄屏大字的账号安全与两步验证；GitHub可信地址及解绑边界 | 真实邮箱投递、GitHub外部授权回跳和设备安全存储 |
@@ -50,7 +59,7 @@ Android 使用移动壳层且依赖远程后端；Windows 保留 Fluent 桌面�
 
 输入法截图通过 `FakeViewPadding` 注入底部边距，TTS通过测试引擎验证；这些测试没有启动 Android 原生输入法或语音引擎。截图使用受控数据，也未冒充个人书库数据。
 
-本轮已重新生成全部47张截图，复制归档后逐文件核对SHA256及清单索引。视觉复查包括书库浅色 / 深色、详情深色、任务深色、导入恢复深色、听书深色和发现页大字布局，确认新按钮与中性黑表面层次一致。
+本轮59张截图已归档并逐文件核对SHA256一致。新增12张实际应用路由截图：详情的加载 / 内容浅深色4张，以及分页 / 连续阅读各自的加载 / 内容浅深色8张；仍使用受控模拟数据。
 
 ## 真实 HTTP 数据链路
 

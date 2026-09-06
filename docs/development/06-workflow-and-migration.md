@@ -75,7 +75,7 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 - 用户 / 发布负责人指定版本时以其语义版本为准，但 `build` 必须大于上一版；major / minor / 预发布 / 跳号不得自行推断。
 - 日常调试 / 重复构建**不得改版本号**；只有准备形成新发布才递增。
 - 修改版本后验证：Android `versionName` / `versionCode`、FastAPI 元数据、Windows 文件属性都来自同一版本源；禁止在 Dart / Python / Kotlin / C++ / 发布脚本里出现独立硬编码版本。
-- 当前基线：已发布 `2.1.0+40`；后续 build 必须 > `40`，不得回退 / 复用。`2.1.0+40` 为本次发布候选，面向移动端重设计、漫画文本工作台、书架译文写回与 Windows 托盘体验，对外标签 `v2.1.0`。
+- 当前基线：已发布 `2.1.0+40`；`2.1.1+41` 为当前发布候选，后续 build 必须 > `41`，不得回退 / 复用。该补丁版修复 Android 详情与阅读器路由的文字样式继承、加载反馈和移动端按钮层级，对外标签 `v2.1.1`。
 
 ### 发布前清单
 
@@ -92,8 +92,8 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 合并并确认 `main` 的 CI 全绿后：
 
 ```powershell
-git tag v2.1.0
-git push origin v2.1.0
+git tag v2.1.1
+git push origin v2.1.1
 ```
 
 `release.yml` 会重跑 Flutter 检查 + Ruff + Pytest，再并行构建 Windows ZIP 与签名 Android APK；**只有标签、`pubspec.yaml`、两个客户端版本、后端元数据版本全部一致**才上传产物与 SHA-256 并创建 Release。禁止手工跳过失败门禁、用未提交本地工作区制作正式包。

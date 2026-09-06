@@ -4,43 +4,52 @@ import 'package:flutter/material.dart';
 import '../shared/mobile_palette.dart';
 import 'mobile_tokens.dart';
 
-/// A quiet filled action, shared by mobile forms and reading entry points.
-ButtonStyle mobileActionStyle({required bool dark, bool tonal = false}) {
+/// Neutral actions; inline reading links have no persistent filled container.
+ButtonStyle mobileActionStyle(
+    {required bool dark, bool tonal = false, bool inline = false}) {
   final foreground = tonal
       ? (dark ? MobilePalette.nightInk : MobilePalette.ink)
       : (dark ? MobilePalette.onActionDark : MobilePalette.onAction);
-  final fill = tonal
-      ? (dark ? MobilePalette.nightInset : MobilePalette.inset)
-      : (dark ? MobilePalette.actionDark : MobilePalette.action);
-  final line = tonal
-      ? (dark ? MobilePalette.nightLine : MobilePalette.line)
-      : (dark ? MobilePalette.actionLineDark : MobilePalette.action);
+  final fill = inline
+      ? Colors.transparent
+      : tonal
+          ? (dark ? const Color(0xFF1C1E1D) : const Color(0xFFF0F2EF))
+          : (dark ? MobilePalette.actionDark : MobilePalette.action);
+  final line = inline
+      ? Colors.transparent
+      : tonal
+          ? (dark ? MobilePalette.nightLine : MobilePalette.line)
+          : (dark ? MobilePalette.actionLineDark : MobilePalette.actionLine);
   return FilledButton.styleFrom(
     backgroundColor: fill,
     foregroundColor: foreground,
-    disabledBackgroundColor:
-        dark ? MobilePalette.nightInset : MobilePalette.inset,
+    disabledBackgroundColor: inline
+        ? Colors.transparent
+        : dark
+            ? MobilePalette.nightInset
+            : MobilePalette.inset,
     disabledForegroundColor:
         dark ? MobilePalette.nightMuted : MobilePalette.muted,
     overlayColor: foreground.withValues(alpha: .10),
     minimumSize: const Size(MobileTokens.touch, MobileTokens.touch),
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+    padding: EdgeInsets.symmetric(horizontal: inline ? 0 : 16, vertical: 10),
     textStyle: const TextStyle(
       fontSize: 14,
       height: 1.25,
-      fontWeight: FontWeight.w600,
-      letterSpacing: .1,
+      fontWeight: FontWeight.w500,
+      decoration: TextDecoration.none,
     ),
-    shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(MobileTokens.controlRadius)),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
     elevation: 0,
     tapTargetSize: MaterialTapTargetSize.padded,
     animationDuration: MobileTokens.feedbackDuration,
   ).copyWith(
     side: WidgetStateProperty.resolveWith((states) => BorderSide(
-        color: states.contains(WidgetState.disabled)
-            ? (dark ? MobilePalette.nightLine : MobilePalette.line)
-            : line)),
+        color: inline
+            ? Colors.transparent
+            : states.contains(WidgetState.disabled)
+                ? (dark ? MobilePalette.nightLine : MobilePalette.line)
+                : line)),
   );
 }
 
@@ -51,6 +60,7 @@ class MobileActionButton extends StatelessWidget {
     this.icon,
     this.busy = false,
     this.tonal = false,
+    this.inline = false,
     super.key,
   });
 
@@ -59,6 +69,7 @@ class MobileActionButton extends StatelessWidget {
   final IconData? icon;
   final bool busy;
   final bool tonal;
+  final bool inline;
 
   @override
   Widget build(BuildContext context) {
@@ -67,7 +78,7 @@ class MobileActionButton extends StatelessWidget {
         Brightness.dark;
     final reduced = MediaQuery.disableAnimationsOf(context);
     final inheritedText = DefaultTextStyle.of(context).style;
-    final style = mobileActionStyle(dark: dark, tonal: tonal);
+    final style = mobileActionStyle(dark: dark, tonal: tonal, inline: inline);
     return Semantics(
       liveRegion: busy,
       child: FilledButton(

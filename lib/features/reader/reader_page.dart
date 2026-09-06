@@ -709,13 +709,22 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     }
   }
 
-  TextStyle _continuousTextStyle(BuildContext context) =>
-      DefaultTextStyle.of(context).style.merge(TextStyle(
-            color: _mobileUi ? _readerTextColor(context) : null,
-            fontSize: _fontSize,
-            height: _mobileUi ? _readingLineHeight : 1.85,
-            letterSpacing: _mobileUi ? .15 : null,
-          ));
+  TextStyle _mobileBaseTextStyle(BuildContext context) =>
+      DefaultTextStyle.of(context).style.copyWith(
+            fontWeight: FontWeight.normal,
+            fontStyle: FontStyle.normal,
+            decoration: TextDecoration.none,
+          );
+
+  TextStyle _continuousTextStyle(BuildContext context) => (_mobileUi
+              ? _mobileBaseTextStyle(context)
+              : DefaultTextStyle.of(context).style)
+          .merge(TextStyle(
+        color: _mobileUi ? _readerTextColor(context) : null,
+        fontSize: _fontSize,
+        height: _mobileUi ? _readingLineHeight : 1.85,
+        letterSpacing: _mobileUi ? .15 : null,
+      ));
 
   void _prepareContinuousLayout(BuildContext context, Size viewport) {
     final next = ReaderContinuousLayout(
@@ -1573,6 +1582,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                   style: TextStyle(
                     color: textColor,
                     fontSize: _fontSize,
+                    fontWeight: FontWeight.normal,
+                    fontStyle: FontStyle.normal,
+                    decoration: TextDecoration.none,
                     height: _readingLineHeight,
                   ),
                 ),
@@ -1705,7 +1717,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         final textScaler = MediaQuery.textScalerOf(context);
         final textDirection = Directionality.of(context);
         final locale = Localizations.maybeLocaleOf(context);
-        final defaultTextStyle = DefaultTextStyle.of(context).style;
+        final defaultTextStyle = _mobileBaseTextStyle(context);
         final textInsets = EdgeInsets.fromLTRB(
           _horizontalInset(constraints.maxWidth),
           math.max(20, viewPadding.top + 14),

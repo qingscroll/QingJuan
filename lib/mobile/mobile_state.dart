@@ -10,26 +10,15 @@ class MobileLoadingView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = MiuixTheme.of(context);
     return Semantics(
+      label: label,
       liveRegion: true,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const SizedBox(
-              width: 34,
-              height: 34,
-              child: MiuixInfiniteProgressIndicator(),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              label,
-              style: theme.textStyles.body2.copyWith(
-                color: theme.colors.onSurfaceVariantSummary,
-              ),
-            ),
-          ],
+      child: const ExcludeSemantics(
+        child: Center(
+          child: SizedBox.square(
+            dimension: 28,
+            child: MiuixInfiniteProgressIndicator(),
+          ),
         ),
       ),
     );
