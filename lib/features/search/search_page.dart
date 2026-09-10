@@ -23,6 +23,7 @@ class _SearchPageState extends State<SearchPage> {
   String? _importingSourceUrl;
 
   String get _engineName => switch (_engine) {
+        BookSearchEngine.installedPlugins => '导入插件',
         BookSearchEngine.bookSources => '书源',
         BookSearchEngine.quark => '夸克',
         BookSearchEngine.fanqie => '番茄',
@@ -31,6 +32,7 @@ class _SearchPageState extends State<SearchPage> {
       };
 
   String get _loadingLabel => switch (_engine) {
+        BookSearchEngine.installedPlugins => '正在查询导入插件',
         BookSearchEngine.bookSources => '正在查询书源',
         BookSearchEngine.quark => '正在查询夸克小说',
         BookSearchEngine.fanqie => '正在查询番茄小说',
@@ -39,31 +41,37 @@ class _SearchPageState extends State<SearchPage> {
       };
 
   String get _emptyMessage => switch (_engine) {
+        BookSearchEngine.installedPlugins => '搜索当前后端已导入并启用的插件，可在加入书架前核对作品。',
         BookSearchEngine.bookSources => '搜索结果会按书源返回，可在导入前核对作者和简介。',
         BookSearchEngine.quark => '夸克结果来自书旗网页内核，可在加入书架前核对作者和简介。',
         BookSearchEngine.fanqie => '番茄结果来自匿名公开搜索，可在加入书架前核对作者和简介。',
         BookSearchEngine.qidian => '起点结果来自移动站公开搜索，可在加入书架前核对作者和简介。',
-        BookSearchEngine.biqvge => '笔趣阁结果来自公开网页与目录索引，可在加入书架前核对作者和简介。',
+        BookSearchEngine.biqvge =>
+          '八零小说网使用动态搜索；b520 与笔趣看来自公开目录索引，目录可能不完整或受区域限制。',
       };
 
   String get _heroMessage => switch (_engine) {
+        BookSearchEngine.installedPlugins => '输入书名或作者，通过已导入的插件查找作品。',
         BookSearchEngine.bookSources => '输入书名或作者，同时查询已启用且兼容搜索的书源。',
         BookSearchEngine.quark => '输入书名或作者，通过夸克小说的书旗网页内核查找作品。',
         BookSearchEngine.fanqie => '输入书名或作者，通过番茄小说的匿名公开搜索查找作品。',
         BookSearchEngine.qidian => '输入书名或作者，通过起点中文网移动站的公开搜索查找作品。',
-        BookSearchEngine.biqvge => '输入书名或作者，通过笔趣阁聚合站点查找作品。',
+        BookSearchEngine.biqvge => '输入书名或作者，优先通过八零小说网搜索，并聚合可用的笔趣阁镜像目录。',
       };
 
   String _availabilityLabel(SourcesController sources) => switch (_engine) {
+        BookSearchEngine.installedPlugins =>
+          '${sources.plugins.where((plugin) => plugin.isInstalled && plugin.enabled && plugin.capabilities.contains('search')).length} 个插件可搜索',
         BookSearchEngine.bookSources =>
           '${sources.sources.where((source) => source.enabled).length} 个书源可用',
         BookSearchEngine.quark => '夸克小说',
         BookSearchEngine.fanqie => '番茄小说',
         BookSearchEngine.qidian => '起点中文网',
-        BookSearchEngine.biqvge => '笔趣阁',
+        BookSearchEngine.biqvge => '三站聚合 · 镜像可能受限',
       };
 
   String get _resultOriginLabel => switch (_engine) {
+        BookSearchEngine.installedPlugins => '结果来自导入插件',
         BookSearchEngine.bookSources => '结果来自已启用书源',
         BookSearchEngine.quark => '结果来自书旗网页内核',
         BookSearchEngine.fanqie => '结果来自番茄公开搜索',
@@ -138,6 +146,8 @@ class _SearchPageState extends State<SearchPage> {
       value: _engine,
       isExpanded: true,
       items: const <ComboBoxItem<BookSearchEngine>>[
+        ComboBoxItem<BookSearchEngine>(
+            value: BookSearchEngine.installedPlugins, child: Text('导入插件')),
         ComboBoxItem<BookSearchEngine>(
           value: BookSearchEngine.bookSources,
           child: Text('书源'),

@@ -22,6 +22,48 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
+  testWidgets('album number can be previewed and imported as manga',
+      (tester) async {
+    final submitted = <Map<String, dynamic>>[];
+    final harness = await _Harness.create(MockClient((request) async {
+      if (request.method == 'POST') {
+        submitted.add(jsonDecode(request.body) as Map<String, dynamic>);
+      }
+      return _jsonResponse(_jobPayload(status: 'completed', progress: 100));
+    }));
+    await tester.pumpWidget(harness.widget);
+    await tester.tap(find.text('添加书籍'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(find.byKey(const ValueKey('import-book-url')), '0');
+    await tester.tap(find.text('预览'));
+    await tester.pump();
+    expect(submitted, isEmpty);
+    expect(find.textContaining('禁漫本子号（正整数）'), findsOneWidget);
+
+    await tester.enterText(
+        find.byKey(const ValueKey('import-book-url')), ' 00123456 ');
+    await tester.pump();
+    expect(find.textContaining('已识别为禁漫作品'), findsOneWidget);
+    final kind =
+        tester.widget<ComboBox<String>>(find.byType(ComboBox<String>).first);
+    expect(kind.value, '漫画');
+    expect(kind.onChanged, isNull);
+    for (final action in <String>['预览', '导入']) {
+      await tester.ensureVisible(find.text(action));
+      await tester.tap(find.text(action));
+      await tester.pump(const Duration(milliseconds: 200));
+      final payload = submitted.last['payload'] as Map<String, dynamic>;
+      expect(payload['albumId'], '123456');
+      expect(payload['sourceUrl'], 'https://18comic.vip/album/123456/');
+      expect(payload['bookKind'], '漫画');
+      expect(payload['downloadMode'], 'all');
+    }
+    expect(
+        submitted.map((body) => body['mode']), <String>['preview', 'import']);
+    harness.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Fanqie import exposes on-demand and full download modes',
       (tester) async {
     final submitted = <Map<String, dynamic>>[];
@@ -183,7 +225,7 @@ void main() {
 
     expect(find.byType(MobileSheet), findsOneWidget);
     expect(find.byType(ContentDialog), findsNothing);
-    expect(find.text('网页地址或本地文件'), findsOneWidget);
+    expect(find.text('网页地址、禁漫本子号或本地文件'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     harness.dispose();

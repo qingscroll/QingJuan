@@ -345,6 +345,11 @@ code {
   box-shadow: 0 0 0 3px rgba(82, 196, 26, 0.12);
 }
 
+.status-dot.is-stopped {
+  background: #8c8c8c;
+  box-shadow: 0 0 0 3px rgba(140, 140, 140, 0.14);
+}
+
 .sider-status strong,
 .sider-status span {
   display: block;
@@ -652,6 +657,12 @@ code {
   display: block;
 }
 
+.service-identity .ant-tag {
+  display: inline-flex;
+  margin: 0 0 0 4px;
+  vertical-align: middle;
+}
+
 .service-identity span {
   margin-top: 2px;
   color: var(--qj-text-secondary);
@@ -691,6 +702,11 @@ code {
 
 .service-actions {
   margin-top: 20px;
+}
+
+.service-control-alert,
+.service-control-actions {
+  margin-top: 16px;
 }
 
 /* Backend upgrade */

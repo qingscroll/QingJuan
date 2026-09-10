@@ -702,6 +702,50 @@ class ApiClient {
     return _list(payload).map(SitePlugin.fromJson).toList();
   }
 
+  Future<JsonMap> _uploadPluginPackage(
+      String operation, List<int> bytes, String filename,
+      {bool replace = false}) async {
+    if (bytes.isEmpty || bytes.length > 2 * 1024 * 1024) {
+      throw const ApiException('插件包不能为空且不能超过 2 MiB');
+    }
+    final request = http.MultipartRequest('POST', _uri('/plugins/$operation'))
+      ..headers.addAll(_headers())
+      ..followRedirects = false
+      ..fields['replace'] = '$replace'
+      ..files
+          .add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed =
+        await _client.send(request).timeout(const Duration(seconds: 60));
+    return _map(_decode(await http.Response.fromStream(streamed)
+        .timeout(const Duration(seconds: 60))));
+  }
+
+  Future<SitePluginPackageInspection> inspectSitePluginPackage(
+          List<int> bytes, String filename) async =>
+      SitePluginPackageInspection.fromJson(
+          await _uploadPluginPackage('inspect', bytes, filename));
+
+  Future<SitePlugin> importSitePluginPackage(List<int> bytes, String filename,
+          {bool replace = false}) async =>
+      SitePlugin.fromJson(await _uploadPluginPackage('import', bytes, filename,
+          replace: replace));
+
+  Future<void> uninstallSitePlugin(String pluginId) async {
+    _decode(
+        await _request('DELETE', '/plugins/${Uri.encodeComponent(pluginId)}'));
+  }
+
+  Future<List<SourceSearchResult>> searchInstalledPlugins(
+      String keyword) async {
+    final payload = _decode(await _request(
+      'POST',
+      '/plugins/search',
+      body: <String, dynamic>{'keyword': keyword, 'limit': 60},
+      timeout: const Duration(seconds: 60),
+    ));
+    return _list(payload).map(SourceSearchResult.fromJson).toList();
+  }
+
   Future<SitePlugin> saveSitePluginEnabled(
       String pluginId, bool enabled) async {
     final payload = _decode(

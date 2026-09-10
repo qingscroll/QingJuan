@@ -81,6 +81,7 @@ python-backend/
 ├─ app/models.py        # 请求、响应与领域数据模型
 ├─ app/db.py            # SQLite 与持久化
 ├─ app/site_plugins/    # 每个内置站点一个模块，声明匹配、能力与运行处理器
+├─ app/plugin_system/   # 外部插件清单、包持久化、安装生命周期和公共运行 SDK
 ├─ app/scraper.py       # 共享抓取、下载、OCR 与翻译基础设施
 └─ tests/               # 后端测试
 

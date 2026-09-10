@@ -157,6 +157,10 @@ def test_biqvge_parses_txt80_search_and_mirror_catalog() -> None:
     assert txt80[0]["title"] == "测试作品"
     assert txt80[0]["author"] == "作者甲"
     assert txt80[0]["synopsis"] == "开场…继续 正文。"
+    assert txt80[0]["latest_chapter_id"] == "86106198"
+    assert txt80[0]["latest_chapter_url"] == (
+        "http://www.txt80.net/read/151585/86106198.html"
+    )
     assert txt80[0]["url"] == "http://www.txt80.net/txt/151585.html"
     assert str(txt80[0].get("cover") or "").startswith("http")
 
@@ -177,6 +181,8 @@ def test_biqvge_parses_mirror_book_metadata_and_full_catalog() -> None:
 
     assert book["title"] == "镜像测试书"
     assert book["author"] == "作者乙"
+    assert book["category"] == "玄幻小说"
+    assert book["status"] == "完本"
     assert book["synopsis"] == "第一行 & 第二行"
     assert book["cover"] == "https://www.b520.cc/files/article/image/2/2157/2157s.jpg"
     assert [chapter["id"] for chapter in book["chapters"]] == ["154384561", "154384562"]
@@ -188,6 +194,9 @@ def test_biqvge_parses_mirror_book_metadata_and_full_catalog() -> None:
         "https://www.b520.cc/2_2157/154384561.html",
         "https://www.b520.cc/2_2157/154384562.html",
     ]
+    assert book["latest_chapter_id"] == "154384562"
+    assert book["update_time"] == "2026-08-22"
+    assert book["count"] == 2
 
 
 def test_biqvge_txt80_catalog_deduplicates_latest_block_in_reading_order() -> None:
@@ -225,6 +234,8 @@ def test_biqvge_parses_mirror_chapter_text_without_scripts() -> None:
     assert text.index("第一段正文。") < text.index("第二段 & 更多。")
     assert "不能进入正文" not in text
     assert chapter["title"] == "第一章 & 启程"
+    assert chapter["book_title"] == "镜像测试书"
+    assert chapter["pages"] == 1
 
 
 @pytest.mark.asyncio
@@ -234,7 +245,13 @@ async def test_biqvge_search_aggregates_sites_and_isolates_one_site_failure() ->
     def transport(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.host == "www.txt80.net":
-            assert request.method == "POST"
+            if request.method == "GET" and request.url.path == "/":
+                return httpx.Response(
+                    200,
+                    text='<form action="/searchf0.html"><input name="searchkey"></form>',
+                    request=request,
+                )
+            assert request.method == "POST" and request.url.path == "/searchf0.html"
             return httpx.Response(200, text=TXT80_SEARCH_HTML, request=request)
         if request.url.host == "www.b520.cc":
             return httpx.Response(200, text=MIRROR_CATALOG_HTML, request=request)
@@ -253,14 +270,45 @@ async def test_biqvge_search_aggregates_sites_and_isolates_one_site_failure() ->
     ]
     assert [item["title"] for item in results] == ["测试作品", "测试作品"]
     assert repeated == results
-    txt80_request = next(request for request in requests if request.url.host == "www.txt80.net")
+    txt80_request = next(
+        request
+        for request in requests
+        if request.url.host == "www.txt80.net" and request.method == "POST"
+    )
+    assert txt80_request.url.path == "/searchf0.html"
     assert parse_qs(txt80_request.content.decode()) == {
         "searchkey": ["测试作品"],
         "searchtype": ["all"],
     }
     assert any(request.url.host == "www.blqukan.cc" for request in requests)
     failed_site_requests = [request for request in requests if request.url.host == "www.blqukan.cc"]
-    assert len(failed_site_requests) == len(biqvge_client.SITES["blqukan"].catalog_paths)
+    assert len(failed_site_requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_biqvge_txt80_search_route_falls_back_when_homepage_has_no_form() -> None:
+    requested_paths: list[tuple[str, str]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requested_paths.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/":
+            return httpx.Response(200, text="<html>no search form</html>", request=request)
+        if request.url.path == "/searchf0.html":
+            return httpx.Response(404, request=request)
+        if request.url.path == "/search.html":
+            return httpx.Response(200, text=TXT80_SEARCH_HTML, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        results = await biqvge_client._search_txt80(client, "测试作品")
+
+    assert [item["title"] for item in results] == ["测试作品"]
+    assert requested_paths == [
+        ("GET", "/"),
+        ("POST", "/searchf0.html"),
+        ("POST", "/search.html"),
+        ("POST", "/search.html"),
+    ]
 
 
 @pytest.mark.asyncio

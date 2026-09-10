@@ -53,6 +53,7 @@
 | [Flutter 客户端](./03-frontend.md) | Widget / Controller / API / 状态管理 / 导航 / 持久化 / 阅读器具体实现 | `lib/`、`test/` |
 | [后端与管理界面](./04-backend-and-android.md) | FastAPI 分层、API 约定、认证与凭据、数据库、抓取与站点插件、后台任务、部署 | `python-backend/`、`admin-web/`、`windows/`、`android/`、`deploy/linux/` |
 | [质量与测试](./05-quality-and-testing.md) | TDD 流程、测试分层、强制命令、三轮验证、完成定义 | 所有变更 |
+| [站点插件规范](./07-site-plugin-spec.md) | 独立插件包、Python API v1、安装更新、信任边界与示例 | `app/plugin_system/`、`examples/plugins/` |
 | [工作流与迁移](./06-workflow-and-migration.md) | Git 流程、PR 要求、CI 门禁、发布流程、迁移规则、禁止反模式 | 贡献与发布 |
 
 ---

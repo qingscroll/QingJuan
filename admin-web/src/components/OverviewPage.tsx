@@ -5,12 +5,15 @@ import {
   ClockCircleOutlined,
   CloudServerOutlined,
   LaptopOutlined,
+  PlayCircleOutlined,
+  PoweroffOutlined,
+  ReloadOutlined,
   TranslationOutlined,
 } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Space, Statistic, Tag, Typography } from "antd";
-import type { ReactNode } from "react";
+import { Alert, App, Button, Card, Col, Popconfirm, Progress, Row, Space, Statistic, Tag, Typography } from "antd";
+import { useState, type ReactNode } from "react";
 
-import type { DashboardData } from "../types";
+import type { BackendServiceAction, DashboardData } from "../types";
 import { formatDate } from "./AdminShell";
 import { ConnectionTokenPanel } from "./ConnectionTokenPanel";
 import { taskStatusLabel, taskStatusColor } from "./TasksPage";
@@ -19,14 +22,29 @@ type OverviewPageProps = {
   data: DashboardData;
   bookTitles: Map<string, string>;
   onNavigate: (key: "devices" | "library" | "tasks" | "diagnostics" | "upgrade" | "settings") => void;
+  onControlService: (action: BackendServiceAction) => Promise<void>;
 };
 
-export function OverviewPage({ data, bookTitles, onNavigate }: OverviewPageProps) {
+export function OverviewPage({ data, bookTitles, onNavigate, onControlService }: OverviewPageProps) {
+  const { message } = App.useApp();
+  const [serviceAction, setServiceAction] = useState<BackendServiceAction | null>(null);
   const activeTasks = data.tasks.filter((task) => ["queued", "running"].includes(task.status));
   const completedTasks = data.tasks.filter((task) => task.status === "completed").length;
   const recentTasks = [...data.tasks]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, 4);
+  const serviceRunning = data.serviceControl.businessApiAvailable;
+
+  const controlService = async (action: BackendServiceAction) => {
+    setServiceAction(action);
+    try {
+      await onControlService(action);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "服务操作失败");
+    } finally {
+      setServiceAction(null);
+    }
+  };
 
   return (
     <div className="page-stack">
@@ -94,15 +112,75 @@ export function OverviewPage({ data, bookTitles, onNavigate }: OverviewPageProps
           <Card className="panel-card service-card" title="服务信息">
             <div className="service-identity">
               <div className="service-icon"><CloudServerOutlined /></div>
-              <div><strong>qingjuan-backend</strong><span>版本 {data.meta.appVersion}</span></div>
+              <div>
+                <strong>qingjuan-backend</strong>
+                <span>
+                  版本 {data.meta.appVersion} · <Tag color={serviceRunning ? "success" : "default"}>
+                    {serviceRunning ? "运行中" : "已关闭"}
+                  </Tag>
+                </span>
+              </div>
             </div>
             <dl className="detail-list">
               <div><dt>API 版本</dt><dd>v{data.meta.apiVersion}</dd></div>
               <div><dt>实例 ID</dt><dd title={data.meta.instanceId}>{data.meta.instanceId.slice(0, 12)}</dd></div>
+              <div><dt>服务代次</dt><dd>{data.serviceControl.generation}</dd></div>
               <div><dt>RapidOCR</dt><dd>{data.meta.capabilities.rapidOcr ? "可用" : "不可用"}</dd></div>
               <div><dt>浏览器回退</dt><dd>{data.meta.capabilities.browserFallback ? "可用" : "不可用"}</dd></div>
               <div><dt>下载并发</dt><dd>{data.settings.downloadConcurrency}</dd></div>
             </dl>
+            {!serviceRunning && (
+              <Alert
+                className="service-control-alert"
+                type="warning"
+                showIcon
+                title="业务服务已关闭"
+                description="客户端业务请求和新队列任务已暂停；管理通道保持在线，便于重新开启服务。"
+              />
+            )}
+            <Space className="service-control-actions" wrap>
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                disabled={serviceRunning}
+                loading={serviceAction === "start"}
+                onClick={() => void controlService("start")}
+              >
+                开启服务
+              </Button>
+              <Popconfirm
+                title="关闭后端业务服务？"
+                description={activeTasks.length > 0
+                  ? `当前有 ${activeTasks.length} 个任务进行中；当前任务会安全结束，后续任务将暂停。`
+                  : "关闭后客户端请求会暂停，管理通道仍保持在线。"}
+                okText="确认关闭"
+                cancelText="取消"
+                onConfirm={() => controlService("stop")}
+              >
+                <Button
+                  danger
+                  icon={<PoweroffOutlined />}
+                  disabled={!serviceRunning}
+                  loading={serviceAction === "stop"}
+                >
+                  关闭服务
+                </Button>
+              </Popconfirm>
+              <Popconfirm
+                title="重启后端业务服务？"
+                description="客户端请求会短暂暂停，管理页面无需重新登录。"
+                okText="确认重启"
+                cancelText="取消"
+                onConfirm={() => controlService("restart")}
+              >
+                <Button
+                  icon={<ReloadOutlined />}
+                  loading={serviceAction === "restart"}
+                >
+                  重启服务
+                </Button>
+              </Popconfirm>
+            </Space>
             <ConnectionTokenPanel status={data.connectionToken} />
             <Space className="service-actions" wrap>
               <Button onClick={() => onNavigate("devices")}>管理设备</Button>

@@ -108,7 +108,7 @@ class PluginOverview extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Text(
-                '内置站点解析器',
+                '站点解析插件',
                 style: theme.typography.bodyLarge?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
@@ -625,6 +625,17 @@ class PluginDetailsPane extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 Text(plugin.description, style: theme.typography.body),
+                const SizedBox(height: 12),
+                Text(plugin.isInstalled
+                    ? '来源：导入插件 · 作者：${plugin.author} · API v${plugin.apiVersion}'
+                    : '来源：内置插件'),
+                if (plugin.loadError != null) ...[
+                  const SizedBox(height: 12),
+                  InfoBar(
+                      title: const Text('插件加载失败'),
+                      content: Text(plugin.loadError!),
+                      severity: InfoBarSeverity.error),
+                ],
                 const SizedBox(height: 16),
                 AppSurface(
                   padding: const EdgeInsets.all(12),

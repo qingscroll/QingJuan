@@ -1378,6 +1378,9 @@ async def search_builtin_site_books(
         return []
 
     plugin = _require_enabled_site_plugin(source.baseUrl)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import search_plugin
+        return await search_plugin(plugin, normalized_keyword, limit)
     if plugin.search_handler == "qidian":
         return await _search_qidian_works(source, normalized_keyword, limit)
     if plugin.search_handler == "fanqie":
@@ -10638,6 +10641,9 @@ async def _preview_ehentai(source_url: str, payload: AddBookPayload) -> PreviewR
 async def preview_from_url(payload: AddBookPayload) -> PreviewResponse:
     source_url = _normalize_source_url(str(payload.sourceUrl))
     plugin = _require_enabled_site_plugin(source_url)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import preview_plugin
+        return _apply_payload_metadata_to_preview(await preview_plugin(plugin, source_url), payload)
     result: PreviewResponse
     if plugin.preview_handler == "fanqie":
         result = await _preview_fanqie(source_url, payload)
@@ -11691,6 +11697,12 @@ async def _fetch_chapter_data(
     qidian_cookies: dict[str, str] | None = None,
 ) -> ChapterFetchResult:
     plugin = _require_enabled_site_plugin(chapter_url)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import chapter_plugin
+        text, images = await chapter_plugin(plugin, chapter_url)
+        return ChapterFetchResult(
+            text=text or _manga_placeholder_text(chapter_title, len(images)), image_urls=images,
+        )
     if plugin.chapter_handler is None:
         raise ValueError(f"站点插件“{plugin.name}”当前只支持作品预览和搜索，尚未实现章节抓取")
     if plugin.chapter_handler == "fanqie":

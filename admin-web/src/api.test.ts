@@ -2,6 +2,7 @@ import {
   clearSessionSecurity,
   checkBackendUpdate,
   checkTranslationModel,
+  controlBackendService,
   createUser,
   deleteBook,
   getUsers,
@@ -9,6 +10,7 @@ import {
   getRuntimeLogs,
   getRegistrationSettings,
   getServiceDiagnostics,
+  getBackendServiceStatus,
   getBackendUpdateStatus,
   login,
   loginSitePluginWithCookies,
@@ -318,6 +320,49 @@ describe("admin API client", () => {
       candidateId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       requestId: "request-1",
     }));
+    clearSessionSecurity();
+  });
+
+  it("reads and controls the backend business service with CSRF protection", async () => {
+    const serviceStatus = {
+      schemaVersion: 1,
+      state: "running",
+      businessApiAvailable: true,
+      managementApiAvailable: true,
+      generation: 2,
+      startedAt: "2030-01-01T00:00:00Z",
+      stoppedAt: null,
+      lastActionAt: "2030-01-01T00:00:00Z",
+      message: "后端业务服务运行中",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        authenticated: true,
+        expiresAt: "2030-01-01T00:00:00Z",
+        csrfToken: "service-csrf",
+        csrfHeader: "X-QingJuan-CSRF",
+      }))
+      .mockResolvedValueOnce(jsonResponse(serviceStatus))
+      .mockResolvedValueOnce(jsonResponse({
+        ...serviceStatus,
+        accepted: true,
+        action: "restart",
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await login("admin-password");
+    await getBackendServiceStatus();
+    await controlBackendService("restart");
+
+    const readOptions = fetchMock.mock.calls[1][1] as RequestInit;
+    const actionOptions = fetchMock.mock.calls[2][1] as RequestInit;
+    expect(fetchMock.mock.calls[1][0]).toBe("/admin/api/backend-service");
+    expect(readOptions.method).toBe("GET");
+    expect((readOptions.headers as Headers).has("X-QingJuan-CSRF")).toBe(false);
+    expect(fetchMock.mock.calls[2][0]).toBe("/admin/api/backend-service/actions");
+    expect(actionOptions.method).toBe("POST");
+    expect((actionOptions.headers as Headers).get("X-QingJuan-CSRF")).toBe("service-csrf");
+    expect(actionOptions.body).toBe(JSON.stringify({ action: "restart" }));
     clearSessionSecurity();
   });
 

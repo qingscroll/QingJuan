@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .process_lifecycle import BackendServiceController, require_business_service_running
 from .security import API_PREFIX, authentication_enabled, require_api_authentication
 from .service_diagnostics import RequestMetrics, should_track_request
 
@@ -81,6 +82,7 @@ def create_application(
 
     request_metrics = RequestMetrics()
     application.state.request_metrics = request_metrics
+    application.state.backend_service_controller = BackendServiceController()
     router_prefix = api_prefix or (API_PREFIX if authenticate else "")
     auth_prefix = f"{router_prefix}/auth" or "/auth"
 
@@ -107,7 +109,11 @@ def create_application(
 
     for router in public_routers:
         application.include_router(router)
-    dependencies = [Depends(require_api_authentication)] if authenticate else None
+    dependencies = (
+        [Depends(require_api_authentication), Depends(require_business_service_running)]
+        if authenticate
+        else None
+    )
     for router in routers:
         application.include_router(
             router,

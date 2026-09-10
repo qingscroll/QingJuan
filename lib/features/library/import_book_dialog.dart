@@ -4,6 +4,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../../app/app_scope.dart';
 import '../../app/app_state.dart';
 import '../../core/models/book.dart';
+import '../../core/models/book_import_source.dart';
 import '../../core/models/link_job.dart';
 import '../../shared/app_surface.dart';
 import '../../shared/mobile_sheet.dart';
@@ -77,7 +78,8 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
     _restoredPayload = true;
     final payload = widget.controller.linkJobPayload;
     if (payload == null) return;
-    _urlController.text = payload['sourceUrl'] as String? ?? '';
+    _urlController.text =
+        payload['albumId'] as String? ?? payload['sourceUrl'] as String? ?? '';
     _titleController.text = payload['title'] as String? ?? '';
     _kind = payload['bookKind'] as String? ?? _kind;
     _language = payload['language'] as String? ?? _language;
@@ -101,8 +103,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
   }
 
   JsonMap get _payload => <String, dynamic>{
-        'sourceUrl': _urlController.text.trim(),
-        'bookKind': _kind,
+        ...bookImportSourcePayload(_urlController.text, _kind),
         'title': _titleController.text.trim(),
         'language': _language,
         'needTranslation': _translate,
@@ -110,8 +111,9 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
       };
 
   Future<void> _previewRemote() async {
-    if (_urlController.text.trim().isEmpty) {
-      setState(() => _error = '请输入作品地址');
+    final error = bookImportSourceError(_urlController.text);
+    if (error != null) {
+      setState(() => _error = error);
       return;
     }
     await _run(() async {
@@ -120,8 +122,9 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
   }
 
   Future<void> _importRemote() async {
-    if (_urlController.text.trim().isEmpty) {
-      setState(() => _error = '请输入作品地址');
+    final error = bookImportSourceError(_urlController.text);
+    if (error != null) {
+      setState(() => _error = error);
       return;
     }
     await _run(() async {
@@ -190,7 +193,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
               const FeatureHero(
                 icon: FluentIcons.library,
                 title: '把新作品放进书架',
-                message: '支持网页地址、TXT、DOCX、EPUB 小说与 PDF 漫画；远程解析任务收起后仍会继续。',
+                message: '支持网页地址、禁漫本子号、TXT、DOCX、EPUB 小说与 PDF 漫画；远程解析任务收起后仍会继续。',
               ),
               if (controller.importProgress case final progress?) ...<Widget>[
                 const SizedBox(height: 12),
@@ -201,17 +204,21 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
               ],
               const SizedBox(height: 18),
               InfoLabel(
-                label: '作品地址',
+                label: '作品地址 / 禁漫本子号',
                 child: TextBox(
                   key: const ValueKey('import-book-url'),
                   controller: _urlController,
                   magnifierConfiguration:
                       textInputMagnifierConfiguration(context),
-                  placeholder: 'https://...',
+                  placeholder: 'https://... 或纯数字本子号',
                   enabled: !busy,
                   onChanged: busy ? null : (_) => setState(() {}),
                 ),
               ),
+              if (isComic18Source(_urlController.text)) ...<Widget>[
+                const SizedBox(height: 6),
+                const Text('已识别为禁漫作品，将获取章节和图片并加入漫画书架。'),
+              ],
               const SizedBox(height: 12),
               InfoLabel(
                 label: '自定义标题（可选）',
@@ -229,14 +236,15 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
                     child: InfoLabel(
                       label: '类型',
                       child: ComboBox<String>(
-                        value: _kind,
+                        value:
+                            isComic18Source(_urlController.text) ? '漫画' : _kind,
                         isExpanded: true,
                         items: const <ComboBoxItem<String>>[
                           ComboBoxItem(value: '长小说', child: Text('长小说')),
                           ComboBoxItem(value: '轻小说', child: Text('轻小说')),
                           ComboBoxItem(value: '漫画', child: Text('漫画')),
                         ],
-                        onChanged: busy
+                        onChanged: busy || isComic18Source(_urlController.text)
                             ? null
                             : (value) => setState(() => _kind = value ?? _kind),
                       ),
@@ -394,7 +402,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
         if (usesMobileUi(context)) {
           return MobileSheet(
             title: '添加书籍',
-            subtitle: '网页地址或本地文件',
+            subtitle: '网页地址、禁漫本子号或本地文件',
             trailing: busy
                 ? const SizedBox(
                     width: 18,

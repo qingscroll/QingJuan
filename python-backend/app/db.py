@@ -29,6 +29,7 @@ from .models import (
     UserRecord,
 )
 from .multi_user import DEFAULT_ADMIN_USER_ID
+from .plugin_system.repository import create_schema as create_plugin_package_schema
 from .site_plugins import get_site_plugin, list_site_plugins
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -129,11 +130,14 @@ DEFAULT_BOOK_SOURCES = [
         id="source-builtin-biqvge",
         name="笔趣阁",
         baseUrl="https://www.b520.cc",
-        description="聚合八零小说网、笔趣阁 5200 与笔趣看，可搜索并导入上游可取得的作品目录和公开章节正文。",
+        description=(
+            "聚合八零小说网、笔趣阁 5200 与笔趣看：八零自动发现最新搜索入口；"
+            "镜像站使用目录索引，b520 目录可能不完整，笔趣看可能受区域限制。"
+        ),
         bookKind="长小说",
         language="中文",
         sampleUrl="https://www.b520.cc/2_2157/",
-        tags=["中文", "聚合搜索", "章节解析"],
+        tags=["中文", "动态搜索", "镜像目录索引"],
         origin="builtin",
     ),
     BookSourceRecord(
@@ -261,7 +265,7 @@ DEFAULT_BOOK_SOURCES = [
         id="source-builtin-18comic",
         name="18Comic",
         baseUrl="https://18comic.vip",
-        description="内置漫画站点适配，适合按专辑详情页导入到本地书架。",
+        description="支持输入禁漫本子号或专辑链接，获取章节与还原后的漫画图片并加入书架。",
         bookKind="漫画",
         language="中文",
         sampleUrl="https://18comic.vip",
@@ -634,6 +638,7 @@ def init_db() -> None:
             ON devices (last_seen_at DESC)
             """
         )
+        create_plugin_package_schema(conn)
         _seed_builtin_book_sources(conn)
         _seed_site_plugin_settings(conn)
     with _SITE_PLUGIN_STATE_LOCK:
@@ -1744,6 +1749,12 @@ def save_book_source(source: BookSourceRecord) -> BookSourceRecord:
 def delete_book_source(source_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM book_sources WHERE id = ?", (source_id,))
+
+
+def invalidate_site_plugin_states() -> None:
+    global _SITE_PLUGIN_STATE_CACHE
+    with _SITE_PLUGIN_STATE_LOCK:
+        _SITE_PLUGIN_STATE_CACHE = None
 
 
 def list_site_plugin_enabled_states() -> dict[str, bool]:

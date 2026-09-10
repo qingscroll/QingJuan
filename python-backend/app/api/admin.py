@@ -47,6 +47,12 @@ from ..db import (
 )
 from ..models import AdminUserRecord, UserRole
 from ..multi_user import DEFAULT_ADMIN_USER_ID
+from ..process_lifecycle import (
+    BackendServiceActionPayload,
+    BackendServiceActionResponse,
+    BackendServiceStatus,
+    get_backend_service_controller,
+)
 from ..registration import (
     RegistrationSettingsPayload,
     RegistrationSettingsView,
@@ -241,6 +247,29 @@ async def get_service_diagnostics(
     require_admin_session(request)
     _no_store(response)
     return await asyncio.to_thread(build_service_diagnostics, request.app)
+
+
+@router.get("/backend-service", response_model=BackendServiceStatus)
+async def get_backend_service(
+    request: Request,
+    response: Response,
+) -> BackendServiceStatus:
+    require_admin_session(request)
+    _no_store(response)
+    return get_backend_service_controller(request).status()
+
+
+@router.post("/backend-service/actions", response_model=BackendServiceActionResponse)
+async def post_backend_service_action(
+    payload: BackendServiceActionPayload,
+    request: Request,
+    response: Response,
+) -> BackendServiceActionResponse:
+    require_admin_session(request, require_csrf=True)
+    _no_store(response)
+    client_key = request.client.host if request.client is not None else "unknown"
+    _LOGGER.warning("管理员请求%s后端业务服务，来源=%s", payload.action, client_key)
+    return await get_backend_service_controller(request).apply(payload.action)
 
 
 @router.get("/backend-update", response_model=BackendUpdateStatus)

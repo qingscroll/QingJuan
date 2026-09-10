@@ -1,0 +1,145 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "apiVersion": {
+      "const": 1,
+      "title": "Apiversion",
+      "type": "integer"
+    },
+    "id": {
+      "maxLength": 64,
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "title": "Version",
+      "type": "string"
+    },
+    "author": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Author",
+      "type": "string"
+    },
+    "description": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "category": {
+      "enum": [
+        "novel",
+        "manga"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "domains": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Domains",
+      "type": "array"
+    },
+    "networkDomains": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 40,
+      "title": "Networkdomains",
+      "type": "array"
+    },
+    "bookKinds": {
+      "items": {
+        "enum": [
+          "长小说",
+          "轻小说",
+          "漫画"
+        ],
+        "type": "string"
+      },
+      "maxItems": 3,
+      "minItems": 1,
+      "title": "Bookkinds",
+      "type": "array"
+    },
+    "language": {
+      "default": "中文",
+      "enum": [
+        "中文",
+        "日文",
+        "英文"
+      ],
+      "title": "Language",
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 12,
+      "title": "Tags",
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "enum": [
+          "preview",
+          "chapter",
+          "search",
+          "on_demand"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "entrypoint": {
+      "const": "plugin.py",
+      "title": "Entrypoint",
+      "type": "string"
+    },
+    "defaultEnabled": {
+      "default": true,
+      "title": "Defaultenabled",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "apiVersion",
+    "id",
+    "name",
+    "version",
+    "author",
+    "description",
+    "category",
+    "domains",
+    "bookKinds",
+    "capabilities",
+    "entrypoint"
+  ],
+  "title": "PluginManifest",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

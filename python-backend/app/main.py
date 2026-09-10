@@ -152,7 +152,7 @@ try:
         TranslationSettingsView,
     )
     from .multi_user import DEFAULT_ADMIN_USER_ID, multi_user_enabled
-    from .process_lifecycle import start_parent_process_watcher
+    from .process_lifecycle import BackendServiceController, start_parent_process_watcher
     from .runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from .scraper import (
         _fetch_with_edge_cdp,
@@ -306,7 +306,7 @@ except ImportError:
         TranslationSettingsView,
     )
     from app.multi_user import DEFAULT_ADMIN_USER_ID, multi_user_enabled
-    from app.process_lifecycle import start_parent_process_watcher
+    from app.process_lifecycle import BackendServiceController, start_parent_process_watcher
     from app.runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from app.scraper import (
         _fetch_with_edge_cdp,
@@ -390,6 +390,8 @@ async def _run_startup(app_instance: FastAPI) -> None:
     validate_admin_auth_configuration()
     configured_model_endpoint_allowlist()
     init_db()
+    from app.plugin_system.packages import load_installed_plugins
+    await asyncio.to_thread(load_installed_plugins)
     _migrate_book_storage_keys()
     await asyncio.to_thread(_cleanup_expired_exports)
     LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -408,7 +410,8 @@ async def _run_startup(app_instance: FastAPI) -> None:
         task.updatedAt = _now()
         save_task(task)
         TASK_QUEUE.put_nowait(task.id)
-    app_instance.state.queue_worker = asyncio.create_task(_task_worker())
+    service_controller = app_instance.state.backend_service_controller
+    app_instance.state.queue_worker = asyncio.create_task(_task_worker(service_controller))
     _resume_server_managed_source_caches()
 
 
@@ -509,6 +512,7 @@ async def get_service_meta() -> ServiceMetaResponse:
             "deviceRegistry": True,
             "runtimeLogs": admin_web_enabled(),
             "serviceDiagnostics": admin_web_enabled(),
+            "businessServiceControl": admin_web_enabled(),
             "onlineBackendUpdate": backend_update_supported(),
             "translationModelCheck": True,
             "rapidOcr": True,
@@ -558,20 +562,8 @@ def _site_plugin_view(
     account_logged_in = False
     if plugin.supports_account_login:
         account_logged_in = bool(_site_plugin_runtime(plugin, owner_id).account_status()["loggedIn"])
-    return SitePluginView(
-        id=plugin.id,
-        name=plugin.name,
-        description=plugin.description,
-        category=plugin.category,
-        domains=list(plugin.domains),
-        bookKinds=list(plugin.book_kinds),
-        tags=list(plugin.tags),
-        capabilities=list(plugin.capabilities),
-        version=plugin.version,
-        enabled=enabled,
-        defaultEnabled=plugin.default_enabled,
-        accountLoggedIn=account_logged_in,
-    )
+    from app.plugin_system.views import plugin_view
+    return plugin_view(plugin, enabled, account_logged_in=account_logged_in)
 
 
 @plugins_router.get("/plugins", response_model=list[SitePluginView])
@@ -5092,10 +5084,11 @@ def _append_task_runtime_log(
         save_task(task)
 
 
-async def _task_worker() -> None:
+async def _task_worker(service_controller: BackendServiceController) -> None:
     while True:
         task_id = await TASK_QUEUE.get()
         try:
+            await service_controller.wait_until_running()
             try:
                 await _run_task(task_id)
             except HTTPException:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -41,6 +42,13 @@ class SitePlugin:
     default_enabled: bool = True
     version: str = "1.0.0"
     matcher: UrlMatcher | None = field(default=None, repr=False, compare=False)
+    origin: Literal["builtin", "installed"] = "builtin"
+    author: str = ""
+    api_version: int = 1
+    language: str = "中文"
+    network_domains: tuple[str, ...] = ()
+    load_error: str | None = None
+    runtime: ModuleType | None = field(default=None, repr=False, compare=False)
 
     @property
     def capabilities(self) -> tuple[str, ...]:

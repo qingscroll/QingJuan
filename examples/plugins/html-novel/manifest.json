@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "example-html-novel",
+  "name": "HTML 小说模板",
+  "version": "1.0.0",
+  "author": "请填写作者",
+  "description": "开发模板：请替换域名和页面选择器后使用。",
+  "category": "novel",
+  "domains": ["novels.example.test"],
+  "networkDomains": ["cdn.example.test"],
+  "bookKinds": ["长小说"],
+  "language": "中文",
+  "tags": ["开发模板"],
+  "capabilities": ["preview", "chapter", "search", "on_demand"],
+  "entrypoint": "plugin.py",
+  "defaultEnabled": false
+}

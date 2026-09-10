@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "demo-novel",
+  "name": "青卷离线示例",
+  "version": "1.0.0",
+  "author": "青卷项目",
+  "description": "用于验证导入、搜索和章节阅读的离线示例，不请求外部网站。搜索“青卷”或导入 https://demo.qingjuan.test/book/1。",
+  "category": "novel",
+  "domains": ["demo.qingjuan.test"],
+  "bookKinds": ["长小说"],
+  "language": "中文",
+  "tags": ["示例", "离线"],
+  "capabilities": ["preview", "chapter", "search", "on_demand"],
+  "entrypoint": "plugin.py",
+  "defaultEnabled": true
+}

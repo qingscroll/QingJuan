@@ -84,6 +84,27 @@ export type RuntimeLogBatch = {
   total: number;
 };
 
+export type BackendServiceState = "running" | "stopped" | "restarting";
+
+export type BackendServiceAction = "start" | "stop" | "restart";
+
+export type BackendServiceStatus = {
+  schemaVersion: 1;
+  state: BackendServiceState;
+  businessApiAvailable: boolean;
+  managementApiAvailable: true;
+  generation: number;
+  startedAt: string;
+  stoppedAt: string | null;
+  lastActionAt: string | null;
+  message: string;
+};
+
+export type BackendServiceActionResponse = BackendServiceStatus & {
+  accepted: true;
+  action: BackendServiceAction;
+};
+
 export type DiagnosticStatus = "healthy" | "warning" | "error";
 
 export type BackendUpdateState =
@@ -315,6 +336,16 @@ export type SitePlugin = {
   enabled: boolean;
   defaultEnabled: boolean;
   accountLoggedIn: boolean;
+  origin?: "builtin" | "installed";
+  author?: string;
+  apiVersion?: number;
+  loadError?: string | null;
+};
+
+export type SitePluginPackageInspection = {
+  plugin: SitePlugin;
+  installedVersion: string | null;
+  sha256: string;
 };
 
 export type SitePluginAccount = {
@@ -407,6 +438,7 @@ export type SettingsUpdate = {
 
 export type DashboardData = {
   meta: ServiceMeta;
+  serviceControl: BackendServiceStatus;
   connectionToken: ConnectionTokenStatus;
   devices: Device[];
   books: Book[];

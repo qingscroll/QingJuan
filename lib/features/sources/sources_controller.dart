@@ -5,7 +5,14 @@ import '../../core/models/site_plugin.dart';
 import '../../core/models/source.dart';
 import '../../core/state/load_state.dart';
 
-enum BookSearchEngine { bookSources, quark, fanqie, qidian, biqvge }
+enum BookSearchEngine {
+  bookSources,
+  quark,
+  fanqie,
+  qidian,
+  biqvge,
+  installedPlugins
+}
 
 class SourcesController extends ChangeNotifier {
   SourcesController(this.api);
@@ -20,6 +27,7 @@ class SourcesController extends ChangeNotifier {
   int _backendGeneration = 0;
   int _searchGeneration = 0;
   bool searching = false;
+  bool changingPackages = false;
   String? error;
 
   void resetForBackendSwitch() {
@@ -31,6 +39,7 @@ class SourcesController extends ChangeNotifier {
     _savingPluginIds.clear();
     _savingSourceIds.clear();
     searching = false;
+    changingPackages = false;
     error = null;
     state = LoadState.idle;
     notifyListeners();
@@ -63,6 +72,56 @@ class SourcesController extends ChangeNotifier {
   bool isPluginSaving(String pluginId) => _savingPluginIds.contains(pluginId);
 
   bool isSourceSaving(String sourceId) => _savingSourceIds.contains(sourceId);
+
+  bool Function() captureBackend() {
+    final generation = _backendGeneration;
+    return () => generation == _backendGeneration;
+  }
+
+  Future<SitePluginPackageInspection> inspectPluginPackage(
+          List<int> bytes, String filename) =>
+      api.inspectSitePluginPackage(bytes, filename);
+
+  Future<void> importPluginPackage(List<int> bytes, String filename,
+      {bool replace = false}) async {
+    if (changingPackages) return;
+    final current = captureBackend();
+    changingPackages = true;
+    notifyListeners();
+    try {
+      final installed =
+          await api.importSitePluginPackage(bytes, filename, replace: replace);
+      if (!current()) return;
+      plugins = [
+        ...plugins.where((plugin) => plugin.id != installed.id),
+        installed
+      ];
+      state = LoadState.ready;
+    } finally {
+      if (current()) {
+        changingPackages = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> uninstallPlugin(SitePlugin plugin) async {
+    if (changingPackages || !plugin.isInstalled) return;
+    final current = captureBackend();
+    changingPackages = true;
+    notifyListeners();
+    try {
+      await api.uninstallSitePlugin(plugin.id);
+      if (!current()) return;
+      plugins =
+          plugins.where((item) => item.id != plugin.id).toList(growable: false);
+    } finally {
+      if (current()) {
+        changingPackages = false;
+        notifyListeners();
+      }
+    }
+  }
 
   Future<void> setPluginEnabled(SitePlugin plugin, bool enabled) async {
     if (!_savingPluginIds.add(plugin.id)) return;
@@ -169,6 +228,8 @@ class SourcesController extends ChangeNotifier {
     notifyListeners();
     try {
       final loaded = switch (engine) {
+        BookSearchEngine.installedPlugins =>
+          api.searchInstalledPlugins(normalized),
         BookSearchEngine.bookSources => api.searchSources(
             normalized,
             sourceIds: sources

@@ -163,6 +163,74 @@ function Test-SmokeReadingProgress {
     Write-Output 'Packaged reading progress passed: imported fixture, chapter, page, layout, character and paragraph anchors.'
 }
 
+function Test-SmokeSitePlugin {
+    Add-Type -AssemblyName System.IO.Compression
+    $archiveBytes = New-Object System.IO.MemoryStream
+    $archive = [System.IO.Compression.ZipArchive]::new(
+        $archiveBytes, [System.IO.Compression.ZipArchiveMode]::Create, $true
+    )
+    try {
+        foreach ($name in @('manifest.json', 'plugin.py')) {
+            $entry = $archive.CreateEntry($name)
+            $stream = $entry.Open()
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes((Join-Path $projectRoot "examples/plugins/demo-novel/$name"))
+                $stream.Write($bytes, 0, $bytes.Length)
+            }
+            finally { $stream.Dispose() }
+        }
+    }
+    finally { $archive.Dispose() }
+    $boundary = 'qingjuan-plugin-' + [Guid]::NewGuid().ToString('N')
+    $bodyStream = New-Object System.IO.MemoryStream
+    try {
+        $prefix = "--$boundary`r`nContent-Disposition: form-data; name=`"file`"; filename=`"demo.qjplugin`"`r`nContent-Type: application/zip`r`n`r`n"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($prefix)
+        $bodyStream.Write($bytes, 0, $bytes.Length)
+        $archiveBytes.Position = 0
+        $archiveBytes.CopyTo($bodyStream)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes("`r`n--$boundary--`r`n")
+        $bodyStream.Write($bytes, 0, $bytes.Length)
+        $body = $bodyStream.ToArray()
+    }
+    finally { $bodyStream.Dispose(); $archiveBytes.Dispose() }
+
+    $headers = @{ 'X-QingJuan-Local-Request' = '1' }
+    $base = "http://127.0.0.1:$Port/api/v1"
+    Assert-SmokeListenerOwnership | Out-Null
+    $inspection = Invoke-RestMethod -Uri "$base/plugins/inspect" -Method Post -Headers $headers `
+        -ContentType "multipart/form-data; boundary=$boundary" -Body $body -TimeoutSec 20
+    if ($inspection.plugin.id -ne 'demo-novel') { throw 'Plugin package inspection failed.' }
+    Assert-SmokeListenerOwnership | Out-Null
+    $installed = Invoke-RestMethod -Uri "$base/plugins/import" -Method Post -Headers $headers `
+        -ContentType "multipart/form-data; boundary=$boundary" -Body $body -TimeoutSec 20
+    if ($installed.origin -ne 'installed') { throw 'Packaged backend did not install the external plugin.' }
+
+    $keyword = -join ([char[]](0x9752, 0x5377))
+    $json = [System.Text.Encoding]::UTF8.GetBytes((@{ keyword = $keyword; limit = 10 } | ConvertTo-Json -Compress))
+    Assert-SmokeListenerOwnership | Out-Null
+    $results = @(Invoke-RestMethod -Uri "$base/plugins/search" -Method Post -Headers $headers `
+        -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 20)
+    if ($results.Count -ne 1) { throw 'Installed plugin search failed in the frozen backend.' }
+    $payload = @{
+        sourceUrl = $results[0].sourceUrl
+        bookKind = $inspection.plugin.bookKinds[0]
+        language = -join ([char[]](0x4E2D, 0x6587))
+    }
+    $json = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
+    Assert-SmokeListenerOwnership | Out-Null
+    $book = Invoke-RestMethod -Uri "$base/books/import" -Method Post -Headers $headers `
+        -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 30
+    if ($book.chapterCount -ne 2) { throw 'Installed plugin did not download its two chapters.' }
+    $bookId = [Uri]::EscapeDataString($book.id)
+    Assert-SmokeListenerOwnership | Out-Null
+    Invoke-RestMethod -Uri "$base/plugins/demo-novel" -Method Delete -Headers $headers -TimeoutSec 10 | Out-Null
+    Assert-SmokeListenerOwnership | Out-Null
+    $chapter = Invoke-RestMethod -Uri "$base/books/$bookId/chapters/1?mode=original" -TimeoutSec 10
+    if ([string]::IsNullOrWhiteSpace($chapter.content)) { throw 'Plugin uninstall removed cached chapter content.' }
+    Write-Output 'Packaged site plugins passed: inspect, install, search, download, uninstall and cached reading.'
+}
+
 # Reserve an unused loopback port before starting a backend or sending HTTP.
 # Listener ownership is checked again after launch to handle reservation races.
 $Port = Get-SmokeTestPort -RequestedPort $Port
@@ -389,6 +457,7 @@ try {
     }
 
     Test-SmokeReadingProgress
+    Test-SmokeSitePlugin
     Write-Output "Windows combined package smoke test passed: version=$expectedVersion port=$Port"
 }
 finally {

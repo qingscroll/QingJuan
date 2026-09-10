@@ -31,6 +31,82 @@ void main() {
   setUpAll(loadMobileCaptureFonts);
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
+  for (final dedicatedEntry in <bool>[false, true]) {
+    testWidgets(
+        'mobile album number import works with dedicated entry $dedicatedEntry',
+        (tester) async {
+      _setViewport(tester, const Size(390, 844));
+      final submitted = <Map<String, dynamic>>[];
+      final fixture = await _Fixture.create((request) async {
+        if (request.method == 'POST') {
+          submitted.add(jsonDecode(request.body) as Map<String, dynamic>);
+        }
+        return _json(_job('failed'));
+      });
+      addTearDown(fixture.dispose);
+      await tester
+          .pumpWidget(fixture.app(MobileImportPage(comic18: dedicatedEntry)));
+      await tester.pumpAndSettle();
+      final input = find.byKey(const ValueKey('mobile-import-url'));
+      await tester.enterText(input, ' 00123456 ');
+      await tester.pumpAndSettle();
+      expect(find.text('漫画'), findsOneWidget);
+      final submit = find.byKey(const ValueKey('mobile-import-submit'));
+      await tester.ensureVisible(submit);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(submitted, hasLength(1));
+      final payload = submitted.single['payload'] as Map<String, dynamic>;
+      expect(submitted.single['mode'], 'import');
+      expect(payload['albumId'], '123456');
+      expect(payload['sourceUrl'], 'https://18comic.vip/album/123456/');
+      expect(payload['bookKind'], '漫画');
+      expect(payload['downloadMode'], 'all');
+      await tester.tap(find.text('查看'));
+      await tester.pumpAndSettle();
+      expect(find.text('重新导入'), findsOneWidget);
+      await tester.tap(find.text('重新导入'));
+      await tester.pumpAndSettle();
+      expect(submitted, hasLength(2));
+      expect(submitted.last['payload'], payload);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'mobile import chooser opens number entry and rejects invalid IDs',
+      (tester) async {
+    _setViewport(tester, const Size(390, 844));
+    final requests = <http.Request>[];
+    final fixture = await _Fixture.create((request) async {
+      requests.add(request);
+      return _json(<Object>[]);
+    });
+    addTearDown(fixture.dispose);
+    await tester.pumpWidget(fixture.app(Builder(
+        builder: (context) => Scaffold(
+              body: TextButton(
+                  onPressed: () => showMobileImportSheet(context),
+                  child: const Text('导入测试')),
+            ))));
+    await tester.tap(find.text('导入测试'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('禁漫本子号'));
+    await tester.pumpAndSettle();
+    expect(
+        tester.widget<MobileImportPage>(find.byType(MobileImportPage)).comic18,
+        isTrue);
+    await tester.enterText(
+        find.byKey(const ValueKey('mobile-import-url')), '-1');
+    final submit = find.byKey(const ValueKey('mobile-import-submit'));
+    await tester.ensureVisible(submit);
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(requests, isEmpty);
+    expect(find.text('请输入有效的禁漫本子号（正整数）'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'store uses every real provider and keeps built-in imports on demand',
       (tester) async {
@@ -40,6 +116,11 @@ void main() {
       requests.add(request);
       if (request.url.path == '/api/v1/sources/search') {
         return _json(<Object>[_result('书源结果')]);
+      }
+      if (request.url.path == '/api/v1/plugins/search') {
+        return _json(<Object>[
+          {..._result('插件结果'), 'sourceId': ''}
+        ]);
       }
       if (request.url.path == '/api/v1/builtin-sites/search') {
         final body = jsonDecode(request.body) as Map<String, dynamic>;
@@ -70,7 +151,9 @@ void main() {
     final sourceBody = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(sourceBody['sourceIds'], <String>['source-1']);
 
-    for (final engine in BookSearchEngine.values.skip(1)) {
+    for (final engine in BookSearchEngine.values
+        .skip(1)
+        .where((engine) => engine != BookSearchEngine.installedPlugins)) {
       final selector =
           find.byKey(ValueKey('mobile-store-category-${engine.name}'));
       await tester.ensureVisible(selector);
@@ -101,6 +184,16 @@ void main() {
     expect(find.textContaining('导入失败'), findsOneWidget);
     await tester.pump(const Duration(seconds: 7));
     expect(tester.takeException(), isNull);
+    final pluginSelector =
+        find.byKey(const ValueKey('mobile-store-category-installedPlugins'));
+    await tester.ensureVisible(pluginSelector);
+    await tester.tap(pluginSelector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('mobile-store-search-submit')));
+    await tester.pumpAndSettle();
+    expect(requests.last.url.path, '/api/v1/plugins/search');
+    expect(find.text('插件结果'), findsOneWidget);
+    expect(fixture.sources.results.single.toImportPayload()['sourceId'], '');
   });
 
   for (final dark in <bool>[false, true]) {
@@ -254,7 +347,7 @@ void main() {
     await tester.tap(submit);
     await tester.pumpAndSettle();
     expect(requests, isEmpty);
-    expect(find.text('请输入完整的 HTTP 或 HTTPS 作品地址'), findsOneWidget);
+    expect(find.text('请输入完整的 HTTP 或 HTTPS 作品地址，或禁漫本子号（正整数）'), findsOneWidget);
     await tester.ensureVisible(find.byKey(const ValueKey('mobile-import-url')));
     await tester.enterText(find.byKey(const ValueKey('mobile-import-url')),
         'https://books.example.test/book/1');

@@ -20,7 +20,13 @@ import { Alert, App, Badge, Button, Layout, Menu, Space, Spin, Tooltip, Typograp
 
 import * as api from "../api";
 import { ThemeToggle } from "../theme";
-import type { DashboardData, SessionInfo, SettingsUpdate, Task } from "../types";
+import type {
+  BackendServiceAction,
+  DashboardData,
+  SessionInfo,
+  SettingsUpdate,
+  Task,
+} from "../types";
 import { BackendUpgradePage } from "./BackendUpgradePage";
 import { DevicesPage } from "./DevicesPage";
 import { DiagnosticsPage } from "./DiagnosticsPage";
@@ -136,8 +142,9 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
     else setLoading(true);
     setError("");
     try {
-      const [meta, connectionToken, devices, books, tasks, sources, plugins, settings] = await Promise.all([
+      const [meta, serviceControl, connectionToken, devices, books, tasks, sources, plugins, settings] = await Promise.all([
         api.getMeta(),
+        api.getBackendServiceStatus(),
         api.getConnectionTokenStatus(),
         api.getDevices(),
         api.getBooks(),
@@ -146,7 +153,7 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
         api.getSitePlugins(),
         api.getSettings(),
       ]);
-      setData({ meta, connectionToken, devices, books, tasks, sources, plugins, settings });
+      setData({ meta, serviceControl, connectionToken, devices, books, tasks, sources, plugins, settings });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "管理数据加载失败");
     } finally {
@@ -178,8 +185,8 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      api.getDevices().then((devices) => {
-        setData((current) => (current ? { ...current, devices } : current));
+      Promise.all([api.getBackendServiceStatus(), api.getDevices()]).then(([serviceControl, devices]) => {
+        setData((current) => (current ? { ...current, serviceControl, devices } : current));
       }).catch(() => undefined);
     }, 30000);
     return () => window.clearInterval(timer);
@@ -248,8 +255,22 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
     } : current);
   };
 
+  const controlBackendService = async (action: BackendServiceAction) => {
+    const serviceControl = await api.controlBackendService(action);
+    setData((current) => current ? { ...current, serviceControl } : current);
+    const actionLabel = { start: "开启", stop: "关闭", restart: "重启" }[action];
+    message.success(`后端业务服务已${actionLabel}`);
+  };
+
   const currentPage = data ? {
-    overview: <OverviewPage data={data} bookTitles={bookTitles} onNavigate={navigate} />,
+    overview: (
+      <OverviewPage
+        data={data}
+        bookTitles={bookTitles}
+        onNavigate={navigate}
+        onControlService={controlBackendService}
+      />
+    ),
     devices: <DevicesPage devices={data.devices} onSetBanned={setDeviceBanned} />,
     users: navigationAvailable("users", data.meta.capabilities) ? <UsersPage /> : null,
     registration: navigationAvailable("registration", data.meta.capabilities)
@@ -322,10 +343,19 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
           }}
         />
         <div className="sider-status">
-          <span className="status-dot" aria-hidden="true" />
+          <span
+            className={`status-dot${data?.serviceControl.businessApiAvailable === false ? " is-stopped" : ""}`}
+            aria-hidden="true"
+          />
           <div>
-            <strong>服务已连接</strong>
-            <span>API v{data?.meta.apiVersion ?? "–"} · 在线设备 {data?.devices.filter((device) => device.online).length ?? 0}</span>
+            <strong>
+              {data?.serviceControl.businessApiAvailable === false ? "管理通道在线" : "服务已连接"}
+            </strong>
+            <span>
+              API v{data?.meta.apiVersion ?? "–"} · {data?.serviceControl.businessApiAvailable === false
+                ? "业务请求暂停"
+                : `在线设备 ${data?.devices.filter((device) => device.online).length ?? 0}`}
+            </span>
           </div>
         </div>
       </Sider>
@@ -340,7 +370,10 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
               aria-label="打开导航"
               onClick={() => setCollapsed(false)}
             />
-            <Badge status="success" text="服务在线" />
+            <Badge
+              status={data?.serviceControl.businessApiAvailable ? "success" : "default"}
+              text={data?.serviceControl.businessApiAvailable ? "业务服务在线" : "业务服务已关闭"}
+            />
             <Typography.Text className="header-instance" ellipsis>
               {data ? `实例 ${data.meta.instanceId.slice(0, 8)}` : "正在读取实例"}
             </Typography.Text>
