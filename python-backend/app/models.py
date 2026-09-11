@@ -5,6 +5,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from .comic18_input import canonical_album_url, normalize_album_id, source_matches_album
 from .multi_user import DEFAULT_ADMIN_USER_ID
 
 BookKind = Literal["长小说", "轻小说", "漫画"]
@@ -158,6 +159,7 @@ class MangaChapterTranslationResponse(BaseModel):
 
 class AddBookPayload(BaseModel):
     sourceUrl: HttpUrl
+    albumId: str | None = Field(default=None, description="禁漫本子号，可替代 sourceUrl")
     bookKind: BookKind
     title: str | None = None
     language: Language
@@ -166,6 +168,33 @@ class AddBookPayload(BaseModel):
     synopsis: str | None = None
     cover: str | None = None
     downloadMode: DownloadMode = "all"
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_comic18_input(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        source = data.get("sourceUrl")
+        album_id = data.get("albumId")
+        # Accept a bare number from both API clients and the shared import field.
+        if (
+            album_id is None
+            and isinstance(source, (str, int))
+            and str(source).strip().isascii()
+            and str(source).strip().isdigit()
+        ):
+            album_id = source
+        if album_id is None:
+            return data
+        normalized = normalize_album_id(album_id)
+        if source not in (None, "") and not source_matches_album(source, normalized):
+            raise ValueError("albumId 与 sourceUrl 必须指向同一本禁漫作品")
+        if data.get("sourceId"):
+            raise ValueError("本子号导入使用内置禁漫解析器，请勿同时指定 sourceId")
+        data.update(albumId=normalized, sourceUrl=canonical_album_url(normalized), bookKind="漫画")
+        data.setdefault("language", "中文")
+        return data
 
 
 class ChapterPreview(BaseModel):
@@ -553,6 +582,16 @@ class SitePluginView(BaseModel):
     enabled: bool
     defaultEnabled: bool
     accountLoggedIn: bool = False
+    origin: Literal["builtin", "installed"] = "builtin"
+    author: str = ""
+    apiVersion: int = 1
+    loadError: str | None = None
+
+
+class SitePluginPackageInspection(BaseModel):
+    plugin: SitePluginView
+    installedVersion: str | None = None
+    sha256: str
 
 
 class SitePluginUpdatePayload(BaseModel):

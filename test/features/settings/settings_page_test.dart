@@ -87,7 +87,7 @@ void main() {
     expect(find.byIcon(FluentIcons.system), findsOneWidget);
     expect(find.byIcon(FluentIcons.brightness), findsOneWidget);
     expect(find.byIcon(FluentIcons.clear_night), findsOneWidget);
-    expect(find.byIcon(FluentIcons.cell_phone), findsNothing);
+    expect(find.byIcon(FluentIcons.cell_phone), findsOneWidget);
     final systemIcon = tester.widget<Icon>(
       find.descendant(
         of: find.byKey(const ValueKey('theme-mode-system')),

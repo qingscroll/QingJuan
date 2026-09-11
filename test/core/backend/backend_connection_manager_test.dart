@@ -10,6 +10,32 @@ import 'package:qingjuan/core/backend/local_backend_process.dart';
 import 'package:qingjuan/core/models/settings.dart';
 
 void main() {
+  test('remote client accepts authenticated desktop sharing and heartbeat',
+      () async {
+    final api = ApiClient(() => 'http://192.168.1.20:19454',
+        token: () => 'shared-token',
+        client: MockClient((request) async {
+          expect(request.headers['Authorization'], 'Bearer shared-token');
+          return http.Response(
+              jsonEncode({
+                'service': 'qingjuan-backend',
+                'apiVersion': '1',
+                'capabilities': {'multiUser': false, 'desktopSharing': true},
+              }),
+              200);
+        }));
+    final manager = BackendConnectionManager(api, isConfigured: () => true);
+    await manager.testRemoteConnection(
+        baseUrl: 'http://192.168.1.20:19454', token: 'shared-token');
+    await manager.ensureReady();
+    expect(manager.status, BackendStatus.ready);
+    expect(manager.multiUserEnabled, isFalse);
+    expect(manager.message, 'PC 局域网后端已连接');
+    await manager.probeRemoteHealth();
+    expect(manager.status, BackendStatus.ready);
+    await manager.dispose();
+    api.close();
+  });
   test('unconfigured client does not make a network request', () async {
     final api = ApiClient(
       () => '',

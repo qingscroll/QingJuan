@@ -20,15 +20,16 @@ void main() {
     );
   });
 
-  test('Windows keeps the v1.3.4 Fluent desktop palette and typography', () {
+  test('Windows uses layered Store surfaces and Fluent typography', () {
     final theme = buildQingJuanTheme(
       Brightness.light,
       platform: TargetPlatform.windows,
     );
 
     expect(theme.accentColor.normal, const Color(0xFF0B8278));
-    expect(theme.scaffoldBackgroundColor, const Color(0xFFF3F3F3));
-    expect(theme.cardColor, const Color(0xFFFBFBFB));
+    expect(theme.scaffoldBackgroundColor, const Color(0xFFF9F9F9));
+    expect(theme.micaBackgroundColor, const Color(0xFFF3F3F3));
+    expect(theme.cardColor, const Color(0xFFFFFFFF));
     expect(theme.typography.body?.fontFamily, 'Segoe UI Variable Text');
     expect(theme.typography.title?.fontFamily, 'Segoe UI Variable Text');
   });

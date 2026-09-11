@@ -1378,6 +1378,9 @@ async def search_builtin_site_books(
         return []
 
     plugin = _require_enabled_site_plugin(source.baseUrl)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import search_plugin
+        return await search_plugin(plugin, normalized_keyword, limit)
     if plugin.search_handler == "qidian":
         return await _search_qidian_works(source, normalized_keyword, limit)
     if plugin.search_handler == "fanqie":
@@ -2828,6 +2831,7 @@ async def download_chapter_payload(
     chapter_index: int,
     *,
     qidian_cookies: dict[str, str] | None = None,
+    shaoniandream_cookies: dict[str, str] | None = None,
 ) -> dict:
     chapter = _chapter_lookup(manifest).get(chapter_index)
     if chapter is None:
@@ -2842,6 +2846,7 @@ async def download_chapter_payload(
             chapter,
             image_download_semaphore=asyncio.Semaphore(image_concurrency),
             qidian_cookies=qidian_cookies,
+            shaoniandream_cookies=shaoniandream_cookies,
         )
 
 
@@ -2853,6 +2858,7 @@ async def download_selected_chapters(
     progress_callback: Callable[[int, int, list[str]], Awaitable[None] | None] | None = None,
     *,
     qidian_cookies: dict[str, str] | None = None,
+    shaoniandream_cookies: dict[str, str] | None = None,
 ) -> dict:
     chapter_lookup = _chapter_lookup(manifest)
     selected_indexes = [
@@ -2888,6 +2894,7 @@ async def download_selected_chapters(
                         chapter,
                         image_download_semaphore=image_download_semaphore,
                         qidian_cookies=qidian_cookies,
+                        shaoniandream_cookies=shaoniandream_cookies,
                     )
                 finally:
                     active_titles.pop(chapter_index, None)
@@ -2960,6 +2967,7 @@ async def _download_single_chapter(
     *,
     image_download_semaphore: asyncio.Semaphore | None = None,
     qidian_cookies: dict[str, str] | None = None,
+    shaoniandream_cookies: dict[str, str] | None = None,
 ) -> dict:
     filename = str(chapter.get("file_name") or f"{chapter_index:04d}-chapter-{chapter_index}.txt")
     source_url = str(chapter.get("url") or "").strip()
@@ -2989,7 +2997,14 @@ async def _download_single_chapter(
             "access_restricted": bool(chapter.get("access_restricted")),
         }
 
-    if qidian_cookies is None:
+    if shaoniandream_cookies is not None:
+        result = await _fetch_chapter_data(
+            client,
+            source_url,
+            chapter_title,
+            shaoniandream_cookies=shaoniandream_cookies,
+        )
+    elif qidian_cookies is None:
         result = await _fetch_chapter_data(client, source_url, chapter_title)
     else:
         result = await _fetch_chapter_data(
@@ -10638,6 +10653,9 @@ async def _preview_ehentai(source_url: str, payload: AddBookPayload) -> PreviewR
 async def preview_from_url(payload: AddBookPayload) -> PreviewResponse:
     source_url = _normalize_source_url(str(payload.sourceUrl))
     plugin = _require_enabled_site_plugin(source_url)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import preview_plugin
+        return _apply_payload_metadata_to_preview(await preview_plugin(plugin, source_url), payload)
     result: PreviewResponse
     if plugin.preview_handler == "fanqie":
         result = await _preview_fanqie(source_url, payload)
@@ -10741,6 +10759,7 @@ async def download_book(
     root_dir: Path,
     *,
     qidian_cookies: dict[str, str] | None = None,
+    shaoniandream_cookies: dict[str, str] | None = None,
 ) -> DownloadResult:
     safe_title = re.sub(r'[\/:*?"<>|]', "_", preview.title).strip() or "未命名小说"
     book_dir = root_dir / payload.language / safe_title
@@ -10765,7 +10784,14 @@ async def download_book(
             image_files: list[str] = []
             download_error: str | None = None
             try:
-                if qidian_cookies is None:
+                if shaoniandream_cookies is not None:
+                    result = await _fetch_chapter_data(
+                        client,
+                        chapter.url,
+                        chapter.title,
+                        shaoniandream_cookies=shaoniandream_cookies,
+                    )
+                elif qidian_cookies is None:
                     result = await _fetch_chapter_data(client, chapter.url, chapter.title)
                 else:
                     result = await _fetch_chapter_data(
@@ -11632,16 +11658,24 @@ async def _fetch_ciweimao_chapter_data(
 async def _fetch_shaoniandream_chapter_data(
     client: httpx.AsyncClient,
     chapter_url: str,
+    cookies: dict[str, str] | None = None,
 ) -> ChapterFetchResult:
     chapter_id = shaoniandream_chapter_id_from_url(chapter_url)
     if not chapter_id:
         raise ValueError("无法识别少年梦章节链接")
-    text = await get_shaoniandream_chapter(client, chapter_id)
+    if cookies:
+        # Use a dedicated jar; credentials must never reach covers or another site's chapters.
+        async with _build_http_client() as authenticated:
+            for name, value in cookies.items():
+                authenticated.cookies.set(name, value, domain="www.shaoniandream.com", path="/")
+            text = await get_shaoniandream_chapter(authenticated, chapter_id)
+    else:
+        text = await get_shaoniandream_chapter(client, chapter_id)
     return ChapterFetchResult(
         text=text,
         image_urls=[],
         content_source="shaoniandream-encrypted-web-api",
-        authorization_method="anonymous-public",
+        authorization_method="shaoniandream-web-session" if cookies else "anonymous-public",
         access_restricted=False,
     )
 
@@ -11689,8 +11723,15 @@ async def _fetch_chapter_data(
     chapter_title: str = "",
     *,
     qidian_cookies: dict[str, str] | None = None,
+    shaoniandream_cookies: dict[str, str] | None = None,
 ) -> ChapterFetchResult:
     plugin = _require_enabled_site_plugin(chapter_url)
+    if plugin.origin == "installed":
+        from app.plugin_system.runtime import chapter_plugin
+        text, images = await chapter_plugin(plugin, chapter_url)
+        return ChapterFetchResult(
+            text=text or _manga_placeholder_text(chapter_title, len(images)), image_urls=images,
+        )
     if plugin.chapter_handler is None:
         raise ValueError(f"站点插件“{plugin.name}”当前只支持作品预览和搜索，尚未实现章节抓取")
     if plugin.chapter_handler == "fanqie":
@@ -11713,7 +11754,7 @@ async def _fetch_chapter_data(
     if plugin.chapter_handler == "ciweimao":
         return await _fetch_ciweimao_chapter_data(client, chapter_url)
     if plugin.chapter_handler == "shaoniandream":
-        return await _fetch_shaoniandream_chapter_data(client, chapter_url)
+        return await _fetch_shaoniandream_chapter_data(client, chapter_url, shaoniandream_cookies)
     if plugin.chapter_handler == "sfacg":
         return await _fetch_sfacg_chapter_data(client, chapter_url)
     if plugin.chapter_handler == "ehentai":

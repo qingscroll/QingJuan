@@ -2,6 +2,9 @@ import type {
   BackendUpdateStartPayload,
   BackendUpdateStartResponse,
   BackendUpdateStatus,
+  BackendServiceAction,
+  BackendServiceActionResponse,
+  BackendServiceStatus,
   Book,
   BookSource,
   ConnectionTokenStatus,
@@ -15,6 +18,7 @@ import type {
   Settings,
   SettingsUpdate,
   SitePlugin,
+  SitePluginPackageInspection,
   SitePluginAccount,
   SitePluginBookshelfImportJob,
   SitePluginLoginPoll,
@@ -74,6 +78,15 @@ export const getRuntimeLogs = (limit = 500): Promise<RuntimeLogBatch> =>
   request(`/admin/api/runtime-logs?limit=${encodeURIComponent(limit)}`);
 export const getServiceDiagnostics = (): Promise<ServiceDiagnostics> =>
   request("/admin/api/diagnostics");
+export const getBackendServiceStatus = (): Promise<BackendServiceStatus> =>
+  request("/admin/api/backend-service");
+export const controlBackendService = (
+  action: BackendServiceAction,
+): Promise<BackendServiceActionResponse> =>
+  request("/admin/api/backend-service/actions", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
 export const getBackendUpdateStatus = (): Promise<BackendUpdateStatus> =>
   request("/admin/api/backend-update");
 export const checkBackendUpdate = (): Promise<BackendUpdateStatus> =>
@@ -113,6 +126,19 @@ export const getBooks = (): Promise<Book[]> => request("/api/v1/books");
 export const getTasks = (): Promise<Task[]> => request("/api/v1/tasks");
 export const getSources = (): Promise<BookSource[]> => request("/api/v1/sources");
 export const getSitePlugins = (): Promise<SitePlugin[]> => request("/api/v1/plugins");
+export function inspectSitePluginPackage(file: File): Promise<SitePluginPackageInspection> {
+  const body = new FormData();
+  body.append("file", file);
+  return request("/api/v1/plugins/inspect", { method: "POST", body });
+}
+export function importSitePluginPackage(file: File, replace = false): Promise<SitePlugin> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("replace", String(replace));
+  return request("/api/v1/plugins/import", { method: "POST", body });
+}
+export const uninstallSitePlugin = (pluginId: string): Promise<void> =>
+  request(`/api/v1/plugins/${encodeURIComponent(pluginId)}`, { method: "DELETE" });
 export const getSettings = (): Promise<Settings> => request("/api/v1/settings");
 export const getTaskLogs = (taskId: string): Promise<TaskLog[]> =>
   request(`/api/v1/tasks/${encodeURIComponent(taskId)}/logs`);

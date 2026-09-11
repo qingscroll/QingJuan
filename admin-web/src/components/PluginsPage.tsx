@@ -18,6 +18,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 
 import * as api from "../api";
+import { PluginPackageImport } from "./PluginPackageImport";
 import type {
   SitePlugin,
   SitePluginBookshelfImportJob,
@@ -52,7 +53,7 @@ const capabilityLabel: Record<string, string> = {
 const terminalLoginStatuses = new Set(["success", "cancelled", "expired", "error"]);
 
 export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPageProps) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PluginFilter>("all");
   const [updating, setUpdating] = useState("");
@@ -251,6 +252,9 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
           <Space size={6} wrap>
             <Typography.Text strong>{plugin.name}</Typography.Text>
             <Tag>{plugin.id}</Tag>
+            <Tag color={plugin.origin === "installed" ? "purple" : "default"}>
+              {plugin.origin === "installed" ? "导入插件" : "内置"}
+            </Tag>
             {plugin.capabilities.includes("account_login") && (
               <Tag color={plugin.accountLoggedIn ? "green" : "default"}>
                 {plugin.accountLoggedIn ? "账号已登录" : "账号未登录"}
@@ -260,6 +264,8 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
           <Typography.Text type="secondary" ellipsis={{ tooltip: plugin.description }}>
             {plugin.description}
           </Typography.Text>
+          {plugin.author && <Typography.Text type="secondary">作者：{plugin.author}</Typography.Text>}
+          {plugin.loadError && <Typography.Text type="danger">{plugin.loadError}</Typography.Text>}
         </div>
       ),
     },
@@ -347,6 +353,31 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
       render: (version: string) => `v${version}`,
     },
     {
+      title: "安装管理",
+      key: "package-actions",
+      width: 100,
+      render: (_, plugin) => plugin.origin === "installed" ? (
+        <Button danger size="small" aria-label={`卸载${plugin.name}`} disabled={Boolean(updating)} onClick={() => modal.confirm({
+          title: `卸载${plugin.name}？`,
+          content: "卸载后该站点无法继续通过此插件解析或下载。已导入书籍和缓存章节会保留。",
+          okText: "卸载", cancelText: "取消", okButtonProps: { danger: true, "aria-label": "确认卸载插件" },
+          onOk: async () => {
+            setUpdating(plugin.id);
+            try {
+              await api.uninstallSitePlugin(plugin.id);
+            } catch (error) {
+              message.error(error instanceof Error ? error.message : "卸载失败");
+              throw error;
+            } finally {
+              setUpdating("");
+            }
+            message.success("插件已卸载");
+            await onDataChangedRef.current?.();
+          },
+        })}>卸载</Button>
+      ) : <Typography.Text type="secondary">随程序更新</Typography.Text>,
+    },
+    {
       title: "状态",
       key: "enabled",
       width: 138,
@@ -375,7 +406,7 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
         type="info"
         showIcon
         title="插件状态由当前 Linux 后端统一管理"
-        description="修改后会影响连接此服务的全部客户端；解析器随青卷发布，当前不支持安装、卸载或上传代码。"
+        description="支持导入、更新和卸载独立插件包，修改会影响连接此服务的全部客户端。内置解析器仍随青卷更新。"
       />
       <div className="table-panel">
         <div className="table-toolbar plugin-toolbar">
@@ -388,6 +419,7 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
             className="table-search"
           />
           <Typography.Text type="secondary">已启用 {counts.enabled} / 共 {plugins.length} 个</Typography.Text>
+          <PluginPackageImport onChanged={onDataChanged} />
         </div>
         <div className="plugin-filter-row">
           <Segmented<PluginFilter>

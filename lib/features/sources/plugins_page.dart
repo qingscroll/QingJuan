@@ -13,7 +13,9 @@ import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import 'sources_controller.dart';
+import 'widgets/plugin_browser_login_dialog.dart';
 import 'widgets/plugin_settings_widgets.dart';
+import 'widgets/plugin_package_widgets.dart';
 
 class PluginsPage extends StatefulWidget {
   const PluginsPage({this.onBack, super.key});
@@ -151,6 +153,10 @@ class _PluginsPageState extends State<PluginsPage> {
   ) {
     final supportsLogin = plugin.capabilities.contains('account_login');
     final supportsImport = plugin.capabilities.contains('bookshelf_import');
+    if (plugin.isInstalled) {
+      return PluginPackageUninstallButton(
+          plugin: plugin, controller: controller);
+    }
     if (!supportsLogin && !supportsImport) return null;
     return PluginAccountActions(
       plugin: plugin,
@@ -169,10 +175,13 @@ class _PluginsPageState extends State<PluginsPage> {
     SitePlugin plugin,
     SourcesController controller,
   ) {
-    Widget builder(BuildContext _) => _PluginQrLoginDialog(
-          plugin: plugin,
-          controller: controller,
-        );
+    Widget builder(BuildContext _) =>
+        plugin.capabilities.contains('browser_login')
+            ? PluginBrowserLoginDialog(plugin: plugin, controller: controller)
+            : _PluginQrLoginDialog(
+                plugin: plugin,
+                controller: controller,
+              );
     if (usesMobileUi(context)) {
       return showMobileSheet<void>(context: context, builder: builder);
     }
@@ -390,7 +399,8 @@ class _PluginsPageState extends State<PluginsPage> {
         title: usesMobileUi(context) ? '站点插件' : '插件配置',
         subtitle: usesMobileUi(context)
             ? '管理搜索、导入和账号书架所使用的解析器。'
-            : '启用当前后端需要使用的内置站点解析器。',
+            : '导入、更新和管理当前后端使用的站点解析器。',
+        command: PluginPackageImportButton(controller: controller),
         scrollable: false,
         maxContentWidth: usesMobileUi(context) ? null : _desktopContentMaxWidth,
         desktopHorizontalPadding: 24,

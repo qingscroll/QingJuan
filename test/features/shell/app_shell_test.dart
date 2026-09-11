@@ -206,7 +206,10 @@ void main() {
     expect(find.byKey(const ValueKey('auth-register-tab')), findsOneWidget);
   });
 
-  testWidgets('tablet uses persistent Fluent navigation pane', (tester) async {
+  testWidgets('Windows rail expands and still supports resizing',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     final harness = await _Harness.create(
       const Size(1280, 800),
       targetPlatform: TargetPlatform.windows,
@@ -217,9 +220,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
-    expect(view.pane?.displayMode, PaneDisplayMode.open);
-    expect(view.pane?.items, hasLength(7));
-    expect(view.pane?.footerItems, hasLength(1));
+    expect(view.pane?.displayMode, PaneDisplayMode.compact);
+    expect(view.pane?.items, hasLength(6));
+    expect(view.pane?.footerItems, hasLength(2));
     expect(find.byKey(const ValueKey('tablet-navigation')), findsOneWidget);
     expect(find.byKey(const ValueKey('mobile-app-bar')), findsNothing);
     expect(find.byKey(const ValueKey('desktop-title-bar')), findsOneWidget);
@@ -228,7 +231,7 @@ void main() {
     expect(find.byKey(const ValueKey('window-close')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('navigation-pane-resizer')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('navigation-pane-toggle')),
@@ -246,6 +249,22 @@ void main() {
           .map((text) => text.data),
       contains('漫画翻译'),
     );
+    await tester.tap(find.byKey(const ValueKey('navigation-pane-toggle')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final expanded = tester.widget<NavigationView>(find.byType(NavigationView));
+    expect(expanded.pane?.displayMode, PaneDisplayMode.open);
+    final previousWidth = expanded.pane!.size!.openWidth!;
+    await tester.drag(
+      find.byKey(const ValueKey('navigation-pane-resizer')),
+      const Offset(48, 0),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    final resized = tester.widget<NavigationView>(find.byType(NavigationView));
+    expect(resized.pane!.size!.openWidth, greaterThan(previousWidth));
+    await tester.tap(find.byKey(const ValueKey('navigation-pane-toggle')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const ValueKey('navigation-pane-resizer')), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('switching to Linux remote hides client plugin management',
@@ -268,7 +287,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 180));
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
-    expect(view.pane?.items, hasLength(6));
+    expect(view.pane?.items, hasLength(5));
     expect(
       view.pane?.items
           .whereType<PaneItem>()
@@ -304,6 +323,105 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('desktop navigation preserves shortcuts and library search',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final harness = await _Harness.create(
+      const Size(1280, 800),
+      targetPlatform: TargetPlatform.windows,
+      backendMode: BackendConnectionMode.local,
+      books: const <Book>[
+        Book(
+            id: 'one',
+            title: '山海之间',
+            sourceUrl: '',
+            kind: '小说',
+            language: '中文',
+            status: '已导入',
+            chapterCount: 12,
+            translated: false,
+            synopsis: '',
+            lastReadChapterIndex: 3),
+        Book(
+            id: 'two',
+            title: '春日来信',
+            sourceUrl: '',
+            kind: '小说',
+            language: '中文',
+            status: '已导入',
+            chapterCount: 10,
+            translated: false,
+            synopsis: '',
+            lastReadChapterIndex: 1),
+      ],
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpWidget(harness.widget);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.enterText(
+        find.byKey(const ValueKey('desktop-library-search')), '山海');
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('山海之间'), findsOneWidget);
+    expect(find.text('春日来信'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('desktop-navigation-settings')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(harness.appState.section, AppSection.settings);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit1);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(harness.appState.section, AppSection.library);
+    expect(
+        tester
+            .widget<TextBox>(
+                find.byKey(const ValueKey('desktop-library-search')))
+            .controller!
+            .text,
+        '山海');
+    expect(find.text('春日来信'), findsNothing);
+    await tester.enterText(
+        find.byKey(const ValueKey('desktop-library-search')), '');
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('春日来信'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('narrow dark Windows keeps labels at 200 percent text size',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(620, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final harness = await _Harness.create(
+      const Size(620, 720),
+      targetPlatform: TargetPlatform.windows,
+      backendMode: BackendConnectionMode.local,
+      brightness: Brightness.dark,
+      textScaler: const TextScaler.linear(2),
+      books: const <Book>[
+        Book(
+            id: 'long',
+            title: '山海之间的一封很长很长的中文来信',
+            sourceUrl: '',
+            kind: '小说',
+            language: '中文',
+            status: '已导入',
+            chapterCount: 12,
+            translated: true,
+            synopsis: '',
+            lastReadChapterIndex: 3,
+            lastReadAt: '2026-09-10T10:00:00'),
+      ],
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpWidget(harness.widget);
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.text('书源管理'), findsOneWidget);
+    expect(find.text('漫画翻译'), findsOneWidget);
+    expect(find.text('设置'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('mobile-bottom-navigation')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('phone settings opens cross-platform project information',
       (tester) async {
     MethodCall? clipboardCall;
@@ -330,7 +448,7 @@ void main() {
 
     expect(find.text('关于青卷'), findsOneWidget);
     expect(find.text('Windows 10 / 11 · Android 8.0+'), findsOneWidget);
-    expect(find.text('https://github.com/Tavre/QingJuan'), findsOneWidget);
+    expect(find.text('https://github.com/qingscroll/QingJuan'), findsOneWidget);
 
     await tester.binding.handlePopRoute();
     await tester.pump(const Duration(milliseconds: 600));
@@ -341,7 +459,7 @@ void main() {
 
     await tester.tap(
       find.byKey(
-        const ValueKey('copy-https://github.com/Tavre/QingJuan'),
+        const ValueKey('copy-https://github.com/qingscroll/QingJuan'),
       ),
     );
     await tester.pumpAndSettle();

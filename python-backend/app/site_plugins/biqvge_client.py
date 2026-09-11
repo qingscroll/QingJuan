@@ -91,7 +91,18 @@ SITES: dict[SiteId, SiteConfig] = {
 CATALOG_TTL_SECONDS = 30 * 60
 SEARCH_RESULT_TTL_SECONDS = 30
 MAX_SEARCH_RESULT_CACHE_ENTRIES = 256
-SITE_FAILURE_COOLDOWN_SECONDS = 60
+TXT80_SEARCH_ROUTE_TTL_SECONDS = 30 * 60
+_TXT80_SEARCH_FALLBACK_PATHS = (
+    "/searchf0.html",
+    "/search.html",
+    "/so.html",
+    "/search/",
+)
+_SITE_FAILURE_COOLDOWN_SECONDS: dict[SiteId, float] = {
+    "txt80": 60,
+    "b520": 5 * 60,
+    "blqukan": 5 * 60,
+}
 _SEARCH_TIMEOUT_SECONDS: dict[SiteId, float] = {
     "txt80": 15.0,
     "b520": 10.0,
@@ -100,6 +111,7 @@ _SEARCH_TIMEOUT_SECONDS: dict[SiteId, float] = {
 _CATALOG_CACHE: dict[SiteId, tuple[float, list[dict[str, Any]]]] = {}
 _SEARCH_RESULT_CACHE: dict[tuple[SiteId, str], tuple[float, list[dict[str, Any]]]] = {}
 _SITE_FAILURE_CACHE: dict[SiteId, tuple[float, str]] = {}
+_TXT80_SEARCH_ROUTE_CACHE: tuple[float, str] | None = None
 _CATALOG_CACHE_LOCK = threading.Lock()
 _TXT80_BOOK_PATH = re.compile(r"^/txt/(?P<book_id>\d+)\.html/?$", re.IGNORECASE)
 _TXT80_CHAPTER_PATH = re.compile(
@@ -115,10 +127,12 @@ _MIRROR_CHAPTER_PATH = re.compile(
 
 
 def clear_catalog_cache() -> None:
+    global _TXT80_SEARCH_ROUTE_CACHE
     with _CATALOG_CACHE_LOCK:
         _CATALOG_CACHE.clear()
         _SEARCH_RESULT_CACHE.clear()
         _SITE_FAILURE_CACHE.clear()
+        _TXT80_SEARCH_ROUTE_CACHE = None
 
 
 def _site_config(site: str) -> SiteConfig:
@@ -277,13 +291,31 @@ def parse_search_page(html: str, site: str) -> list[dict[str, Any]]:
             muted = author_line.select_one(".s_gray")
             muted_text = muted.get_text(" ", strip=True) if muted else ""
             author = _clean_text(author_line.get_text(" ", strip=True).replace(muted_text, ""))
-        category_node = item.select_one(".img_span span")
+        category_node = item.select_one(".img_span span") or next(
+            (
+                node
+                for node in item.select("span")
+                if "/" in _clean_text(node.get_text(" ", strip=True))
+            ),
+            None,
+        )
         category, status = _category_parts(category_node.get_text(" ", strip=True) if category_node else "")
         intro_node = item.select_one(".searchresult_p")
         image = item.select_one("img")
         cover = ""
         if image is not None:
             cover = str(image.get("data-original") or image.get("data-src") or image.get("src") or "")
+        latest_chapter = ""
+        latest_chapter_id = ""
+        latest_chapter_url = ""
+        for chapter_link in item.select(f"a[href*='/read/{book_id}/']"):
+            absolute_chapter_url = urljoin(config.origin, str(chapter_link.get("href") or ""))
+            chapter = book_resource_from_url(absolute_chapter_url)
+            if chapter is None or chapter.book_id != book_id or chapter.chapter_id is None:
+                continue
+            latest_chapter = _clean_text(chapter_link.get_text(" ", strip=True))
+            latest_chapter_id = chapter.chapter_id
+            latest_chapter_url = canonical_chapter_url(config.id, book_id, chapter.chapter_id)
         results.append(
             {
                 "site": config.id,
@@ -295,6 +327,9 @@ def parse_search_page(html: str, site: str) -> list[dict[str, Any]]:
                 "status": status,
                 "synopsis": _clean_text(intro_node.get_text(" ", strip=True) if intro_node else ""),
                 "cover": _absolute_site_url(config, cover),
+                "latest_chapter": latest_chapter,
+                "latest_chapter_id": latest_chapter_id,
+                "latest_chapter_url": latest_chapter_url,
                 "url": canonical_book_url(config.id, book_id),
             }
         )
@@ -320,6 +355,9 @@ def parse_search_page(html: str, site: str) -> list[dict[str, Any]]:
                 "status": "",
                 "synopsis": "",
                 "cover": "",
+                "latest_chapter": "",
+                "latest_chapter_id": "",
+                "latest_chapter_url": "",
                 "url": canonical_book_url(config.id, resource.book_id),
             }
         )
@@ -395,6 +433,8 @@ def parse_book_page(html: str, source_url: str) -> dict[str, Any]:
         title_node = soup.select_one("#info h1, .book-info h1, h1")
         title = _clean_text(title_node.get_text(" ", strip=True) if title_node else "")
     author = _meta_content(soup, "og:novel:author") or _fallback_author(soup)
+    category = _meta_content(soup, "og:novel:category")
+    status = _meta_content(soup, "og:novel:status")
     synopsis = _meta_content(soup, "og:description")
     if not synopsis:
         synopsis_node = soup.select_one("#intro, .intro, .book-intro, .bookintro")
@@ -404,6 +444,18 @@ def parse_book_page(html: str, source_url: str) -> dict[str, Any]:
         image = soup.select_one("#fmimg img, .book-cover img, .book-info img")
         if image is not None:
             cover = str(image.get("data-original") or image.get("data-src") or image.get("src") or "")
+    latest_chapter = _meta_content(soup, "og:novel:latest_chapter_name") or _meta_content(
+        soup, "og:novel:lastest_chapter_name"
+    )
+    latest_chapter_url = _meta_content(soup, "og:novel:latest_chapter_url") or _meta_content(
+        soup, "og:novel:lastest_chapter_url"
+    )
+    latest_resource = book_resource_from_url(urljoin(book_url, latest_chapter_url)) if latest_chapter_url else None
+    latest_chapter_id = (
+        latest_resource.chapter_id
+        if latest_resource is not None and latest_resource.book_id == resource.book_id
+        else ""
+    )
 
     chapters: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -456,9 +508,15 @@ def parse_book_page(html: str, source_url: str) -> dict[str, Any]:
         "book_id": resource.book_id,
         "title": title,
         "author": author,
+        "category": category,
+        "status": status,
         "synopsis": synopsis,
         "cover": _absolute_site_url(config, cover),
+        "latest_chapter": latest_chapter,
+        "latest_chapter_id": latest_chapter_id,
+        "update_time": _meta_content(soup, "og:novel:update_time"),
         "url": book_url,
+        "count": len(chapters),
         "chapters": chapters,
     }
 
@@ -483,12 +541,41 @@ def parse_chapter_page(html: str, source_url: str) -> dict[str, Any]:
     content_node = (
         soup.select_one("article#article") if resource.site == "txt80" else soup.select_one("#content")
     )
+    book_title = _meta_content(soup, "og:novel:book_name") or _meta_content(soup, "og:title")
+    if not book_title:
+        book_url = canonical_book_url(resource.site, resource.book_id)
+        for link in soup.select(".con_top a[href], .breadcrumb a[href]"):
+            absolute = urljoin(source_url, str(link.get("href") or ""))
+            if canonical_book_url_from_url(absolute) == book_url:
+                book_title = _clean_text(link.get_text(" ", strip=True))
+                if book_title:
+                    break
+
+    def navigation_url(selector: str) -> str:
+        link = soup.select_one(selector)
+        if link is None:
+            return ""
+        absolute = urljoin(source_url, str(link.get("href") or ""))
+        navigation = book_resource_from_url(absolute)
+        if (
+            navigation is None
+            or navigation.site != resource.site
+            or navigation.book_id != resource.book_id
+            or navigation.chapter_id is None
+        ):
+            return ""
+        return absolute
+
     return {
         "site": resource.site,
         "book_id": resource.book_id,
         "chapter_id": resource.chapter_id,
+        "book_title": book_title,
         "title": _clean_text(title_node.get_text(" ", strip=True) if title_node else ""),
         "text": _chapter_text(content_node),
+        "prev_url": navigation_url("#prev_url[href]"),
+        "next_url": navigation_url("#next_url[href]"),
+        "pages": 1,
     }
 
 
@@ -549,12 +636,66 @@ async def _fetch_text(
     raise BiqvgeError(f"{config.name}重定向次数过多")
 
 
+async def _discover_txt80_search_url(client: httpx.AsyncClient) -> str:
+    global _TXT80_SEARCH_ROUTE_CACHE
+
+    config = SITES["txt80"]
+    now = time.monotonic()
+    with _CATALOG_CACHE_LOCK:
+        cached = _TXT80_SEARCH_ROUTE_CACHE
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    search_url = ""
+    try:
+        homepage = await _fetch_text(client, config, f"{config.origin}/")
+    except BiqvgeError:
+        homepage = ""
+    if homepage:
+        soup = BeautifulSoup(homepage, "html.parser")
+        for form in soup.select("form[action]"):
+            action = str(form.get("action") or "").strip()
+            if "search" not in action.casefold():
+                continue
+            candidate = urljoin(f"{config.origin}/", action)
+            resolved_site = _site_from_url(candidate)
+            if resolved_site is not None and resolved_site.id == config.id:
+                search_url = candidate
+                break
+
+    if not search_url:
+        for path in _TXT80_SEARCH_FALLBACK_PATHS:
+            candidate = urljoin(f"{config.origin}/", path.lstrip("/"))
+            try:
+                await _fetch_text(
+                    client,
+                    config,
+                    candidate,
+                    method="POST",
+                    data={"searchkey": "测试", "searchtype": "all"},
+                )
+            except BiqvgeError:
+                continue
+            search_url = candidate
+            break
+
+    if not search_url:
+        raise BiqvgeError("八零小说网搜索入口不可用")
+    with _CATALOG_CACHE_LOCK:
+        _TXT80_SEARCH_ROUTE_CACHE = (
+            time.monotonic() + TXT80_SEARCH_ROUTE_TTL_SECONDS,
+            search_url,
+        )
+    return search_url
+
+
 async def _search_txt80(client: httpx.AsyncClient, keyword: str) -> list[dict[str, Any]]:
     config = SITES["txt80"]
+    search_url = await _discover_txt80_search_url(client)
     html = await _fetch_text(
         client,
         config,
-        f"{config.origin}/search19.html",
+        search_url,
         method="POST",
         data={"searchkey": keyword, "searchtype": "all"},
     )
@@ -587,25 +728,42 @@ async def _mirror_catalog(client: httpx.AsyncClient, site: SiteId) -> list[dict[
         if cached is not None and cached[0] > now:
             return [dict(item) for item in cached[1]]
 
-    async def load(path: str) -> list[dict[str, Any]]:
-        html = await _fetch_text(client, config, urljoin(f"{config.origin}/", path.lstrip("/")))
-        return parse_catalog_page(html, config.id, _category_from_path(path))
-
-    responses = await asyncio.gather(*(load(path) for path in config.catalog_paths), return_exceptions=True)
-    successful = [value for value in responses if isinstance(value, list)]
-    if not successful:
-        errors = [str(value) for value in responses if isinstance(value, Exception)]
-        raise BiqvgeError(errors[0] if errors else f"{config.name}目录不可用")
-
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for values in successful:
+    errors: list[str] = []
+    successful_pages = 0
+    consecutive_network_errors = 0
+    consecutive_http_errors = 0
+    for path in config.catalog_paths:
+        url = urljoin(f"{config.origin}/", path.lstrip("/"))
+        try:
+            html = await _fetch_text(client, config, url)
+        except BiqvgeError as exc:
+            errors.append(str(exc))
+            root_cause = exc.__cause__
+            if isinstance(root_cause, httpx.RequestError):
+                consecutive_network_errors += 1
+                consecutive_http_errors = 0
+                if consecutive_network_errors >= 2:
+                    break
+            else:
+                consecutive_http_errors += 1
+                consecutive_network_errors = 0
+                if consecutive_http_errors >= 3:
+                    break
+            continue
+        successful_pages += 1
+        consecutive_network_errors = 0
+        consecutive_http_errors = 0
+        values = parse_catalog_page(html, config.id, _category_from_path(path))
         for item in values:
             book_id = str(item.get("book_id") or "")
             if not book_id or book_id in seen:
                 continue
             seen.add(book_id)
             items.append(item)
+    if successful_pages == 0 or (not items and errors):
+        raise BiqvgeError(errors[0] if errors else f"{config.name}目录不可用")
     with _CATALOG_CACHE_LOCK:
         _CATALOG_CACHE[site] = (time.monotonic() + CATALOG_TTL_SECONDS, items)
     return [dict(item) for item in items]
@@ -672,7 +830,7 @@ async def search_books(
             message = str(exc).strip() or f"{SITES[site].name}搜索超时"
             with _CATALOG_CACHE_LOCK:
                 _SITE_FAILURE_CACHE[site] = (
-                    time.monotonic() + SITE_FAILURE_COOLDOWN_SECONDS,
+                    time.monotonic() + _SITE_FAILURE_COOLDOWN_SECONDS[site],
                     message,
                 )
             raise BiqvgeError(message) from exc

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
 import 'mobile_tokens.dart';
 
-// Navigation occupies its own Scaffold slot; lists need only an end gutter.
-double mobileNavigationClearance(BuildContext context) => 24;
+// Scaffold.extendBody includes the floating navigation and system inset in
+// MediaQuery padding. Keep the last item scrollable above both, with a gutter.
+double mobileNavigationClearance(BuildContext context) =>
+    MediaQuery.paddingOf(context).bottom + 24;
 
 class MobileCard extends StatelessWidget {
   const MobileCard({

@@ -4,41 +4,51 @@ import 'package:flutter_miuix/miuix.dart';
 
 import '../app/app_scope.dart';
 import '../core/models/book.dart';
+import '../core/models/book_import_source.dart';
 import 'mobile_action_button.dart';
 import 'mobile_import_progress.dart';
 import 'mobile_preferences.dart';
 import 'mobile_sheet.dart';
 
 Future<Book?> showMobileImportSheet(BuildContext context) async {
-  final local = await showMobileSheet<bool>(
+  final mode = await showMobileSheet<String>(
     context: context,
     title: '导入作品',
     child: Column(children: <Widget>[
       ListTile(
           leading: const Icon(Icons.link_rounded),
           title: const Text('作品链接'),
-          subtitle: const Text('粘贴小说或漫画的作品地址'),
+          subtitle: const Text('粘贴作品地址，也支持禁漫本子号'),
           minVerticalPadding: 16,
-          onTap: () => Navigator.pop(context, false)),
+          onTap: () => Navigator.pop(context, 'link')),
+      const Divider(height: 1),
+      ListTile(
+          leading: const Icon(Icons.numbers_rounded),
+          title: const Text('禁漫本子号'),
+          subtitle: const Text('输入编号，获取章节和漫画图片'),
+          minVerticalPadding: 16,
+          onTap: () => Navigator.pop(context, 'comic18')),
       const Divider(height: 1),
       ListTile(
           leading: const Icon(Icons.upload_file_outlined),
           title: const Text('本地文件'),
           subtitle: const Text('TXT、DOCX、EPUB、PDF'),
           minVerticalPadding: 16,
-          onTap: () => Navigator.pop(context, true)),
+          onTap: () => Navigator.pop(context, 'local')),
     ]),
   );
-  if (!context.mounted || local == null) return null;
-  return Navigator.of(context).push<Book>(
-      MaterialPageRoute<Book>(builder: (_) => MobileImportPage(local: local)));
+  if (!context.mounted || mode == null) return null;
+  return Navigator.of(context).push<Book>(MaterialPageRoute<Book>(
+      builder: (_) => MobileImportPage(
+          local: mode == 'local', comic18: mode == 'comic18')));
 }
 
 /// Complex import options have their own route, so keyboard and back navigation
 /// remain predictable while the lightweight entry chooser stays short.
 class MobileImportPage extends StatefulWidget {
-  const MobileImportPage({this.local = false, super.key});
+  const MobileImportPage({this.local = false, this.comic18 = false, super.key});
   final bool local;
+  final bool comic18;
   @override
   State<MobileImportPage> createState() => _MobileImportPageState();
 }
@@ -56,6 +66,9 @@ class _MobileImportPageState extends State<MobileImportPage> {
   bool _submitted = false;
   bool _selectingFile = false;
   String? _error;
+
+  bool get _isComic18 =>
+      !widget.local && (widget.comic18 || isComic18Source(_urlController.text));
 
   @override
   void dispose() {
@@ -124,13 +137,12 @@ class _MobileImportPageState extends State<MobileImportPage> {
         if (mounted) Navigator.pop(context, book);
       } else {
         await scope.library.startLinkJob('import', <String, dynamic>{
-          'sourceUrl': _urlController.text.trim(),
-          'bookKind': _kind,
+          ...bookImportSourcePayload(_urlController.text, _kind),
           'title': _titleController.text.trim(),
           'language': _language,
           'needTranslation': _translate &&
               scope.backend.translationModelCheck?.available == true,
-          'downloadMode': _downloadMode,
+          'downloadMode': _isComic18 ? 'all' : _downloadMode,
         });
         if (mounted) setState(() => _submitted = true);
       }
@@ -148,7 +160,11 @@ class _MobileImportPageState extends State<MobileImportPage> {
     return Scaffold(
       backgroundColor: theme.colors.background,
       appBar: AppBar(
-          title: Text(widget.local ? '导入文件' : '导入链接'),
+          title: Text(widget.local
+              ? '导入文件'
+              : widget.comic18
+                  ? '禁漫本子号'
+                  : '导入链接'),
           backgroundColor: theme.colors.background,
           foregroundColor: theme.colors.onBackground,
           elevation: 0,
@@ -178,7 +194,9 @@ class _MobileImportPageState extends State<MobileImportPage> {
                                   Text(
                                       widget.local
                                           ? '把设备上的作品加入个人书库。'
-                                          : '填写作品地址，青卷会在服务端解析目录。',
+                                          : _isComic18
+                                              ? '输入本子号，青卷会获取作品目录和漫画图片。导入任务收起后仍会继续。'
+                                              : '填写作品地址或禁漫本子号，青卷会在服务端解析目录。',
                                       style: theme.textStyles.body2.copyWith(
                                           color:
                                               theme.colors.onBackgroundVariant,
@@ -208,28 +226,27 @@ class _MobileImportPageState extends State<MobileImportPage> {
                                             const ValueKey('mobile-import-url'),
                                         controller: _urlController,
                                         enabled: !_busy,
-                                        keyboardType: TextInputType.url,
+                                        keyboardType: widget.comic18
+                                            ? TextInputType.number
+                                            : TextInputType.url,
                                         textInputAction: TextInputAction.next,
                                         autocorrect: false,
                                         maxLines: 2,
                                         minLines: 1,
-                                        decoration: const InputDecoration(
-                                            labelText: '作品地址',
-                                            hintText: 'https://',
-                                            helperText: '使用作品主页或目录地址'),
+                                        decoration: InputDecoration(
+                                            labelText: widget.comic18
+                                                ? '本子号'
+                                                : '作品地址 / 禁漫本子号',
+                                            hintText: widget.comic18
+                                                ? '输入纯数字编号'
+                                                : 'https://... 或纯数字本子号',
+                                            helperText: widget.comic18
+                                                ? '输入专辑编号，不是章节编号'
+                                                : '使用作品主页、目录地址，或纯数字本子号'),
                                         onChanged: (_) => setState(() {}),
-                                        validator: (value) {
-                                          final uri =
-                                              Uri.tryParse(value?.trim() ?? '');
-                                          return uri != null &&
-                                                  const <String>[
-                                                    'http',
-                                                    'https'
-                                                  ].contains(uri.scheme) &&
-                                                  uri.host.isNotEmpty
-                                              ? null
-                                              : '请输入完整的 HTTP 或 HTTPS 作品地址';
-                                        },
+                                        validator: (value) =>
+                                            bookImportSourceError(value,
+                                                albumOnly: widget.comic18),
                                       ),
                                     const SizedBox(height: 20),
                                     TextFormField(
@@ -250,9 +267,10 @@ class _MobileImportPageState extends State<MobileImportPage> {
                                                 '轻小说',
                                                 '漫画'
                                               ],
-                                              _kind,
-                                              (value) => setState(
-                                                  () => _kind = value)),
+                                              _isComic18 ? '漫画' : _kind,
+                                              (value) =>
+                                                  setState(() => _kind = value),
+                                              enabled: !_isComic18),
                                           _choice(
                                               '原文语言',
                                               const <String>['中文', '英文', '日文'],
@@ -351,12 +369,12 @@ class _MobileImportPageState extends State<MobileImportPage> {
 
   Widget _choice(String label, List<String> values, String value,
           ValueChanged<String> onChanged,
-          {List<String>? labels}) =>
+          {List<String>? labels, bool enabled = true}) =>
       MiuixOverlayDropdownPreference(
         title: label,
         items: labels ?? values,
         selectedIndex: values.indexOf(value).clamp(0, values.length - 1),
         onSelectedIndexChange: (index) => onChanged(values[index]),
-        enabled: !_busy,
+        enabled: !_busy && enabled,
       );
 }

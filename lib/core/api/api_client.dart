@@ -702,6 +702,50 @@ class ApiClient {
     return _list(payload).map(SitePlugin.fromJson).toList();
   }
 
+  Future<JsonMap> _uploadPluginPackage(
+      String operation, List<int> bytes, String filename,
+      {bool replace = false}) async {
+    if (bytes.isEmpty || bytes.length > 2 * 1024 * 1024) {
+      throw const ApiException('插件包不能为空且不能超过 2 MiB');
+    }
+    final request = http.MultipartRequest('POST', _uri('/plugins/$operation'))
+      ..headers.addAll(_headers())
+      ..followRedirects = false
+      ..fields['replace'] = '$replace'
+      ..files
+          .add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed =
+        await _client.send(request).timeout(const Duration(seconds: 60));
+    return _map(_decode(await http.Response.fromStream(streamed)
+        .timeout(const Duration(seconds: 60))));
+  }
+
+  Future<SitePluginPackageInspection> inspectSitePluginPackage(
+          List<int> bytes, String filename) async =>
+      SitePluginPackageInspection.fromJson(
+          await _uploadPluginPackage('inspect', bytes, filename));
+
+  Future<SitePlugin> importSitePluginPackage(List<int> bytes, String filename,
+          {bool replace = false}) async =>
+      SitePlugin.fromJson(await _uploadPluginPackage('import', bytes, filename,
+          replace: replace));
+
+  Future<void> uninstallSitePlugin(String pluginId) async {
+    _decode(
+        await _request('DELETE', '/plugins/${Uri.encodeComponent(pluginId)}'));
+  }
+
+  Future<List<SourceSearchResult>> searchInstalledPlugins(
+      String keyword) async {
+    final payload = _decode(await _request(
+      'POST',
+      '/plugins/search',
+      body: <String, dynamic>{'keyword': keyword, 'limit': 60},
+      timeout: const Duration(seconds: 60),
+    ));
+    return _list(payload).map(SourceSearchResult.fromJson).toList();
+  }
+
   Future<SitePlugin> saveSitePluginEnabled(
       String pluginId, bool enabled) async {
     final payload = _decode(
@@ -727,6 +771,49 @@ class ApiClient {
       await _request('POST', '/plugins/$encodedId/account/login-qrcode'),
     );
     return SitePluginLoginQrCode.fromJson(_map(payload));
+  }
+
+  Future<SitePluginBrowserLogin> startSitePluginBrowserLogin(
+      String pluginId) async {
+    final current = captureContextGuard();
+    final base = _baseUrl().replaceAll(RegExp(r'/+$'), '');
+    final encoded = Uri.encodeComponent(pluginId);
+    final payload = _map(_decode(await _request(
+      'POST',
+      '/plugins/$encoded/account/login-browser',
+    )));
+    if (!current()) throw const ApiException('后端或账号已切换，请重新登录');
+    final token = payload['browserToken'] as String? ?? '';
+    final flowId = payload['flowId'] as String? ?? '';
+    final expiry = DateTime.tryParse(payload['expiresAt'] as String? ?? '');
+    if (!RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(token) ||
+        flowId.isEmpty ||
+        expiry == null) {
+      throw const ApiException('登录响应无效，请重试');
+    }
+    return SitePluginBrowserLogin(
+      flowId: flowId,
+      verificationUri:
+          Uri.parse('$base/site-login/$encoded').replace(fragment: token),
+      expiresAt: expiry,
+    );
+  }
+
+  Future<SitePluginLoginPoll> pollSitePluginBrowserLogin(
+      String pluginId, String flowId) async {
+    final plugin = Uri.encodeComponent(pluginId);
+    final flow = Uri.encodeComponent(flowId);
+    return SitePluginLoginPoll.fromJson(_map(_decode(await _request(
+      'GET',
+      '/plugins/$plugin/account/login-browser/$flow',
+    ))));
+  }
+
+  Future<void> cancelSitePluginBrowserLogin(
+      String pluginId, String flowId) async {
+    final plugin = Uri.encodeComponent(pluginId);
+    final flow = Uri.encodeComponent(flowId);
+    await _request('DELETE', '/plugins/$plugin/account/login-browser/$flow');
   }
 
   Future<SitePluginLoginPoll> pollSitePluginLogin(

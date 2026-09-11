@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:app_links/app_links.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -8,11 +9,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/api/api_client.dart';
 import '../core/backend/backend_connection_manager.dart';
+import '../core/backend/backend_connection_link.dart';
 import '../core/backend/backend_url_validator.dart';
 import '../core/backend/connection_secret_store.dart';
 import '../core/backend/device_identity.dart';
 import '../core/backend/local_backend_process.dart';
 import '../core/backend/user_session_store.dart';
+import '../core/updates/app_update_controller.dart';
+import '../features/settings/widgets/app_update_card.dart';
 import '../features/auth/auth_controller.dart';
 import '../features/library/library_controller.dart';
 import '../features/manga_translation/manga_translation_coordinator.dart';
@@ -21,6 +25,7 @@ import '../features/shell/app_shell.dart';
 import '../features/sources/sources_controller.dart';
 import '../features/tasks/tasks_controller.dart';
 import '../mobile/mobile_app.dart';
+import '../mobile/mobile_my_page.dart';
 import '../shared/desktop_title_bar.dart';
 import '../shared/responsive.dart';
 import 'app_scope.dart';
@@ -38,6 +43,7 @@ class QingJuanApp extends StatefulWidget {
     required this.tasks,
     required this.settings,
     required this.mangaTranslation,
+    this.updates,
   });
 
   @visibleForTesting
@@ -51,6 +57,7 @@ class QingJuanApp extends StatefulWidget {
     required TasksController tasks,
     required SettingsController settings,
     MangaTranslationCoordinator? mangaTranslation,
+    AppUpdateController? updates,
   }) =>
       QingJuanApp._(
         appState: appState,
@@ -62,6 +69,7 @@ class QingJuanApp extends StatefulWidget {
         tasks: tasks,
         settings: settings,
         mangaTranslation: mangaTranslation ?? MangaTranslationCoordinator(api),
+        updates: updates,
       );
 
   static Future<QingJuanApp> bootstrap() async {
@@ -105,6 +113,10 @@ class QingJuanApp extends StatefulWidget {
       sources: SourcesController(api),
       tasks: TasksController(api),
       settings: SettingsController(api),
+      updates: AppUpdateController.production(exitForInstall: () async {
+        await backend.dispose();
+        exit(0);
+      }),
       mangaTranslation: MangaTranslationCoordinator(
         api,
         preferences: preferences,
@@ -121,6 +133,7 @@ class QingJuanApp extends StatefulWidget {
   final TasksController tasks;
   final SettingsController settings;
   final MangaTranslationCoordinator mangaTranslation;
+  final AppUpdateController? updates;
 
   @override
   State<QingJuanApp> createState() => _QingJuanAppState();
@@ -135,13 +148,25 @@ class _QingJuanAppState extends State<QingJuanApp> {
   int _handledReadyEpoch = 0;
   int _activationEpochInProgress = 0;
   bool _initializing = true;
+  StreamSubscription<Uri>? _connectionLinkSubscription;
+  BackendConnectionLink? _pendingConnectionLink;
+  bool _showingConnectionLink = false;
 
   @override
   void initState() {
     super.initState();
     widget.auth.addListener(_handleAuthChanged);
     widget.backend.addListener(_handleBackendChanged);
+    if (Platform.isAndroid) {
+      _connectionLinkSubscription = AppLinks().uriLinkStream.listen(
+            _receiveConnectionLink,
+            onError: (Object _) =>
+                widget.appState.showNotice('无法读取连接链接，请在服务连接中重新扫码。'),
+          );
+    }
     unawaited(_initialize());
+    // This check is independent of backend availability and account login.
+    unawaited(widget.updates?.checkOnStartup());
   }
 
   Future<void> _initialize() async {
@@ -160,6 +185,43 @@ class _QingJuanAppState extends State<QingJuanApp> {
     }
     if (!mounted) return;
     await _synchronizeWorkspace();
+    _openPendingConnectionLink();
+  }
+
+  void _receiveConnectionLink(Uri uri) {
+    try {
+      _pendingConnectionLink = BackendConnectionLink.parse(uri.toString());
+      _openPendingConnectionLink();
+    } on FormatException {
+      widget.appState.showNotice('连接链接无效，请扫描 PC 设置中的二维码。');
+    }
+  }
+
+  void _openPendingConnectionLink() {
+    if (!mounted ||
+        _initializing ||
+        _activationEpochInProgress != 0 ||
+        _showingConnectionLink ||
+        _pendingConnectionLink == null) {
+      return;
+    }
+    _showingConnectionLink = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final context = _navigatorKey.currentState?.overlay?.context;
+      if (!mounted || context == null) {
+        _showingConnectionLink = false;
+        return;
+      }
+      final link = _pendingConnectionLink;
+      _pendingConnectionLink = null;
+      try {
+        await showMobileConnectionPage(context, connectionLink: link);
+      } finally {
+        _showingConnectionLink = false;
+        _openPendingConnectionLink();
+      }
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   void _handleAuthChanged() {
@@ -215,6 +277,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     } finally {
       if (_activationEpochInProgress == readyEpoch) {
         _activationEpochInProgress = 0;
+        _openPendingConnectionLink();
       }
     }
   }
@@ -292,6 +355,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
 
   @override
   void dispose() {
+    unawaited(_connectionLinkSubscription?.cancel());
     _backendActivationOperation += 1;
     _workspaceGeneration += 1;
     widget.auth.removeListener(_handleAuthChanged);
@@ -301,6 +365,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
     widget.tasks.dispose();
     widget.settings.dispose();
     widget.mangaTranslation.dispose();
+    widget.updates?.dispose();
     widget.auth.dispose();
     unawaited(widget.backend.dispose());
     widget.api.close();
@@ -320,6 +385,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
       tasks: widget.tasks,
       settings: widget.settings,
       mangaTranslation: widget.mangaTranslation,
+      updates: widget.updates,
       child: AnimatedBuilder(
         animation: widget.appState.themeModeListenable,
         builder: (context, _) {
@@ -347,7 +413,14 @@ class _QingJuanAppState extends State<QingJuanApp> {
             builder: (context, child) => UiPlatformScope(
               platform: defaultTargetPlatform,
               child: DesktopWindowFrame(
-                child: child ?? const SizedBox.shrink(),
+                child: Column(children: <Widget>[
+                  if (widget.updates case final updates?)
+                    AppUpdateBanner(
+                        controller: updates,
+                        onOpenSettings: () =>
+                            widget.appState.selectSection(AppSection.settings)),
+                  Expanded(child: child ?? const SizedBox.shrink()),
+                ]),
               ),
             ),
             home: _buildPlatformHome(),

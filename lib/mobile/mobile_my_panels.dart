@@ -101,7 +101,8 @@ class _ThemeCard extends StatelessWidget {
 }
 
 class _BackendSettingsPanel extends StatefulWidget {
-  const _BackendSettingsPanel();
+  const _BackendSettingsPanel({this.connectionLink});
+  final BackendConnectionLink? connectionLink;
   @override
   State<_BackendSettingsPanel> createState() => _BackendSettingsPanelState();
 }
@@ -120,8 +121,12 @@ class _BackendSettingsPanelState extends State<_BackendSettingsPanel> {
     if (_initialized) return;
     _initialized = true;
     final app = AppScope.of(context).appState;
-    _urlController.text = app.remoteBackendUrl;
-    _tokenController.text = app.remoteBackendToken;
+    _urlController.text = widget.connectionLink?.url ?? app.remoteBackendUrl;
+    _tokenController.text =
+        widget.connectionLink?.token ?? app.remoteBackendToken;
+    if (widget.connectionLink != null) {
+      _message = '已读取连接链接，请核对服务地址后点击“验证并连接”。';
+    }
   }
 
   @override
@@ -192,6 +197,39 @@ class _BackendSettingsPanelState extends State<_BackendSettingsPanel> {
     }
   }
 
+  Future<void> _scan() async {
+    final link = await Navigator.of(context).push<BackendConnectionLink>(
+      MaterialPageRoute(builder: (_) => const MobileConnectionScanner()),
+    );
+    if (!mounted || link == null) return;
+    _importLink(link);
+  }
+
+  void _importLink(BackendConnectionLink link) {
+    setState(() {
+      _urlController.text = link.url;
+      _tokenController.text = link.token;
+      _revealToken = false;
+      _failed = false;
+      _message = '已读取连接链接，请核对服务地址后点击“验证并连接”。';
+    });
+  }
+
+  Future<void> _pasteLink() async {
+    try {
+      final clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+      final link = BackendConnectionLink.parse(clipboard?.text ?? '');
+      if (mounted) _importLink(link);
+    } on Object {
+      if (mounted) {
+        setState(() {
+          _failed = true;
+          _message = '未找到有效的青卷连接链接，请在 PC 设置中复制连接链接。';
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final scope = AppScope.of(context);
@@ -206,7 +244,23 @@ class _BackendSettingsPanelState extends State<_BackendSettingsPanel> {
                           .title4
                           .copyWith(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 8),
-                  const Text('输入管理员提供的地址和连接密钥。验证成功后登录账号，书库与进度会自动恢复。'),
+                  const Text(
+                      '扫描 PC 设置中的二维码，或输入服务地址和连接密钥。局域网共享需与 PC 连接同一网络，并保持 PC 青卷运行。'),
+                  const SizedBox(height: 16),
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    OutlinedButton.icon(
+                      key: const ValueKey('scan-backend-qr'),
+                      onPressed: _saving ? null : _scan,
+                      icon: const Icon(Icons.qr_code_scanner_rounded),
+                      label: const Text('扫描二维码'),
+                    ),
+                    OutlinedButton.icon(
+                      key: const ValueKey('paste-backend-link'),
+                      onPressed: _saving ? null : _pasteLink,
+                      icon: const Icon(Icons.content_paste_rounded),
+                      label: const Text('粘贴连接链接'),
+                    ),
+                  ]),
                   const SizedBox(height: 24),
                   TextField(
                       key: const ValueKey('linux-backend-url'),
@@ -255,10 +309,12 @@ class _BackendSettingsPanelState extends State<_BackendSettingsPanel> {
                   if (_message != null) ...<Widget>[
                     const SizedBox(height: 20),
                     MobileSettingsNotice(
-                        title: _failed ? '连接未成功' : '服务已连接',
+                        title: _failed ? '连接未成功' : '连接信息',
                         message: _message!,
                         error: _failed,
-                        action: !_failed && !scope.auth.canAccessWorkspace
+                        action: !_failed &&
+                                !scope.auth.canAccessWorkspace &&
+                                scope.backend.status == BackendStatus.ready
                             ? MobileActionButton(
                                 icon: Icons.login_rounded,
                                 onPressed: () => showMobileAccountPage(context),

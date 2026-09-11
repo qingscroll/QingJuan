@@ -61,18 +61,31 @@ SITE_PLUGINS: tuple[SitePlugin, ...] = (
 )
 
 _SITE_PLUGINS_BY_ID = {plugin.id: plugin for plugin in SITE_PLUGINS}
+_INSTALLED_BY_DATABASE: dict[str, tuple[SitePlugin, ...]] = {}
+
+
+def installed_site_plugins() -> tuple[SitePlugin, ...]:
+    from .. import db
+    return _INSTALLED_BY_DATABASE.get(str(db.DB_PATH), ())
+
+
+def replace_installed_site_plugins(plugins: tuple[SitePlugin, ...]) -> None:
+    from .. import db
+    _INSTALLED_BY_DATABASE[str(db.DB_PATH)] = tuple(sorted(plugins, key=lambda plugin: plugin.id))
 
 
 def list_site_plugins() -> tuple[SitePlugin, ...]:
-    return SITE_PLUGINS
+    return (*SITE_PLUGINS[:-1], *installed_site_plugins(), SITE_PLUGINS[-1])
 
 
 def get_site_plugin(plugin_id: str) -> SitePlugin | None:
-    return _SITE_PLUGINS_BY_ID.get(plugin_id)
+    return _SITE_PLUGINS_BY_ID.get(plugin_id) or next(
+        (plugin for plugin in installed_site_plugins() if plugin.id == plugin_id), None
+    )
 
 
 def resolve_site_plugin(url: str) -> SitePlugin | None:
-    return next((plugin for plugin in SITE_PLUGINS if plugin.matches(url)), None)
+    return next((plugin for plugin in list_site_plugins() if plugin.matches(url)), None)
 
 
 def site_plugin_matches(plugin_id: str, url: str) -> bool:

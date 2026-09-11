@@ -147,12 +147,17 @@ jobs:
         id: package
         shell: pwsh
         run: ./tool/package_windows.ps1 -Tag '${{ github.ref_name }}'
+      - name: Verify Windows installer lifecycle
+        shell: pwsh
+        run: ./tool/test_windows_installer.ps1
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
+            ${{ steps.package.outputs.installer }}
+            ${{ steps.package.outputs.installer_checksum }}
           if-no-files-found: error
           retention-days: 14
 
@@ -179,8 +184,8 @@ jobs:
             Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE/release-assets" -File |
               Select-Object -ExpandProperty FullName
           )
-          if ($assets.Count -ne 4) {
-            throw "Expected four Windows/Android release assets, found $($assets.Count)."
+          if ($assets.Count -ne 6) {
+            throw "Expected six Windows/Android release assets, found $($assets.Count)."
           }
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null

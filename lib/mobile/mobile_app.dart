@@ -390,11 +390,15 @@ class _MobileHomeShellState extends State<MobileHomeShell> {
               statusBarColor: Colors.transparent,
               statusBarIconBrightness:
                   dark ? Brightness.light : Brightness.dark,
-              systemNavigationBarColor: colors.surfaceContainer,
+              systemNavigationBarColor: Colors.transparent,
               systemNavigationBarIconBrightness:
                   dark ? Brightness.light : Brightness.dark,
+              systemNavigationBarDividerColor: Colors.transparent,
+              systemNavigationBarContrastEnforced: false,
             ),
             child: Scaffold(
+              // Paint the page behind the floating capsule and its safe area.
+              extendBody: true,
               body: SafeArea(
                 bottom: tablet || secondary || keyboard,
                 child: Row(

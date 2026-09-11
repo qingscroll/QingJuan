@@ -148,7 +148,7 @@ void main() {
     tester,
   ) async {
     final fixture = await _Fixture.create();
-    await _mount(tester, fixture);
+    await _mount(tester, fixture, size: const Size(360, 800));
     expect(find.byType(MobileLibraryPage), findsOneWidget);
     expect(
       find.byKey(const ValueKey('mobile-bottom-navigation')),

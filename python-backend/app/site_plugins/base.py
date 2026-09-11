@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -36,11 +37,19 @@ class SitePlugin:
     search_handler: str | None = None
     supports_on_demand: bool = False
     supports_account_login: bool = False
+    supports_browser_login: bool = False
     supports_cookie_login: bool = False
     supports_bookshelf_import: bool = False
     default_enabled: bool = True
     version: str = "1.0.0"
     matcher: UrlMatcher | None = field(default=None, repr=False, compare=False)
+    origin: Literal["builtin", "installed"] = "builtin"
+    author: str = ""
+    api_version: int = 1
+    language: str = "中文"
+    network_domains: tuple[str, ...] = ()
+    load_error: str | None = None
+    runtime: ModuleType | None = field(default=None, repr=False, compare=False)
 
     @property
     def capabilities(self) -> tuple[str, ...]:
@@ -53,6 +62,8 @@ class SitePlugin:
             values.append("on_demand")
         if self.supports_account_login:
             values.append("account_login")
+        if self.supports_browser_login:
+            values.append("browser_login")
         if self.supports_cookie_login:
             values.append("cookie_login")
         if self.supports_bookshelf_import:

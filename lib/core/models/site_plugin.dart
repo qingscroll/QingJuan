@@ -14,6 +14,10 @@ class SitePlugin {
     required this.enabled,
     required this.defaultEnabled,
     this.accountLoggedIn = false,
+    this.origin = 'builtin',
+    this.author = '',
+    this.apiVersion = 1,
+    this.loadError,
   });
 
   factory SitePlugin.fromJson(JsonMap json) => SitePlugin(
@@ -29,6 +33,10 @@ class SitePlugin {
         enabled: json['enabled'] as bool? ?? true,
         defaultEnabled: json['defaultEnabled'] as bool? ?? true,
         accountLoggedIn: json['accountLoggedIn'] as bool? ?? false,
+        origin: json['origin'] as String? ?? 'builtin',
+        author: json['author'] as String? ?? '',
+        apiVersion: json['apiVersion'] as int? ?? 1,
+        loadError: json['loadError'] as String?,
       );
 
   final String id;
@@ -43,6 +51,11 @@ class SitePlugin {
   final bool enabled;
   final bool defaultEnabled;
   final bool accountLoggedIn;
+  final String origin;
+  final String author;
+  final int apiVersion;
+  final String? loadError;
+  bool get isInstalled => origin == 'installed';
 
   SitePlugin copyWith({
     bool? enabled,
@@ -61,10 +74,31 @@ class SitePlugin {
         enabled: enabled ?? this.enabled,
         defaultEnabled: defaultEnabled,
         accountLoggedIn: accountLoggedIn ?? this.accountLoggedIn,
+        origin: origin,
+        author: author,
+        apiVersion: apiVersion,
+        loadError: loadError,
       );
 
   static List<String> _stringList(Object? value) =>
       ((value as List?) ?? const []).whereType<String>().toList();
+}
+
+class SitePluginPackageInspection {
+  const SitePluginPackageInspection(
+      {required this.plugin, required this.sha256, this.installedVersion});
+
+  factory SitePluginPackageInspection.fromJson(JsonMap json) =>
+      SitePluginPackageInspection(
+        plugin: SitePlugin.fromJson(
+            Map<String, dynamic>.from(json['plugin'] as Map)),
+        sha256: json['sha256'] as String,
+        installedVersion: json['installedVersion'] as String?,
+      );
+
+  final SitePlugin plugin;
+  final String sha256;
+  final String? installedVersion;
 }
 
 class SitePluginAccount {
@@ -77,6 +111,18 @@ class SitePluginAccount {
 
   final bool loggedIn;
   final String? expiresAt;
+}
+
+class SitePluginBrowserLogin {
+  const SitePluginBrowserLogin({
+    required this.flowId,
+    required this.verificationUri,
+    required this.expiresAt,
+  });
+
+  final String flowId;
+  final Uri verificationUri;
+  final DateTime expiresAt;
 }
 
 class SitePluginLoginQrCode {

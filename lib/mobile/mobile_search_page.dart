@@ -30,12 +30,17 @@ class _MobileSearchPageState extends State<MobileSearchPage> {
   String? _importError;
 
   static const _labels = <BookSearchEngine, String>{
+    BookSearchEngine.installedPlugins: '导入插件',
     BookSearchEngine.bookSources: '我的书源',
     BookSearchEngine.quark: '夸克',
     BookSearchEngine.fanqie: '番茄',
     BookSearchEngine.qidian: '起点',
     BookSearchEngine.biqvge: '笔趣阁',
   };
+
+  String get _sourceHint => _engine == BookSearchEngine.biqvge
+      ? '八零小说网使用动态搜索；b520 与笔趣看来自目录索引，目录可能不完整或受区域限制。'
+      : '输入书名或作者，在${_labels[_engine]}中搜索。\n已有作品链接或文件，也可以直接导入。';
 
   @override
   void dispose() {
@@ -262,7 +267,7 @@ class _MobileSearchPageState extends State<MobileSearchPage> {
               ? (_engine == BookSearchEngine.bookSources &&
                       sources.sources.where((source) => source.enabled).isEmpty
                   ? '当前没有启用的书源。可切换上方内置来源，或在我的页面管理书源。'
-                  : '输入书名或作者，在${_labels[_engine]}中搜索。\n已有作品链接或文件，也可以直接导入。')
+                  : _sourceHint)
               : '试试更短的关键词，或切换上方来源继续寻找。',
           action: _submittedQuery == null
               ? MobileActionButton(

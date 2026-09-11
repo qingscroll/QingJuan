@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .process_lifecycle import BackendServiceController, require_business_service_running
 from .security import API_PREFIX, authentication_enabled, require_api_authentication
 from .service_diagnostics import RequestMetrics, should_track_request
 
@@ -81,13 +82,18 @@ def create_application(
 
     request_metrics = RequestMetrics()
     application.state.request_metrics = request_metrics
+    application.state.backend_service_controller = BackendServiceController()
     router_prefix = api_prefix or (API_PREFIX if authenticate else "")
     auth_prefix = f"{router_prefix}/auth" or "/auth"
 
     @application.middleware("http")
     async def prevent_auth_response_storage(request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
-        if request.url.path == auth_prefix or request.url.path.startswith(f"{auth_prefix}/"):
+        if (
+            request.url.path == auth_prefix
+            or request.url.path.startswith(f"{auth_prefix}/")
+            or request.url.path.startswith("/site-login/shaoniandream")
+        ):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
         return response
@@ -107,7 +113,11 @@ def create_application(
 
     for router in public_routers:
         application.include_router(router)
-    dependencies = [Depends(require_api_authentication)] if authenticate else None
+    dependencies = (
+        [Depends(require_api_authentication), Depends(require_business_service_running)]
+        if authenticate
+        else None
+    )
     for router in routers:
         application.include_router(
             router,

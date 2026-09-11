@@ -37,6 +37,7 @@ String sitePluginCapabilityLabel(String capability) => switch (capability) {
       'search' => '站内搜索',
       'on_demand' => '边看边下',
       'account_login' => '账号登录',
+      'browser_login' => '浏览器验证登录',
       'cookie_login' => 'Cookie 登录',
       'bookshelf_import' => '书架导入',
       _ => capability,
@@ -108,7 +109,7 @@ class PluginOverview extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Text(
-                '内置站点解析器',
+                '站点解析插件',
                 style: theme.typography.bodyLarge?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
@@ -625,6 +626,17 @@ class PluginDetailsPane extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 Text(plugin.description, style: theme.typography.body),
+                const SizedBox(height: 12),
+                Text(plugin.isInstalled
+                    ? '来源：导入插件 · 作者：${plugin.author} · API v${plugin.apiVersion}'
+                    : '来源：内置插件'),
+                if (plugin.loadError != null) ...[
+                  const SizedBox(height: 12),
+                  InfoBar(
+                      title: const Text('插件加载失败'),
+                      content: Text(plugin.loadError!),
+                      severity: InfoBarSeverity.error),
+                ],
                 const SizedBox(height: 16),
                 AppSurface(
                   padding: const EdgeInsets.all(12),
@@ -703,6 +715,7 @@ class PluginAccountActions extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final loggedIn = plugin.accountLoggedIn;
     final actionsEnabled = plugin.enabled;
+    final browserLogin = plugin.capabilities.contains('browser_login');
     return AppSurface(
       key: ValueKey<String>('plugin-account-actions-${plugin.id}'),
       padding: const EdgeInsets.all(14),
@@ -736,9 +749,13 @@ class PluginAccountActions extends StatelessWidget {
           Text(
             actionsEnabled
                 ? loggedIn
-                    ? '登录态仅保存在当前后端进程内，可把账号书架一键加入青卷。'
-                    : '使用站点官方 App 扫码登录后，可读取当前账号书架。'
-                : '请先启用此插件，再使用账号登录与书架导入。',
+                    ? (browserLogin
+                        ? '当前账号会话用于读取可访问章节，退出或后端重启后清除。'
+                        : '登录态仅保存在当前后端进程内，可把账号书架一键加入青卷。')
+                    : (browserLogin
+                        ? '在浏览器中使用账号密码登录并完成人机验证。'
+                        : '使用站点官方 App 扫码登录后，可读取当前账号书架。')
+                : '请先启用此插件，再使用账号功能。',
             style: theme.typography.caption?.copyWith(
               color: theme.resources.textFillColorSecondary,
             ),
@@ -752,7 +769,7 @@ class PluginAccountActions extends StatelessWidget {
                 FilledButton(
                   key: ValueKey<String>('plugin-login-${plugin.id}'),
                   onPressed: actionsEnabled ? onLogin : null,
-                  child: const Text('扫码登录'),
+                  child: Text(browserLogin ? '账号登录' : '扫码登录'),
                 ),
               if (!loggedIn && onCookieLogin != null)
                 Button(
@@ -760,12 +777,13 @@ class PluginAccountActions extends StatelessWidget {
                   onPressed: actionsEnabled ? onCookieLogin : null,
                   child: const Text('Cookie 登录'),
                 ),
-              FilledButton(
-                key: ValueKey<String>('plugin-bookshelf-import-${plugin.id}'),
-                onPressed:
-                    actionsEnabled && loggedIn ? onImportBookshelf : null,
-                child: const Text('一键添加账号书架'),
-              ),
+              if (plugin.capabilities.contains('bookshelf_import'))
+                FilledButton(
+                  key: ValueKey<String>('plugin-bookshelf-import-${plugin.id}'),
+                  onPressed:
+                      actionsEnabled && loggedIn ? onImportBookshelf : null,
+                  child: const Text('一键添加账号书架'),
+                ),
               if (loggedIn)
                 Button(
                   key: ValueKey<String>('plugin-logout-${plugin.id}'),

@@ -152,7 +152,7 @@ try:
         TranslationSettingsView,
     )
     from .multi_user import DEFAULT_ADMIN_USER_ID, multi_user_enabled
-    from .process_lifecycle import start_parent_process_watcher
+    from .process_lifecycle import BackendServiceController, start_parent_process_watcher
     from .runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from .scraper import (
         _fetch_with_edge_cdp,
@@ -306,7 +306,7 @@ except ImportError:
         TranslationSettingsView,
     )
     from app.multi_user import DEFAULT_ADMIN_USER_ID, multi_user_enabled
-    from app.process_lifecycle import start_parent_process_watcher
+    from app.process_lifecycle import BackendServiceController, start_parent_process_watcher
     from app.runtime_logs import configure_runtime_logging, shutdown_runtime_logging
     from app.scraper import (
         _fetch_with_edge_cdp,
@@ -390,6 +390,8 @@ async def _run_startup(app_instance: FastAPI) -> None:
     validate_admin_auth_configuration()
     configured_model_endpoint_allowlist()
     init_db()
+    from app.plugin_system.packages import load_installed_plugins
+    await asyncio.to_thread(load_installed_plugins)
     _migrate_book_storage_keys()
     await asyncio.to_thread(_cleanup_expired_exports)
     LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -408,7 +410,8 @@ async def _run_startup(app_instance: FastAPI) -> None:
         task.updatedAt = _now()
         save_task(task)
         TASK_QUEUE.put_nowait(task.id)
-    app_instance.state.queue_worker = asyncio.create_task(_task_worker())
+    service_controller = app_instance.state.backend_service_controller
+    app_instance.state.queue_worker = asyncio.create_task(_task_worker(service_controller))
     _resume_server_managed_source_caches()
 
 
@@ -435,6 +438,9 @@ async def _run_shutdown(app_instance: FastAPI) -> None:
 
     FANQIE_RUNTIME.logout()
     QIDIAN_RUNTIME.logout()
+    from app.site_plugins.shaoniandream_account import ACCOUNTS
+
+    ACCOUNTS.clear()
     for runtime in _USER_SITE_PLUGIN_RUNTIMES.values():
         runtime.logout()
     _USER_SITE_PLUGIN_RUNTIMES.clear()
@@ -509,6 +515,7 @@ async def get_service_meta() -> ServiceMetaResponse:
             "deviceRegistry": True,
             "runtimeLogs": admin_web_enabled(),
             "serviceDiagnostics": admin_web_enabled(),
+            "businessServiceControl": admin_web_enabled(),
             "onlineBackendUpdate": backend_update_supported(),
             "translationModelCheck": True,
             "rapidOcr": True,
@@ -523,6 +530,10 @@ def _site_plugin_runtime(
     plugin: SitePlugin,
     owner_id: str = DEFAULT_ADMIN_USER_ID,
 ) -> Any:
+    if plugin.id == "shaoniandream":
+        from app.site_plugins.shaoniandream_account import ACCOUNTS
+
+        return ACCOUNTS.runtime(owner_id)
     if owner_id == DEFAULT_ADMIN_USER_ID:
         if plugin.id == "fanqie":
             return FANQIE_RUNTIME
@@ -542,12 +553,11 @@ def _site_plugin_runtime(
     return runtime
 
 
-def _qidian_cookies_for_owner(owner_id: str, source_url: str) -> dict[str, str] | None:
+def _site_account_download_kwargs(owner_id: str, source_url: str) -> dict[str, Any]:
     plugin = resolve_site_plugin(source_url)
-    if plugin is None or plugin.id != "qidian":
-        return None
-    runtime = _site_plugin_runtime(plugin, owner_id)
-    return dict(runtime.cookies())
+    if plugin is None or plugin.id not in {"qidian", "shaoniandream"}:
+        return {}
+    return {f"{plugin.id}_cookies": _site_plugin_runtime(plugin, owner_id).cookies()}
 
 
 def _site_plugin_view(
@@ -558,20 +568,8 @@ def _site_plugin_view(
     account_logged_in = False
     if plugin.supports_account_login:
         account_logged_in = bool(_site_plugin_runtime(plugin, owner_id).account_status()["loggedIn"])
-    return SitePluginView(
-        id=plugin.id,
-        name=plugin.name,
-        description=plugin.description,
-        category=plugin.category,
-        domains=list(plugin.domains),
-        bookKinds=list(plugin.book_kinds),
-        tags=list(plugin.tags),
-        capabilities=list(plugin.capabilities),
-        version=plugin.version,
-        enabled=enabled,
-        defaultEnabled=plugin.default_enabled,
-        accountLoggedIn=account_logged_in,
-    )
+    from app.plugin_system.views import plugin_view
+    return plugin_view(plugin, enabled, account_logged_in=account_logged_in)
 
 
 @plugins_router.get("/plugins", response_model=list[SitePluginView])
@@ -652,6 +650,8 @@ async def post_site_plugin_login_qrcode(
 ) -> SitePluginLoginQrCode:
     _mark_plugin_private_response(response)
     plugin = _require_site_plugin_operation(plugin_id, "account_login", require_enabled=True)
+    if plugin.supports_browser_login:
+        raise HTTPException(status_code=400, detail="请使用浏览器账号登录")
     runtime = _site_plugin_runtime(plugin, _effective_owner_id(require_user_access(request)))
     try:
         return SitePluginLoginQrCode.model_validate(await asyncio.to_thread(runtime.start_login))
@@ -1742,16 +1742,12 @@ async def _create_imported_book(
     if lightweight_import:
         result = await create_book_manifest_only(payload, preview, owner_library_root)
     else:
-        qidian_cookies = _qidian_cookies_for_owner(owner_id, str(payload.sourceUrl))
-        if qidian_cookies is None:
-            result = await download_book(payload, preview, owner_library_root)
-        else:
-            result = await download_book(
-                payload,
-                preview,
-                owner_library_root,
-                qidian_cookies=qidian_cookies,
-            )
+        result = await download_book(
+            payload,
+            preview,
+            owner_library_root,
+            **_site_account_download_kwargs(owner_id, str(payload.sourceUrl)),
+        )
     record = BookRecord(
         ownerId=owner_id,
         id=book_id,
@@ -4023,16 +4019,12 @@ async def _cache_source_chapter_by_id(book_id: str, chapter_index: int) -> None:
             return
         manifest_snapshot = copy.deepcopy(manifest)
 
-    qidian_cookies = _qidian_cookies_for_owner(book.ownerId, book.sourceUrl)
-    if qidian_cookies is None:
-        payload = await download_chapter_payload(book_dir, manifest_snapshot, chapter_index)
-    else:
-        payload = await download_chapter_payload(
-            book_dir,
-            manifest_snapshot,
-            chapter_index,
-            qidian_cookies=qidian_cookies,
-        )
+    payload = await download_chapter_payload(
+        book_dir,
+        manifest_snapshot,
+        chapter_index,
+        **_site_account_download_kwargs(book.ownerId, book.sourceUrl),
+    )
     commit_task = asyncio.create_task(_commit_source_chapter_payload(book, book_dir, payload, manifest_lock))
     try:
         await asyncio.shield(commit_task)
@@ -5092,10 +5084,11 @@ def _append_task_runtime_log(
         save_task(task)
 
 
-async def _task_worker() -> None:
+async def _task_worker(service_controller: BackendServiceController) -> None:
     while True:
         task_id = await TASK_QUEUE.get()
         try:
+            await service_controller.wait_until_running()
             try:
                 await _run_task(task_id)
             except HTTPException:
@@ -5171,10 +5164,7 @@ async def _process_download_task(task: TaskRecord, book: BookRecord) -> None:
         task.updatedAt = _now()
         save_task(task)
 
-    download_kwargs: dict[str, Any] = {}
-    qidian_cookies = _qidian_cookies_for_owner(book.ownerId, book.sourceUrl)
-    if qidian_cookies is not None:
-        download_kwargs["qidian_cookies"] = qidian_cookies
+    download_kwargs = _site_account_download_kwargs(book.ownerId, book.sourceUrl)
     await download_selected_chapters(
         book_dir=book_dir,
         manifest=manifest,

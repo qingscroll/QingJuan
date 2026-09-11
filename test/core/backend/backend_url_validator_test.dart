@@ -14,6 +14,10 @@ void main() {
   });
 
   test('rejects public HTTP, loopback and credential-bearing URLs', () {
+    for (final host in ['fc-example.com', 'fd.example.com']) {
+      expect(isPrivateBackendHost(host), isFalse);
+      expect(() => validateBackendUrl('http://$host'), throwsFormatException);
+    }
     expect(
       () => validateBackendUrl('http://qingjuan.example.test'),
       throwsFormatException,
