@@ -113,6 +113,18 @@ class SitePluginAccount {
   final String? expiresAt;
 }
 
+class SitePluginBrowserLogin {
+  const SitePluginBrowserLogin({
+    required this.flowId,
+    required this.verificationUri,
+    required this.expiresAt,
+  });
+
+  final String flowId;
+  final Uri verificationUri;
+  final DateTime expiresAt;
+}
+
 class SitePluginLoginQrCode {
   const SitePluginLoginQrCode({
     required this.flowId,

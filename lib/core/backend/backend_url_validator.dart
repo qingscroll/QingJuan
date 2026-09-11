@@ -1,3 +1,5 @@
+import 'dart:io';
+
 void validateBackendUrl(String value) {
   final uri = Uri.tryParse(value.trim());
   if (uri == null || !uri.hasAuthority || uri.host.isEmpty) {
@@ -28,10 +30,12 @@ bool _isLoopbackOrUnspecifiedHost(String host) {
 
 bool isPrivateBackendHost(String host) {
   final normalized = host.toLowerCase();
-  if (normalized.startsWith('fc') ||
-      normalized.startsWith('fd') ||
-      normalized.startsWith('fe80:')) {
-    return true;
+  final address = InternetAddress.tryParse(normalized);
+  if (address == null) return false;
+  if (address.type == InternetAddressType.IPv6) {
+    final bytes = address.rawAddress;
+    return (bytes[0] & 0xfe) == 0xfc ||
+        (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80);
   }
   final parts = normalized.split('.').map(int.tryParse).toList();
   if (parts.length != 4 ||

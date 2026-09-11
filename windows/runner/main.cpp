@@ -17,6 +17,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // Inno Setup checks this mutex before installing or uninstalling files.
+  // Keep the handle alive until process termination, including Flutter teardown.
+  ::CreateMutexW(nullptr, FALSE, L"QingJuan.Application");
+
   flutter::DartProject project(L"data");
 
   std::vector<std::string> command_line_arguments =

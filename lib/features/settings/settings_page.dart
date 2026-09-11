@@ -12,6 +12,8 @@ import '../../shared/responsive.dart';
 import '../audiobook/tts_voice_service.dart';
 import '../auth/widgets/auth_account_card.dart';
 import 'widgets/backend_connection_card.dart';
+import 'widgets/backend_share_card.dart';
+import 'widgets/app_update_card.dart';
 import 'widgets/mobile_my_dashboard.dart';
 import 'widgets/settings_section_card.dart';
 import 'widgets/theme_settings_card.dart';
@@ -273,6 +275,10 @@ class _SettingsPageState extends State<SettingsPage> {
               : null,
           onOpenAbout: () => app.selectSection(AppSection.about),
         ),
+        if (scope.updates case final updates?) ...<Widget>[
+          const SizedBox(height: 16),
+          AppUpdateCard(controller: updates),
+        ],
         if (scope.settings.error case final error?) ...<Widget>[
           const SizedBox(height: 16),
           InfoBar(
@@ -290,6 +296,10 @@ class _SettingsPageState extends State<SettingsPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
+        if (scope.updates case final updates?) ...<Widget>[
+          AppUpdateCard(controller: updates),
+          const SizedBox(height: 30),
+        ],
         const SectionTitle('账户概览'),
         AuthAccountCard(
           auth: scope.auth,
@@ -319,6 +329,8 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Text(_savingConnection ? '正在保存' : '保存连接'),
           ),
         ),
+        const SizedBox(height: 30),
+        const BackendShareCard(),
         const SizedBox(height: 30),
         const SectionTitle('界面主题'),
         ThemeSettingsCard(

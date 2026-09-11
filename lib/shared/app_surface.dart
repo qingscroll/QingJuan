@@ -181,9 +181,11 @@ class _SurfaceBody extends StatelessWidget {
         margin: margin,
         padding: padding,
         decoration: BoxDecoration(
-          color: hovered
-              ? theme.resources.subtleFillColorSecondary
-              : theme.cardColor,
+          color: pressed
+              ? Color.lerp(theme.cardColor, theme.micaBackgroundColor, .75)
+              : hovered
+                  ? Color.lerp(theme.cardColor, theme.micaBackgroundColor, .4)
+                  : theme.cardColor,
           border: Border.all(color: borderColor),
           borderRadius: BorderRadius.circular(8),
         ),

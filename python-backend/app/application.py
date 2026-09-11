@@ -89,7 +89,11 @@ def create_application(
     @application.middleware("http")
     async def prevent_auth_response_storage(request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
-        if request.url.path == auth_prefix or request.url.path.startswith(f"{auth_prefix}/"):
+        if (
+            request.url.path == auth_prefix
+            or request.url.path.startswith(f"{auth_prefix}/")
+            or request.url.path.startswith("/site-login/shaoniandream")
+        ):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
         return response

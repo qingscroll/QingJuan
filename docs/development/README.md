@@ -54,6 +54,7 @@
 | [后端与管理界面](./04-backend-and-android.md) | FastAPI 分层、API 约定、认证与凭据、数据库、抓取与站点插件、后台任务、部署 | `python-backend/`、`admin-web/`、`windows/`、`android/`、`deploy/linux/` |
 | [质量与测试](./05-quality-and-testing.md) | TDD 流程、测试分层、强制命令、三轮验证、完成定义 | 所有变更 |
 | [站点插件规范](./07-site-plugin-spec.md) | 独立插件包、Python API v1、安装更新、信任边界与示例 | `app/plugin_system/`、`examples/plugins/` |
+| [客户端更新与安装包](./08-client-updates.md) | 启动检查、下载校验、Windows 安装包与发布资产 | `lib/core/updates/`、`deploy/windows/`、`tool/` |
 | [工作流与迁移](./06-workflow-and-migration.md) | Git 流程、PR 要求、CI 门禁、发布流程、迁移规则、禁止反模式 | 贡献与发布 |
 
 ---
@@ -151,7 +152,7 @@ flutter run -d windows
 
 ## 6. 当前发布基线（读代码前先看这个）
 
-- 已发布版本：**v2.1.0（build 40）**；仓库当前发布候选：**`2.1.1+41`**（修复 Android 详情与阅读器路由的文字样式继承、加载反馈和移动端按钮层级）。
+- 已发布版本：**v2.1.1（build 41）**；仓库当前发布候选：**`2.2.0+42`**（客户端在线更新、Windows 安装包、PC 局域网共享与 Android 扫码连接）。
 - Windows 发布包**必须包含** PyInstaller 构建的本机伴随后端；本机模式只监听回环地址，不用 Token。
 - 既有功能要求：本地文件导入、单章 / 多章导出、设备 TTS、链接任务与实时日志、单一 OpenAI 兼容翻译配置，以及 RapidOCR 漫画翻译链路。
 - 后续版本升级**不得破坏**：现有后端数据、导入导出格式、阅读进度与设置；必须保证兼容（特殊场景要提供迁移说明 + 测试）。

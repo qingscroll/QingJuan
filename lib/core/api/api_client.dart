@@ -773,6 +773,49 @@ class ApiClient {
     return SitePluginLoginQrCode.fromJson(_map(payload));
   }
 
+  Future<SitePluginBrowserLogin> startSitePluginBrowserLogin(
+      String pluginId) async {
+    final current = captureContextGuard();
+    final base = _baseUrl().replaceAll(RegExp(r'/+$'), '');
+    final encoded = Uri.encodeComponent(pluginId);
+    final payload = _map(_decode(await _request(
+      'POST',
+      '/plugins/$encoded/account/login-browser',
+    )));
+    if (!current()) throw const ApiException('后端或账号已切换，请重新登录');
+    final token = payload['browserToken'] as String? ?? '';
+    final flowId = payload['flowId'] as String? ?? '';
+    final expiry = DateTime.tryParse(payload['expiresAt'] as String? ?? '');
+    if (!RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(token) ||
+        flowId.isEmpty ||
+        expiry == null) {
+      throw const ApiException('登录响应无效，请重试');
+    }
+    return SitePluginBrowserLogin(
+      flowId: flowId,
+      verificationUri:
+          Uri.parse('$base/site-login/$encoded').replace(fragment: token),
+      expiresAt: expiry,
+    );
+  }
+
+  Future<SitePluginLoginPoll> pollSitePluginBrowserLogin(
+      String pluginId, String flowId) async {
+    final plugin = Uri.encodeComponent(pluginId);
+    final flow = Uri.encodeComponent(flowId);
+    return SitePluginLoginPoll.fromJson(_map(_decode(await _request(
+      'GET',
+      '/plugins/$plugin/account/login-browser/$flow',
+    ))));
+  }
+
+  Future<void> cancelSitePluginBrowserLogin(
+      String pluginId, String flowId) async {
+    final plugin = Uri.encodeComponent(pluginId);
+    final flow = Uri.encodeComponent(flowId);
+    await _request('DELETE', '/plugins/$plugin/account/login-browser/$flow');
+  }
+
   Future<SitePluginLoginPoll> pollSitePluginLogin(
     String pluginId,
     String flowId,

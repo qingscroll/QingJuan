@@ -37,6 +37,7 @@ class SitePlugin:
     search_handler: str | None = None
     supports_on_demand: bool = False
     supports_account_login: bool = False
+    supports_browser_login: bool = False
     supports_cookie_login: bool = False
     supports_bookshelf_import: bool = False
     default_enabled: bool = True
@@ -61,6 +62,8 @@ class SitePlugin:
             values.append("on_demand")
         if self.supports_account_login:
             values.append("account_login")
+        if self.supports_browser_login:
+            values.append("browser_login")
         if self.supports_cookie_login:
             values.append("cookie_login")
         if self.supports_bookshelf_import:

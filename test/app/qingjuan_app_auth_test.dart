@@ -11,6 +11,9 @@ import 'package:qingjuan/core/backend/backend_connection_manager.dart';
 import 'package:qingjuan/core/backend/user_session_store.dart';
 import 'package:qingjuan/core/models/settings.dart';
 import 'package:qingjuan/core/state/load_state.dart';
+import 'package:qingjuan/core/updates/app_update_controller.dart';
+import 'package:qingjuan/core/updates/app_update_service.dart';
+import 'package:qingjuan/core/updates/app_release.dart';
 import 'package:qingjuan/features/auth/auth_controller.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
@@ -20,6 +23,39 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+  testWidgets('startup checks for updates without a configured backend',
+      (tester) async {
+    final appState = AppState(await SharedPreferences.getInstance(),
+        localBackendSupported: false);
+    final api = ApiClient(() => appState.backendUrl,
+        client: MockClient(
+            (_) async => throw StateError('No backend request expected')));
+    final backend = BackendConnectionManager(api, isConfigured: () => false);
+    final auth = AuthController(api, const _EmptyUserSessionStore(),
+        backendUrl: () => appState.backendUrl);
+    final updateService = _StartupUpdateService();
+    final updates = AppUpdateController(
+        windows: true,
+        versionLoader: () async => '2.1.1+41',
+        exitForInstall: () async {},
+        service: updateService);
+    await tester.pumpWidget(QingJuanApp.testing(
+        appState: appState,
+        api: api,
+        backend: backend,
+        auth: auth,
+        library: LibraryController(api),
+        sources: SourcesController(api),
+        tasks: TasksController(api),
+        settings: SettingsController(api),
+        updates: updates));
+    await tester.pumpAndSettle();
+    expect(updateService.checks, 1);
+    expect(updates.status, UpdateStatus.available, reason: updates.error);
+    expect(find.text('青卷 2.2.0 已发布'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('remote workspace waits for login and resets after logout',
       (tester) async {
@@ -387,6 +423,19 @@ http.Response _jsonResponse(Object? body, [int statusCode = 200]) =>
       statusCode,
       headers: const <String, String>{'content-type': 'application/json'},
     );
+
+class _StartupUpdateService extends AppUpdateService {
+  int checks = 0;
+  @override
+  Future<AppRelease?> check({required bool windows}) async {
+    checks++;
+    return AppRelease(
+        version: const AppVersion(2, 2, 0),
+        notes: '',
+        pageUrl: Uri.parse(
+            'https://github.com/qingscroll/QingJuan/releases/tag/v2.2.0'));
+  }
+}
 
 class _EmptyUserSessionStore implements UserSessionStore {
   const _EmptyUserSessionStore();

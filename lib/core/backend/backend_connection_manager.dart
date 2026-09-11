@@ -7,6 +7,7 @@ import '../api/api_exception.dart';
 import '../models/book.dart';
 import '../models/settings.dart';
 import 'local_backend_process.dart';
+import 'lan_backend_share.dart';
 
 enum BackendStatus { unconfigured, checking, starting, ready, failed }
 
@@ -25,6 +26,7 @@ class BackendConnectionManager implements Listenable {
         _heartbeatInterval = heartbeatInterval;
 
   final ApiClient api;
+  final LanBackendShare lanShare = LanBackendShare();
   final bool Function() _isConfigured;
   final bool Function() _isLocal;
   final LocalBackendLifecycle? _localBackend;
@@ -64,6 +66,7 @@ class BackendConnectionManager implements Listenable {
       return;
     }
 
+    await lanShare.stop();
     await _localBackend?.stop();
     if (!_isCurrent(generation)) return;
     if (!_isConfigured()) {
@@ -108,7 +111,9 @@ class BackendConnectionManager implements Listenable {
       throw const ApiException('后端连接信息已发生变化，请重新保存');
     }
     final rawCapabilities = meta['capabilities'];
-    if (rawCapabilities is! Map || rawCapabilities['multiUser'] != true) {
+    if (rawCapabilities is! Map ||
+        (rawCapabilities['multiUser'] != true &&
+            rawCapabilities['desktopSharing'] != true)) {
       throw const ApiException('Linux 后端版本过旧，不支持多用户书架，请先升级服务端');
     }
     return meta;
@@ -131,6 +136,7 @@ class BackendConnectionManager implements Listenable {
       if (!_isCurrent(generation)) return;
       _finishReady(meta, label: '本机后端', requireMultiUser: false);
     } catch (error) {
+      await lanShare.stop();
       await localBackend.stop();
       if (!_isCurrent(generation)) return;
       status = BackendStatus.failed;
@@ -150,11 +156,14 @@ class BackendConnectionManager implements Listenable {
         ? Map<String, dynamic>.from(rawCapabilities)
         : const <String, dynamic>{};
     multiUserEnabled = capabilities['multiUser'] == true;
-    if (requireMultiUser && !multiUserEnabled) {
+    if (requireMultiUser &&
+        !multiUserEnabled &&
+        capabilities['desktopSharing'] != true) {
       throw const ApiException('Linux 后端版本过旧，不支持多用户书架，请先升级服务端');
     }
     status = BackendStatus.ready;
-    message = '$label已连接';
+    message =
+        capabilities['desktopSharing'] == true ? 'PC 局域网后端已连接' : '$label已连接';
     if (becameReady) _readyEpoch += 1;
     _notifyListeners();
   }
@@ -256,6 +265,8 @@ class BackendConnectionManager implements Listenable {
     ++_modelCheckOperation;
     ++_draftProbeOperation;
     _cancelHeartbeat();
+    await lanShare.stop();
+    lanShare.dispose();
     await _localBackend?.stop();
     _notifier.dispose();
   }

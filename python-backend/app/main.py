@@ -438,6 +438,9 @@ async def _run_shutdown(app_instance: FastAPI) -> None:
 
     FANQIE_RUNTIME.logout()
     QIDIAN_RUNTIME.logout()
+    from app.site_plugins.shaoniandream_account import ACCOUNTS
+
+    ACCOUNTS.clear()
     for runtime in _USER_SITE_PLUGIN_RUNTIMES.values():
         runtime.logout()
     _USER_SITE_PLUGIN_RUNTIMES.clear()
@@ -527,6 +530,10 @@ def _site_plugin_runtime(
     plugin: SitePlugin,
     owner_id: str = DEFAULT_ADMIN_USER_ID,
 ) -> Any:
+    if plugin.id == "shaoniandream":
+        from app.site_plugins.shaoniandream_account import ACCOUNTS
+
+        return ACCOUNTS.runtime(owner_id)
     if owner_id == DEFAULT_ADMIN_USER_ID:
         if plugin.id == "fanqie":
             return FANQIE_RUNTIME
@@ -546,12 +553,11 @@ def _site_plugin_runtime(
     return runtime
 
 
-def _qidian_cookies_for_owner(owner_id: str, source_url: str) -> dict[str, str] | None:
+def _site_account_download_kwargs(owner_id: str, source_url: str) -> dict[str, Any]:
     plugin = resolve_site_plugin(source_url)
-    if plugin is None or plugin.id != "qidian":
-        return None
-    runtime = _site_plugin_runtime(plugin, owner_id)
-    return dict(runtime.cookies())
+    if plugin is None or plugin.id not in {"qidian", "shaoniandream"}:
+        return {}
+    return {f"{plugin.id}_cookies": _site_plugin_runtime(plugin, owner_id).cookies()}
 
 
 def _site_plugin_view(
@@ -644,6 +650,8 @@ async def post_site_plugin_login_qrcode(
 ) -> SitePluginLoginQrCode:
     _mark_plugin_private_response(response)
     plugin = _require_site_plugin_operation(plugin_id, "account_login", require_enabled=True)
+    if plugin.supports_browser_login:
+        raise HTTPException(status_code=400, detail="请使用浏览器账号登录")
     runtime = _site_plugin_runtime(plugin, _effective_owner_id(require_user_access(request)))
     try:
         return SitePluginLoginQrCode.model_validate(await asyncio.to_thread(runtime.start_login))
@@ -1734,16 +1742,12 @@ async def _create_imported_book(
     if lightweight_import:
         result = await create_book_manifest_only(payload, preview, owner_library_root)
     else:
-        qidian_cookies = _qidian_cookies_for_owner(owner_id, str(payload.sourceUrl))
-        if qidian_cookies is None:
-            result = await download_book(payload, preview, owner_library_root)
-        else:
-            result = await download_book(
-                payload,
-                preview,
-                owner_library_root,
-                qidian_cookies=qidian_cookies,
-            )
+        result = await download_book(
+            payload,
+            preview,
+            owner_library_root,
+            **_site_account_download_kwargs(owner_id, str(payload.sourceUrl)),
+        )
     record = BookRecord(
         ownerId=owner_id,
         id=book_id,
@@ -4015,16 +4019,12 @@ async def _cache_source_chapter_by_id(book_id: str, chapter_index: int) -> None:
             return
         manifest_snapshot = copy.deepcopy(manifest)
 
-    qidian_cookies = _qidian_cookies_for_owner(book.ownerId, book.sourceUrl)
-    if qidian_cookies is None:
-        payload = await download_chapter_payload(book_dir, manifest_snapshot, chapter_index)
-    else:
-        payload = await download_chapter_payload(
-            book_dir,
-            manifest_snapshot,
-            chapter_index,
-            qidian_cookies=qidian_cookies,
-        )
+    payload = await download_chapter_payload(
+        book_dir,
+        manifest_snapshot,
+        chapter_index,
+        **_site_account_download_kwargs(book.ownerId, book.sourceUrl),
+    )
     commit_task = asyncio.create_task(_commit_source_chapter_payload(book, book_dir, payload, manifest_lock))
     try:
         await asyncio.shield(commit_task)
@@ -5164,10 +5164,7 @@ async def _process_download_task(task: TaskRecord, book: BookRecord) -> None:
         task.updatedAt = _now()
         save_task(task)
 
-    download_kwargs: dict[str, Any] = {}
-    qidian_cookies = _qidian_cookies_for_owner(book.ownerId, book.sourceUrl)
-    if qidian_cookies is not None:
-        download_kwargs["qidian_cookies"] = qidian_cookies
+    download_kwargs = _site_account_download_kwargs(book.ownerId, book.sourceUrl)
     await download_selected_chapters(
         book_dir=book_dir,
         manifest=manifest,

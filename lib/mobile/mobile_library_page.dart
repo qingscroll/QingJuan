@@ -346,10 +346,13 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
         : null;
     return LayoutBuilder(builder: (context, constraints) {
       final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
-      final columns = constraints.maxWidth < 330 || scale > 1.5
+      // Keep narrow phones compact; reserve wider tiles for large text.
+      final columns = scale > 1.5
           ? (constraints.maxWidth / 170).floor().clamp(2, 5)
           : (constraints.maxWidth / 112).floor().clamp(3, 7);
-      final coverWidth = (constraints.maxWidth - (columns - 1) * 16) / columns;
+      const spacing = 12.0;
+      final coverWidth =
+          (constraints.maxWidth - (columns - 1) * spacing) / columns;
       return RefreshIndicator(
         onRefresh: () => library.load(silent: true),
         child: CustomScrollView(
@@ -383,8 +386,8 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
                   mainAxisExtent: coverWidth * 1.42 +
                       12 +
                       MediaQuery.textScalerOf(context).scale(14) * 4.3,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 18),
+                  crossAxisSpacing: spacing,
+                  mainAxisSpacing: 16),
               delegate: SliverChildBuilderDelegate((context, index) {
                 final book = books[index];
                 return MobileLibraryTile(

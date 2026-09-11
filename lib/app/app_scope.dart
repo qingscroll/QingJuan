@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../core/api/api_client.dart';
 import '../core/backend/backend_connection_manager.dart';
+import '../core/updates/app_update_controller.dart';
 import '../features/library/library_controller.dart';
 import '../features/manga_translation/manga_translation_coordinator.dart';
 import '../features/auth/auth_controller.dart';
@@ -21,6 +22,7 @@ class AppScope extends InheritedWidget {
     required this.tasks,
     required this.settings,
     this.mangaTranslation,
+    this.updates,
     required super.child,
     super.key,
   });
@@ -34,6 +36,7 @@ class AppScope extends InheritedWidget {
   final TasksController tasks;
   final SettingsController settings;
   final MangaTranslationCoordinator? mangaTranslation;
+  final AppUpdateController? updates;
 
   static AppScope of(BuildContext context) {
     final scope = context.dependOnInheritedWidgetOfExactType<AppScope>();
@@ -46,6 +49,7 @@ class AppScope extends InheritedWidget {
     return appState != oldWidget.appState ||
         api != oldWidget.api ||
         auth != oldWidget.auth ||
+        updates != oldWidget.updates ||
         mangaTranslation != oldWidget.mangaTranslation;
   }
 }

@@ -510,7 +510,9 @@ async def test_qidian_incremental_downloads_forward_separate_cookie_contexts(
         *,
         image_download_semaphore=None,
         qidian_cookies=None,
+        shaoniandream_cookies=None,
     ) -> dict[str, object]:
+        assert shaoniandream_cookies is None
         captured.append(dict(qidian_cookies or {}))
         return {
             "index": chapter_index,

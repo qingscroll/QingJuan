@@ -1,6 +1,7 @@
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/app_metadata.dart';
 import '../../shared/app_surface.dart';
 import '../../shared/brand_logo.dart';
 import '../../shared/page_frame.dart';
@@ -16,7 +17,7 @@ class AboutPage extends StatefulWidget {
 }
 
 class _AboutPageState extends State<AboutPage> {
-  static const _repositoryUrl = 'https://github.com/Tavre/QingJuan';
+  static const _repositoryUrl = officialRepositoryUrl;
   static const _discussionGroup = '1074882763';
 
   String? _copiedLabel;

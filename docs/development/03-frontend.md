@@ -123,8 +123,8 @@ Controller 表达一个功能域的用例和可观察状态：
 
 ## 6. 导航
 
-- 顶层导航由 Shell 统一管理，但平台风格不得只按宽度互换。Windows 始终使用 v1.3.4 基线的 Fluent
-  `NavigationView` / `NavigationPane`、自绘标题栏、可调宽侧栏与桌面控件密度；Android 始终使用 v1.4 起形成的移动端
+- 顶层导航由 Shell 统一管理，但平台风格不得只按宽度互换。Windows 的 `DesktopShell` 使用参考微软商店的 Fluent
+  `NavigationView` / `NavigationPane`、自绘标题栏、默认带文字的窄侧栏与桌面控件密度；宽屏支持手动展开与调宽，Android 始终使用 v1.4 起形成的移动端
   底部导航与触控页面层级；宽度只控制各自平台内的重排。
 - Windows 本机后端模式的左侧导航分别提供“书源管理”和“插件配置”；切换 Linux 远程后端时从侧栏移除“插件配置”，若当前
   页面正是插件配置则回到设置。Android 底部导航只保留“书源管理”，设置区不提供插件入口；远程插件由 Linux 管理界面维护。

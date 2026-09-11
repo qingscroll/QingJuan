@@ -176,6 +176,11 @@ function Test-SmokeSitePlugin {
             try {
                 $bytes = [System.IO.File]::ReadAllBytes((Join-Path $projectRoot "examples/plugins/demo-novel/$name"))
                 $stream.Write($bytes, 0, $bytes.Length)
+                if ($name -eq 'plugin.py') {
+                    $probe = "`n" + [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows_runtime_probe.py'))
+                    $probeBytes = [System.Text.Encoding]::UTF8.GetBytes($probe)
+                    $stream.Write($probeBytes, 0, $probeBytes.Length)
+                }
             }
             finally { $stream.Dispose() }
         }
@@ -210,8 +215,11 @@ function Test-SmokeSitePlugin {
     $json = [System.Text.Encoding]::UTF8.GetBytes((@{ keyword = $keyword; limit = 10 } | ConvertTo-Json -Compress))
     Assert-SmokeListenerOwnership | Out-Null
     $results = @(Invoke-RestMethod -Uri "$base/plugins/search" -Method Post -Headers $headers `
-        -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 20)
+        -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 60)
     if ($results.Count -ne 1) { throw 'Installed plugin search failed in the frozen backend.' }
+    $runtimeReport = $results[0].synopsis | ConvertFrom-Json
+    if ($runtimeReport.ok -ne $true) { throw "Packaged native runtime probe failed: $($runtimeReport.error)" }
+    Write-Output "Packaged native dependencies passed: $($runtimeReport.checks -join ', ')."
     $payload = @{
         sourceUrl = $results[0].sourceUrl
         bookKind = $inspection.plugin.bookKinds[0]
@@ -236,6 +244,8 @@ function Test-SmokeSitePlugin {
 $Port = Get-SmokeTestPort -RequestedPort $Port
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $releaseOutput = Join-Path $projectRoot "release/qingjuan-windows"
+. (Join-Path $PSScriptRoot 'windows_payload_validation.ps1')
+Assert-WindowsBackendRuntime -ReleaseRoot $releaseOutput
 $versionLine = Get-Content -LiteralPath (Join-Path $projectRoot "pubspec.yaml") -Encoding UTF8 |
     Where-Object { $_ -match "^version:\s*" } |
     Select-Object -First 1
@@ -263,7 +273,8 @@ if ($clientVersion.FileVersion -ne $expectedVersion -or
 $forbiddenFiles = @(
     Get-ChildItem -LiteralPath $releaseOutput -Recurse -File |
         Where-Object {
-            $_.Extension.ToLowerInvariant() -in @(".db", ".sqlite", ".sqlite3", ".pem", ".key")
+            $_.Extension.ToLowerInvariant() -in @(".db", ".sqlite", ".sqlite3", ".pem", ".key") -and
+            -not (Test-PackagedPublicCertificate -File $_ -ReleaseRoot $releaseOutput)
         }
 )
 if ($forbiddenFiles.Count -gt 0) {

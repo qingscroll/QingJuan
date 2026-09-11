@@ -107,11 +107,11 @@ class _WideBookCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           SizedBox(
-            width: 70,
-            height: 102,
+            width: 76,
+            height: 112,
             child: BookCover(book: book, borderRadius: 6),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -122,20 +122,16 @@ class _WideBookCard extends StatelessWidget {
                     book.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.typography.bodyLarge
+                    style: theme.typography.body
                         ?.copyWith(fontWeight: FontWeight.w600),
                   ),
                 ),
                 const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 5,
-                  children: <Widget>[
-                    StatusPill(book.kind),
-                    StatusPill(book.language),
-                    if (book.translated)
-                      const StatusPill('已翻译', accented: true),
-                  ],
+                Text(
+                  '${book.kind} · ${book.language}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.typography.caption,
                 ),
                 const Spacer(),
                 Wrap(
@@ -151,17 +147,26 @@ class _WideBookCard extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '${book.lastReadChapterIndex}/${book.chapterCount}',
-                      style: theme.typography.caption,
+                      '${book.chapterCount} 章${book.translated ? ' · 已翻译' : ''}',
+                      style: theme.typography.caption?.copyWith(
+                        color: book.translated
+                            ? theme.accentColor
+                                .defaultBrushFor(theme.brightness)
+                            : null,
+                      ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
-                ProgressBar(
-                  value: book.chapterCount <= 0
-                      ? 0
-                      : (book.lastReadChapterIndex / book.chapterCount * 100)
-                          .clamp(0, 100),
+                SizedBox(
+                  width: double.infinity,
+                  child: ProgressBar(
+                    strokeWidth: 3,
+                    value: book.chapterCount <= 0
+                        ? 0
+                        : (book.lastReadChapterIndex / book.chapterCount * 100)
+                            .clamp(0, 100),
+                  ),
                 ),
               ],
             ),

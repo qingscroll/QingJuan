@@ -31,6 +31,10 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
 
 ### 认证与凭据
 
+- PC 局域网共享由 Flutter `LanBackendShare` 基础设施按需创建，不改变 Python 本机后端的回环监听。桥接器仅绑定用户选择的私有 IPv4 地址，默认 TCP 19454，要求私网来源和每次生成的 256 位随机 Bearer 密钥，仅转发 `/api/v1/` 到固定本机地址。上游请求不携带调用方的 Host、Cookie、Authorization 或用户会话，也不跟随重定向；通过本机请求标记访问同一份单用户书库。关闭共享、切换远程模式及释放连接管理器时关闭监听和活动连接，旧密钥失效。
+- 共享元数据保留原后端实例 ID，并增加 `desktopSharing: true`；移动端仅在此能力或 `multiUser: true` 存在时接受远程连接。共享模式无需账号登录，远程多用户服务继续要求独立用户会话。该能力不是绕过连接密钥的凭据。
+- 连接二维码格式为 `qingjuan://connect#v=1&url=<编码地址>&token=<编码密钥>`，不包含用户会话。Android 使用应用内相机扫码、主动粘贴或自定义 URI 唤起导入；导入只预填表单，用户核对后经元数据握手成功才保存到现有安全存储。拒绝未知版本、重复字段、回环地址、公网明文 HTTP 及无效密钥。二维码不写入日志、普通偏好或外部二维码服务；远程二维码复用已保存的实例 Token，隐藏并不撤销它。
+
 - `/healthz` 不认证，只返回稳定的存活状态，不包含版本、路径或配置。
 - Linux 远程服务的 `/api/v1/*` 默认全部认证；Token 从 `Authorization: Bearer` 读取并使用常量时间比较。
   Windows 本机服务只能监听回环地址，可不配置 Bearer Token。
@@ -141,6 +145,16 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
 - 时间字段对外使用 UTC ISO 8601；旧的无时区字段迁移时按明确的服务器本地时区解释。
 
 ## 4. 抓取与外部服务
+
+### 少年梦账号登录
+
+- 参照 `D:\Code\bookweb\shaonianmeng_book` 的直连登录契约，内置插件直接调用少年梦 `/author/startcaptchaservlet` 和 `/user/loginaction`；发布后无需外部 API 服务，也不引入参考服务的注册 / JWT 账号体系。
+- 插件声明 `account_login`、`browser_login`。客户端通过 `POST /api/v1/plugins/shaoniandream/account/login-browser` 创建五分钟登录流程，打开当前后端的 `/site-login/shaoniandream#<browserToken>`，在浏览器输入账号密码并完成 GeeTest v3。页面使用 [GeeTest 官方 Web 接入方式](https://docs.geetest.com/captcha/deploy/client/web/)。轮询与取消分别使用同路径 `/{flowId}` 的 GET、DELETE，退出账号沿用 `DELETE /api/v1/plugins/shaoniandream/account`。
+- 浏览器专用入口只接受短期随机票据，通过 `X-Login-Token` 提交，不能访问其他业务 API。票据放在 URL fragment，加载后立即移除；页面和响应禁止缓存与 Referer，连接 Token、青卷用户 Token 不进入浏览器。极验配置和登录请求复用同一上游 Cookie，成功或取消后禁止重放，单流程最多尝试五次。
+- 站点 Cookie 按青卷用户保存在后端内存，最长 24 小时，退出或后端重启清除；密码不持久化。登录成功状态表示已建立会话，上游提前撤销时下载仍可能提示重新登录。全书导入、单章缓存和批量下载根据书籍所有者取出会话，仅在少年梦专用 HTTP 客户端发送，不共享给其他站点、封面或搜索。保留匿名解析能力，不自动购买章节。
+- Windows 本机模式在“插件配置 → 少年梦阅读 → 账号登录”使用。Linux 沿用现有用户鉴权和会话隔离；反向代理需同时转发 `/site-login/shaoniandream` 及其子路径。现有 Android / Windows 远程模式的插件入口可见性保持原有约定。
+
+### 通用抓取规则
 
 - 网络请求设置连接、读取和总超时；重试必须有上限和退避。
 - 验证 URL scheme，只允许业务需要的 `http` / `https`。
@@ -357,7 +371,7 @@ Compose 或随仓库分发的反向代理配置：
 
 ```bash
 sudo mkdir -p /opt/qingjuan
-sudo git clone https://github.com/Tavre/QingJuan.git /opt/qingjuan/app
+sudo git clone https://github.com/qingscroll/QingJuan.git /opt/qingjuan/app
 cd /opt/qingjuan/app
 sudo bash deploy/linux/install.sh
 sudo qingjuan-info

@@ -241,6 +241,10 @@ class _MobileAccountPageState extends State<MobileAccountPage> {
                     icon: Icons.link_rounded,
                     onPressed: () => showMobileConnectionPage(context),
                     child: const Text('连接服务')));
+          } else if (scope.backend.capabilities['desktopSharing'] == true) {
+            body = const MobileSettingsNotice(
+                title: 'PC 共享书库',
+                message: '当前与 PC 共用书库、任务和阅读进度，无需额外登录。请保持 PC 青卷运行。');
           } else if (!scope.backend.multiUserEnabled) {
             body = const MobileSettingsNotice(
                 title: '需要升级服务端',

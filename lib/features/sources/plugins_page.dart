@@ -13,6 +13,7 @@ import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import 'sources_controller.dart';
+import 'widgets/plugin_browser_login_dialog.dart';
 import 'widgets/plugin_settings_widgets.dart';
 import 'widgets/plugin_package_widgets.dart';
 
@@ -174,10 +175,13 @@ class _PluginsPageState extends State<PluginsPage> {
     SitePlugin plugin,
     SourcesController controller,
   ) {
-    Widget builder(BuildContext _) => _PluginQrLoginDialog(
-          plugin: plugin,
-          controller: controller,
-        );
+    Widget builder(BuildContext _) =>
+        plugin.capabilities.contains('browser_login')
+            ? PluginBrowserLoginDialog(plugin: plugin, controller: controller)
+            : _PluginQrLoginDialog(
+                plugin: plugin,
+                controller: controller,
+              );
     if (usesMobileUi(context)) {
       return showMobileSheet<void>(context: context, builder: builder);
     }

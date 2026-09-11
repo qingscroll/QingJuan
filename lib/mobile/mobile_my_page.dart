@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_miuix/miuix.dart';
 import '../app/app_scope.dart';
 import '../app/app_state.dart';
 import '../core/backend/backend_connection_manager.dart';
+import '../core/backend/backend_connection_link.dart';
 import '../core/backend/backend_url_validator.dart';
 import '../features/audiobook/tts_voice_service.dart';
+import '../features/settings/widgets/app_update_card.dart';
 import 'mobile_action_button.dart';
+import 'mobile_connection_scanner.dart';
 import 'mobile_auth_page.dart';
 import 'mobile_page.dart';
 import 'mobile_settings_route.dart';
@@ -15,9 +19,12 @@ import 'mobile_widgets.dart';
 
 part 'mobile_my_panels.dart';
 
-Future<void> showMobileConnectionPage(BuildContext context) async {
+Future<void> showMobileConnectionPage(BuildContext context,
+    {BackendConnectionLink? connectionLink}) async {
   await showMobileSettingsPage<void>(
-      context: context, title: '服务连接', child: const _BackendSettingsPanel());
+      context: context,
+      title: '服务连接',
+      child: _BackendSettingsPanel(connectionLink: connectionLink));
 }
 
 class MobileMyPage extends StatelessWidget {
@@ -46,13 +53,15 @@ class MobileMyPage extends StatelessWidget {
             : auth.isBusy
                 ? '正在恢复账号'
                 : auth.isLocalAdministrator
-                    ? '阅读账号'
+                    ? 'PC 共享书库'
                     : '登录青卷';
         final subtitle = signedIn
             ? '@${user.username} · ${user.isAdministrator ? '管理员' : '读者'}'
-            : connected
-                ? '登录后同步你的书库与阅读进度'
-                : '连接服务，开始你的阅读';
+            : auth.isLocalAdministrator
+                ? '与 PC 共用书库、任务和阅读进度'
+                : connected
+                    ? '登录后同步你的书库与阅读进度'
+                    : '连接服务，开始你的阅读';
         final theme = MiuixTheme.of(context);
         return MobilePage(
             title: '我的',
@@ -63,7 +72,7 @@ class MobileMyPage extends StatelessWidget {
               children: <Widget>[
                 MobilePressable(
                     key: const ValueKey('mobile-my-profile'),
-                    onPressed: () => connected
+                    onPressed: () => connected && !auth.isLocalAdministrator
                         ? showMobileAccountPage(context)
                         : showMobileConnectionPage(context),
                     child: Padding(
@@ -174,6 +183,18 @@ class MobileMyPage extends StatelessWidget {
                       title: '关于青卷',
                       subtitle: '版本与开源许可',
                       onPressed: () => app.selectSection(AppSection.about)),
+                  if (scope.updates case final updates?)
+                    _PreferenceRow(
+                        key: const ValueKey('my-update-entry'),
+                        icon: Icons.system_update_outlined,
+                        title: '软件更新',
+                        subtitle: '检查并下载新版本 · 启动自动检查',
+                        onPressed: () => showMobileSettingsPage<void>(
+                            context: context,
+                            title: '软件更新',
+                            child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: AppUpdateCard(controller: updates)))),
                 ]),
               ],
             ));

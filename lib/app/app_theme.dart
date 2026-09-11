@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../shared/mobile_palette.dart';
 
-/// v1.3.4 Windows 桌面端使用的青绿色 Fluent 强调色。
+/// Windows 桌面端使用的青绿色 Fluent 强调色。
 final qingJuanAccent = AccentColor.swatch(const <String, Color>{
   'darkest': Color(0xFF06433D),
   'darker': Color(0xFF075D55),
@@ -62,7 +62,7 @@ FluentThemeData _buildDesktopTheme(Brightness brightness) {
     visualDensity: VisualDensity.standard,
     fontFamily: 'Segoe UI Variable Text',
     scaffoldBackgroundColor:
-        isDark ? const Color(0xFF202020) : const Color(0xFFF3F3F3),
+        isDark ? const Color(0xFF272727) : const Color(0xFFF9F9F9),
     micaBackgroundColor:
         isDark ? const Color(0xFF202020) : const Color(0xFFF3F3F3),
     acrylicBackgroundColor:
@@ -70,12 +70,12 @@ FluentThemeData _buildDesktopTheme(Brightness brightness) {
     menuColor: isDark ? const Color(0xFF2C2C2C) : const Color(0xFFFAFAFA),
     inactiveBackgroundColor:
         isDark ? const Color(0xFF303030) : const Color(0xFFEAEAEA),
-    cardColor: isDark ? const Color(0xFF292929) : const Color(0xFFFBFBFB),
+    cardColor: isDark ? const Color(0xFF303030) : const Color(0xFFFFFFFF),
     navigationPaneTheme: NavigationPaneThemeData(
       animationDuration: const Duration(milliseconds: 110),
       animationCurve: Curves.easeOutCubic,
       backgroundColor:
-          isDark ? const Color(0xFF202020) : const Color(0xFFF7F7F7),
+          isDark ? const Color(0xFF202020) : const Color(0xFFF3F3F3),
       overlayBackgroundColor:
           isDark ? const Color(0xFF252525) : const Color(0xFFFAFAFA),
       headerPadding: const EdgeInsetsDirectional.only(

@@ -24,6 +24,7 @@ class SourcesController extends ChangeNotifier {
   List<SourceSearchResult> results = const [];
   final Set<String> _savingPluginIds = <String>{};
   final Set<String> _savingSourceIds = <String>{};
+  final Map<String, bool Function()> _browserLoginGuards = {};
   int _backendGeneration = 0;
   int _searchGeneration = 0;
   bool searching = false;
@@ -38,6 +39,7 @@ class SourcesController extends ChangeNotifier {
     results = const [];
     _savingPluginIds.clear();
     _savingSourceIds.clear();
+    _browserLoginGuards.clear();
     searching = false;
     changingPackages = false;
     error = null;
@@ -143,6 +145,38 @@ class SourcesController extends ChangeNotifier {
 
   Future<SitePluginLoginQrCode> startPluginLogin(String pluginId) =>
       api.startSitePluginLogin(pluginId);
+
+  Future<SitePluginBrowserLogin> startBrowserLogin(String pluginId) async {
+    final current = api.captureContextGuard();
+    final generation = _backendGeneration;
+    final result = await api.startSitePluginBrowserLogin(pluginId);
+    if (!current() || generation != _backendGeneration) {
+      throw StateError('后端或账号已切换，请重新登录');
+    }
+    _browserLoginGuards[result.flowId] = current;
+    return result;
+  }
+
+  Future<SitePluginLoginPoll> pollBrowserLogin(
+      String pluginId, String flowId) async {
+    final current = _browserLoginGuards[flowId];
+    final generation = _backendGeneration;
+    if (current == null || !current()) {
+      throw StateError('后端或账号已切换，请重新登录');
+    }
+    final result = await api.pollSitePluginBrowserLogin(pluginId, flowId);
+    if (!current() || generation != _backendGeneration) {
+      throw StateError('后端或账号已切换，请重新登录');
+    }
+    if (result.loggedIn) setPluginAccountLoggedIn(pluginId, true);
+    return result;
+  }
+
+  Future<void> cancelBrowserLogin(String pluginId, String flowId) async {
+    final current = _browserLoginGuards.remove(flowId);
+    if (current == null || !current()) return;
+    await api.cancelSitePluginBrowserLogin(pluginId, flowId);
+  }
 
   Future<SitePluginLoginPoll> pollPluginLogin(
     String pluginId,
