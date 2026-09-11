@@ -75,7 +75,7 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 - 用户 / 发布负责人指定版本时以其语义版本为准，但 `build` 必须大于上一版；major / minor / 预发布 / 跳号不得自行推断。
 - 日常调试 / 重复构建**不得改版本号**；只有准备形成新发布才递增。
 - 修改版本后验证：Android `versionName` / `versionCode`、FastAPI 元数据、Windows 文件属性都来自同一版本源；禁止在 Dart / Python / Kotlin / C++ / 发布脚本里出现独立硬编码版本。
-- 当前基线：已发布 `2.1.1+41`；`2.2.0+42` 为当前发布候选，后续 build 必须 > `42`，不得回退 / 复用。该次版本新增客户端在线更新、Windows 安装包、PC 局域网后端共享、Android 扫码连接及站点登录能力，对外标签 `v2.2.0`。
+- 当前基线：已发布 `2.2.0+42`；`2.2.1+43` 为当前发布候选，后续 build 必须 > `43`，不得回退 / 复用。该补丁版修复 TUN/Fake-IP DNS 代理环境中的站点抓取解析，对外标签 `v2.2.1`。
 
 ### 发布前清单
 
@@ -92,8 +92,8 @@ Dependabot 只维护当前技术栈：`pub`（Flutter/Dart）、`pip`（FastAPI�
 合并并确认 `main` 的 CI 全绿后：
 
 ```powershell
-git tag v2.2.0
-git push origin v2.2.0
+git tag v2.2.1
+git push origin v2.2.1
 ```
 
 `release.yml` 会重跑 Flutter 检查 + Ruff + Pytest，再并行构建 Windows ZIP、Windows 安装 EXE 与签名 Android APK；**只有标签、`pubspec.yaml`、两个客户端版本、后端元数据版本全部一致**才上传产物与 SHA-256 并创建 Release。禁止手工跳过失败门禁、用未提交本地工作区制作正式包。
