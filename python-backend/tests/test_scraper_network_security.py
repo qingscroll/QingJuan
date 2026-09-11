@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import struct
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpcore
+import httpx
 import pytest
 
 from app import scraper
 from app.model_endpoint_security import ValidatedModelNetworkBackend
-from app.models import AddBookPayload
+from app.models import AddBookPayload, BookSourceRecord
 
 
 class WireStream(httpcore.AsyncNetworkStream):
@@ -60,16 +62,14 @@ def http_response(body=b"<title>Book</title><p>chapter</p>", *, location=None):
     )
 
 
-def wire_client(monkeypatch, responses, resolver):
+def wire_client(monkeypatch, responses, resolver=None):
     from app.scraper_network_security import PublicHTTPTransport, create_public_http_client
 
     wire = WireBackend(responses)
     client = create_public_http_client(timeout=1, resolver=resolver)
     assert isinstance(client._transport, PublicHTTPTransport)
     assert isinstance(client._transport._pool._network_backend, ValidatedModelNetworkBackend)
-    client._transport._pool._network_backend = ValidatedModelNetworkBackend(
-        allowlist=frozenset(), resolver=resolver, delegate=wire
-    )
+    client._transport._pool._network_backend._delegate = wire
     monkeypatch.setattr(scraper, "_build_http_client", lambda: client)
     monkeypatch.setattr(scraper, "is_site_plugin_enabled", lambda _: True)
     return client, wire
@@ -325,3 +325,255 @@ async def test_cover_redirect_cannot_use_model_private_allowlist(monkeypatch, tm
                 client, tmp_path, "https://books.example/cover", "https://books.example/"
             )
     assert wire.connected == [("93.184.216.34", 443)]
+
+
+def mock_fake_ip_dns(monkeypatch, handler, *, system_addresses=("198.18.1.30",)):
+    from app import model_endpoint_security
+    from app import scraper_network_security as security
+
+    requests = []
+
+    async def system_resolver(host, port):
+        return tuple(ipaddress.ip_address(address) for address in system_addresses)
+
+    def doh_transport(*, allowlist, resolver):
+        assert allowlist == frozenset()
+
+        async def respond(request):
+            pinned = await resolver(request.url.host, request.url.port or 443)
+            requests.append((request, tuple(str(address) for address in pinned)))
+            return handler(request)
+
+        return httpx.MockTransport(respond)
+
+    monkeypatch.setattr(security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(model_endpoint_security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(security, "ValidatedModelHTTPTransport", doh_transport)
+    return requests
+
+
+def dns_response(request, *, ipv4="93.184.216.34", ipv6="2606:4700:4700::1111"):
+    record_type = int(request.url.params["type"])
+    address = ipv4 if record_type == 1 else ipv6
+    return httpx.Response(
+        200,
+        json={
+            "Status": 0,
+            "Answer": [
+                {"type": 5, "data": "cdn.example."},
+                *([{"type": record_type, "data": address}] if address else []),
+            ],
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_addresses", [("198.18.1.30",), ("198.19.1.30", "2606:4700::1111")])
+async def test_fake_ip_dns_recovers_public_preview_and_pins_real_ip(monkeypatch, system_addresses):
+    requests = mock_fake_ip_dns(monkeypatch, dns_response, system_addresses=system_addresses)
+    _, wire = wire_client(monkeypatch, [http_response()])
+
+    preview = await scraper.preview_from_url(
+        AddBookPayload(sourceUrl="https://books.example/book", bookKind="长小说", language="中文")
+    )
+
+    assert preview.title == "Book"
+    assert wire.connected == [("93.184.216.34", 443)]
+    assert wire.streams[0].sni == "books.example"
+    assert {request.url.params["type"] for request, _ in requests} == {"1", "28"}
+    assert all(request.url.params["name"] == "books.example" for request, _ in requests)
+    assert all(request.headers["accept"] == "application/dns-json" for request, _ in requests)
+    assert all(addresses == ("1.1.1.1",) for _, addresses in requests)
+
+
+@pytest.mark.asyncio
+async def test_fake_ip_dns_recovers_builtin_site_search(monkeypatch):
+    mock_fake_ip_dns(monkeypatch, dns_response)
+    body = json.dumps(
+        {
+            "status": 200,
+            "data": {
+                "modulesInfos": [
+                    {"data": {"bookId": "46543", "displayBookName": "斗罗大陆", "authorName": "唐家三少"}}
+                ]
+            },
+        }
+    ).encode()
+    _, wire = wire_client(monkeypatch, [http_response(body)])
+    source = BookSourceRecord(
+        id="source-builtin-quark",
+        name="夸克小说",
+        baseUrl="https://www.shuqi.com",
+        bookKind="长小说",
+        language="中文",
+        origin="builtin",
+    )
+
+    results = await scraper.search_builtin_site_books(source, "斗罗大陆")
+
+    assert len(results) == 1
+    assert results[0].title == "斗罗大陆"
+    assert str(results[0].sourceUrl) == "https://www.shuqi.com/book/46543.html"
+    assert wire.connected == [("93.184.216.34", 443)]
+
+
+def test_fake_ip_dns_recovers_curl_and_validates_redirects(monkeypatch):
+    from curl_cffi import CurlOpt
+
+    from app import scraper_network_security as security
+
+    mock_fake_ip_dns(monkeypatch, dns_response)
+    calls = []
+
+    class Session:
+        curl_options = {CurlOpt.TIMEOUT: 10}
+
+        def get(self, url, **kwargs):
+            calls.append((url, dict(self.curl_options)))
+            return SimpleNamespace(status_code=302, headers={"Location": "http://127.0.0.1/secret"})
+
+    session = Session()
+    with pytest.raises(security.ScraperNetworkSecurityError):
+        security.public_curl_get(session, "https://books.example/chapter")
+
+    assert len(calls) == 1
+    assert calls[0][1][CurlOpt.RESOLVE] == ["books.example:443:93.184.216.34,[2606:4700:4700::1111]"]
+    assert calls[0][1][CurlOpt.PROXY] == ""
+    assert session.curl_options == {CurlOpt.TIMEOUT: 10}
+
+
+@pytest.mark.asyncio
+async def test_fake_ip_dns_recovers_browser_proxy(monkeypatch):
+    from app.scraper_network_security import PublicBrowserProxy
+
+    mock_fake_ip_dns(monkeypatch, dns_response)
+    wire = WireBackend([b"test"])
+    async with PublicBrowserProxy(delegate=wire) as proxy:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        try:
+            writer.write(b"\x05\x01\x00")
+            await writer.drain()
+            assert await asyncio.wait_for(reader.readexactly(2), timeout=1) == b"\x05\x00"
+            host = b"books.example"
+            writer.write(b"\x05\x01\x00\x03" + bytes([len(host)]) + host + struct.pack("!H", 443))
+            await writer.drain()
+            reply = await asyncio.wait_for(reader.readexactly(10), timeout=1)
+            assert reply[1] == 0
+            assert wire.connected == [("93.184.216.34", 443)]
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "198.18.2.1"])
+async def test_fake_ip_dns_never_connects_to_nonpublic_doh_answer(monkeypatch, address):
+    from app.scraper_network_security import ScraperNetworkSecurityError
+
+    mock_fake_ip_dns(monkeypatch, lambda request: dns_response(request, ipv4=address))
+    client, wire = wire_client(monkeypatch, [])
+    async with client:
+        with pytest.raises(ScraperNetworkSecurityError):
+            await client.get("https://books.example/book")
+    assert wire.connected == []
+
+
+@pytest.mark.asyncio
+async def test_fake_ip_dns_rejects_mixed_public_and_private_doh_answers(monkeypatch):
+    from app.scraper_network_security import ScraperNetworkSecurityError
+
+    mock_fake_ip_dns(monkeypatch, lambda request: dns_response(request, ipv6="::ffff:127.0.0.1"))
+    client, wire = wire_client(monkeypatch, [])
+    async with client:
+        with pytest.raises(ScraperNetworkSecurityError):
+            await client.get("https://books.example/book")
+    assert wire.connected == []
+
+
+@pytest.mark.asyncio
+async def test_fake_ip_dns_revalidates_http_redirects_and_new_connections(monkeypatch):
+    from app.scraper_network_security import ScraperNetworkSecurityError
+
+    def respond(request):
+        address = "127.0.0.1" if request.url.params["name"] == "internal.example" else "93.184.216.34"
+        return dns_response(request, ipv4=address)
+
+    mock_fake_ip_dns(monkeypatch, respond)
+    client, wire = wire_client(monkeypatch, [http_response(location="https://internal.example/secret")])
+    async with client:
+        with pytest.raises(ScraperNetworkSecurityError):
+            await client.get("https://books.example/book")
+    assert wire.connected == [("93.184.216.34", 443)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_addresses", [("93.184.216.34",), ("10.0.0.1",), ("198.18.1.1", "::1")])
+async def test_only_fake_ip_dns_uses_doh(monkeypatch, system_addresses):
+    from app.scraper_network_security import ScraperNetworkSecurityError, resolve_public_url
+
+    requests = mock_fake_ip_dns(monkeypatch, dns_response, system_addresses=system_addresses)
+    if system_addresses == ("93.184.216.34",):
+        _, _, addresses = await resolve_public_url("https://books.example/book")
+        assert tuple(str(address) for address in addresses) == system_addresses
+    else:
+        with pytest.raises(ScraperNetworkSecurityError):
+            await resolve_public_url("https://books.example/book")
+    assert requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host", ["198.18.1.30", "[::ffff:198.18.1.30]", "localhost", "metadata.google.internal"]
+)
+async def test_fake_ip_dns_does_not_allow_direct_ips_or_internal_hostnames(monkeypatch, host):
+    from app.scraper_network_security import ScraperNetworkSecurityError, resolve_public_url
+
+    requests = mock_fake_ip_dns(monkeypatch, dns_response)
+    with pytest.raises(ScraperNetworkSecurityError):
+        await resolve_public_url(f"https://{host}/book")
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_fake_ip_dns_uses_second_provider_without_following_doh_redirect(monkeypatch):
+    from app.scraper_network_security import resolve_public_url
+
+    def respond(request):
+        if request.url.host == "cloudflare-dns.com":
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/secret"})
+        return dns_response(request, ipv4=None)
+
+    requests = mock_fake_ip_dns(monkeypatch, respond)
+    _, _, addresses = await resolve_public_url("https://books.example/book")
+    assert addresses == (ipaddress.ip_address("2606:4700:4700::1111"),)
+    assert {request.url.host for request, _ in requests} == {"cloudflare-dns.com", "dns.google"}
+    assert {pinned for _, pinned in requests} == {("1.1.1.1",), ("8.8.8.8",)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["timeout", "invalid-json", "invalid-answer", "servfail", "truncated", "empty"]
+)
+async def test_fake_ip_dns_failure_is_actionable_and_never_uses_fake_ip(monkeypatch, failure):
+    from app.scraper_network_security import ScraperNetworkSecurityError
+
+    def respond(request):
+        if failure == "timeout":
+            raise httpx.ConnectTimeout("DNS unavailable")
+        if failure == "invalid-json":
+            return httpx.Response(200, text="not JSON")
+        if failure == "invalid-answer":
+            return httpx.Response(200, json={"Status": 0, "Answer": [{"type": 1, "data": "not an IP"}]})
+        if failure == "truncated":
+            return httpx.Response(
+                200, json={"Status": 0, "TC": True, "Answer": [{"type": 1, "data": "93.184.216.34"}]}
+            )
+        return httpx.Response(200, json={"Status": 2 if failure == "servfail" else 0})
+
+    requests = mock_fake_ip_dns(monkeypatch, respond)
+    client, wire = wire_client(monkeypatch, [])
+    async with client:
+        with pytest.raises(ScraperNetworkSecurityError, match="Fake-IP.*DNS"):
+            await client.get("https://books.example/book")
+    assert wire.connected == []
+    assert {request.url.host for request, _ in requests} == {"cloudflare-dns.com", "dns.google"}

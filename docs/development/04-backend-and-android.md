@@ -159,6 +159,7 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
 - 网络请求设置连接、读取和总超时；重试必须有上限和退避。
 - 验证 URL scheme，只允许业务需要的 `http` / `https`。
 - 防止 SSRF：拒绝环回、链路本地、私有网段和不可信重定向，除非某个明确的本地集成经过单独授权。
+- 抓取域名的系统 DNS 返回 `198.18.0.0/15`（代理 Fake-IP）时，通过固定公网 IP、保留 TLS 域名校验的 HTTPS DNS 查询真实 A/AAAA 地址，优先使用 [Cloudflare DNS JSON](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/)，失败后尝试 [Google Public DNS](https://developers.google.com/speed/public-dns/docs/doh/json)。每个服务的查询总超时为 5 秒，不继承环境代理、不跟随 DNS 服务重定向；所有结果仍须通过公网校验，再供 HTTP、curl 和浏览器代理固定连接。直接输入虚拟 IP、私网地址或混合私网 DNS 答案仍拒绝；公网解析失败时明确提示检查代理 DNS 模式，不直接放行虚拟网段。
 - 控制并发，避免对第三方站点造成突发压力。
 - 解析器按站点或协议拆分，通用清洗与持久化逻辑复用。
 - 禁漫本子号入口参照 `D:\Code\bookweb\18comic` 的 `albumId` 契约，复用内置 jmcomic 解析、章节下载和图片反混淆，不依赖该开发目录或独立服务。`POST /api/v1/books/preview` 与 `/api/v1/books/import` 可提交 `{"albumId":"123456"}`；异步导入使用 `POST /api/v1/books/link-jobs`，请求为 `{"mode":"import","payload":{"albumId":"123456"}}`。纯数字 `sourceUrl` 同样支持；后端统一转换为专辑链接，默认漫画、中文和全部下载，章节 ID 从 API 目录读取。已有鉴权、插件开关、任务进度、图片下载与阅读接口保持不变；错误编号或冲突的链接在发起上游请求前返回 422。
