@@ -13,7 +13,7 @@ from app import main, scraper
 from app.api.routers import library_router
 from app.application import create_application
 from app.link_jobs import LinkJobStore
-from app.models import AddBookPayload
+from app.models import AddBookPayload, TranslationSettings
 from app.security import API_PREFIX
 
 
@@ -124,6 +124,7 @@ async def test_number_preview_and_background_api_use_album_not_photo_id(monkeypa
 
 @pytest.mark.asyncio
 async def test_number_import_downloads_all_episode_images(tmp_path, monkeypatch, jm_api):
+    monkeypatch.setattr(scraper, "_load_runtime_settings", TranslationSettings)
     payload = AddBookPayload.model_validate({"albumId": "123456"})
     preview = await scraper.preview_from_url(payload)
     buffer = BytesIO()
