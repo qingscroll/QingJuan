@@ -243,6 +243,8 @@ class _BackendSettingsPanelState extends State<_BackendSettingsPanel> {
                           .textStyles
                           .title4
                           .copyWith(fontWeight: FontWeight.w600)),
+                  if (scope.offline case final offline?)
+                    OfflineLibraryEntry(controller: offline),
                   const SizedBox(height: 8),
                   const Text(
                       '扫描 PC 设置中的二维码，或输入服务地址和连接密钥。局域网共享需与 PC 连接同一网络，并保持 PC 青卷运行。'),

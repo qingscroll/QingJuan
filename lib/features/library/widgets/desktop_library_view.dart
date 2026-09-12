@@ -1,5 +1,6 @@
 import 'package:fluent_ui/fluent_ui.dart';
 
+import '../../../app/app_scope.dart';
 import '../../../core/models/book.dart';
 import '../../../core/state/load_state.dart';
 import '../../../shared/app_surface.dart';
@@ -7,6 +8,10 @@ import '../../../shared/feedback_widgets.dart';
 import '../../../shared/page_frame.dart';
 import '../../../shared/smooth_scroll.dart';
 import '../library_controller.dart';
+import '../import_history_page.dart';
+import '../book_metadata_editor.dart';
+import '../library_organization_controls.dart';
+import '../book_updates_page.dart';
 import 'book_card.dart';
 
 /// Desktop presentation only; searches and imports use the existing controller.
@@ -28,6 +33,12 @@ class DesktopLibraryView extends StatefulWidget {
 
 class _DesktopLibraryViewState extends State<DesktopLibraryView> {
   late final _query = TextEditingController(text: widget.controller.query);
+  bool get _metadataEnabled =>
+      context
+          .dependOnInheritedWidgetOfExactType<AppScope>()
+          ?.backend
+          .capabilities['libraryMetadata'] ==
+      true;
 
   @override
   void didUpdateWidget(DesktopLibraryView oldWidget) {
@@ -57,6 +68,10 @@ class _DesktopLibraryViewState extends State<DesktopLibraryView> {
         spacing: 8,
         runSpacing: 8,
         children: <Widget>[
+          if (controller.imports.enabled)
+            Button(
+                onPressed: () => openImportHistory(context),
+                child: const Text('导入记录与批量导入')),
           if (controller.linkJob != null)
             Button(
               onPressed: widget.onImport,
@@ -110,7 +125,7 @@ class _DesktopLibraryViewState extends State<DesktopLibraryView> {
                     child: TextBox(
                       key: const ValueKey('desktop-library-search'),
                       controller: _query,
-                      placeholder: '搜索书名或简介',
+                      placeholder: '搜索书名、作者、简介或标签',
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
                         vertical: 9,
@@ -154,6 +169,14 @@ class _DesktopLibraryViewState extends State<DesktopLibraryView> {
                 ],
               );
             }),
+            if (_metadataEnabled) ...[
+              const SizedBox(height: 16),
+              LibraryOrganizationControls(controller: controller),
+            ],
+            if (controller.serials.error != null)
+              Button(
+                  onPressed: controller.serials.load,
+                  child: const Text('追更状态刷新失败 · 点击重试')),
             const SizedBox(height: 20),
             Expanded(
               child: switch (controller.state) {
@@ -189,7 +212,7 @@ class _DesktopLibraryViewState extends State<DesktopLibraryView> {
 
   Widget _bookGrid(BuildContext context, List<Book> books) {
     final textScale = MediaQuery.textScalerOf(context).scale(1);
-    final scaleAllowance = 100 * (textScale - 1).clamp(0.0, 1.5);
+    final scaleAllowance = 112 * (textScale - 1).clamp(0.0, 6.0);
     Book? recent;
     DateTime? recentTime;
     for (final book in books) {
@@ -224,15 +247,49 @@ class _DesktopLibraryViewState extends State<DesktopLibraryView> {
               itemCount: books.length,
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: columns,
-                mainAxisExtent: 160 + scaleAllowance,
+                mainAxisExtent: 232 + scaleAllowance,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
               ),
-              itemBuilder: (context, index) => BookCard(
-                key: ValueKey('desktop-book-${books[index].id}'),
-                book: books[index],
-                onOpen: () => widget.onOpen(books[index]),
-              ),
+              itemBuilder: (context, index) {
+                final book = books[index];
+                final owner = widget.controller;
+                final generation = owner.contextGeneration;
+                bool isCurrent() =>
+                    mounted &&
+                    identical(widget.controller, owner) &&
+                    generation == owner.contextGeneration &&
+                    owner.books.any((current) => current.id == book.id);
+                return BookCard(
+                  key: ValueKey('desktop-book-${book.id}'),
+                  book: book,
+                  onOpen: () {
+                    if (isCurrent()) {
+                      widget.onOpen(book);
+                    }
+                  },
+                  desktopActions: DesktopBookCardActions(
+                    onEditMetadata: _metadataEnabled
+                        ? () {
+                            if (isCurrent() && _metadataEnabled) {
+                              showBookMetadataEditor(this.context,
+                                  bookId: book.id);
+                            }
+                          }
+                        : null,
+                    onManageUpdates: owner.serials.enabled &&
+                            book.sourceUrl.isNotEmpty
+                        ? () {
+                            if (isCurrent() && owner.serials.enabled) {
+                              showBookUpdates(this.context, bookId: book.id);
+                            }
+                          }
+                        : null,
+                    newChapterCount:
+                        owner.serials.records[book.id]?.newChapterCount ?? 0,
+                  ),
+                );
+              },
             ),
             const SliverToBoxAdapter(child: SizedBox(height: 8)),
           ],

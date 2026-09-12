@@ -1,3 +1,5 @@
+import 'book_preview_chapter.dart';
+
 typedef JsonMap = Map<String, dynamic>;
 
 int _int(Object? value, [int fallback = 0]) =>
@@ -27,6 +29,12 @@ class Book {
     this.lastReadAt,
     this.lastReadPageIndex,
     this.lastReadPageCount,
+    this.author = '',
+    this.groupName,
+    this.tags = const [],
+    this.pinned = false,
+    this.readingState = 'unread',
+    this.metadataRevision = 0,
   });
 
   factory Book.fromJson(JsonMap json) => Book(
@@ -44,6 +52,12 @@ class Book {
         lastReadAt: json['lastReadAt'] as String?,
         lastReadPageIndex: (json['lastReadPageIndex'] as num?)?.toInt(),
         lastReadPageCount: (json['lastReadPageCount'] as num?)?.toInt(),
+        author: _string(json['author']),
+        groupName: json['groupName'] as String?,
+        tags: _strings(json['tags']),
+        pinned: _bool(json['pinned']),
+        readingState: _string(json['readingState'], 'unread'),
+        metadataRevision: _int(json['metadataRevision']),
       );
 
   final String id;
@@ -60,6 +74,12 @@ class Book {
   final String? lastReadAt;
   final int? lastReadPageIndex;
   final int? lastReadPageCount;
+  final String author;
+  final String? groupName;
+  final List<String> tags;
+  final bool pinned;
+  final String readingState;
+  final int metadataRevision;
 
   String get readingPositionLabel =>
       '第 $lastReadChapterIndex 章${lastReadPageIndex == null ? '' : ' · 第 ${lastReadPageIndex! + 1} 页'}';
@@ -104,6 +124,7 @@ class ReadingProgress {
     this.layoutKey,
     this.contentMode,
     this.characterOffset,
+    this.revision,
   });
 
   factory ReadingProgress.fromJson(JsonMap json) => ReadingProgress(
@@ -117,6 +138,7 @@ class ReadingProgress {
         layoutKey: json['lastLayoutKey'] as String?,
         contentMode: json['lastContentMode'] as String?,
         characterOffset: (json['lastCharacterOffset'] as num?)?.toInt(),
+        revision: (json['revision'] as num?)?.toInt(),
       );
 
   final int chapterIndex;
@@ -129,6 +151,7 @@ class ReadingProgress {
   final String? layoutKey;
   final String? contentMode;
   final int? characterOffset;
+  final int? revision;
 }
 
 class BookDetail {
@@ -206,6 +229,9 @@ class BookPreview {
     required this.chapterCount,
     required this.kind,
     this.cover,
+    this.chapters = const [],
+    this.sourceStatus = 'unknown',
+    this.sourceStatusEvidence,
   });
 
   factory BookPreview.fromJson(JsonMap json) => BookPreview(
@@ -215,6 +241,18 @@ class BookPreview {
         chapterCount: _int(json['chapterCount']),
         kind: _string(json['bookKind'], '长小说'),
         cover: json['cover'] as String?,
+        chapters: ((json['chapters'] as List?) ?? const [])
+            .indexed
+            .where((entry) => entry.$2 is Map)
+            .map((entry) => BookPreviewChapter.fromJson(
+                Map<String, dynamic>.from(entry.$2 as Map), entry.$1 + 1))
+            .toList(growable: false),
+        sourceStatus: switch (json['sourceStatus']) {
+          'ongoing' => 'ongoing',
+          'completed' => 'completed',
+          _ => 'unknown',
+        },
+        sourceStatusEvidence: json['sourceStatusEvidence'] as String?,
       );
 
   final String title;
@@ -223,4 +261,13 @@ class BookPreview {
   final int chapterCount;
   final String kind;
   final String? cover;
+  final List<BookPreviewChapter> chapters;
+  final String sourceStatus;
+  final String? sourceStatusEvidence;
+
+  String get sourceStatusLabel => switch (sourceStatus) {
+        'ongoing' => '连载中',
+        'completed' => '已完结',
+        _ => '状态未知',
+      };
 }

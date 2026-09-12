@@ -10,12 +10,14 @@ import '../../shared/app_surface.dart';
 import '../../shared/feedback_widgets.dart';
 import '../../shared/mobile_sheet.dart';
 import '../../shared/page_frame.dart';
+import '../../shared/desktop_subpage.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import 'sources_controller.dart';
 import 'widgets/plugin_browser_login_dialog.dart';
 import 'widgets/plugin_settings_widgets.dart';
 import 'widgets/plugin_package_widgets.dart';
+import 'widgets/plugin_maintenance_widgets.dart';
 
 class PluginsPage extends StatefulWidget {
   const PluginsPage({this.onBack, super.key});
@@ -154,8 +156,12 @@ class _PluginsPageState extends State<PluginsPage> {
     final supportsLogin = plugin.capabilities.contains('account_login');
     final supportsImport = plugin.capabilities.contains('bookshelf_import');
     if (plugin.isInstalled) {
-      return PluginPackageUninstallButton(
-          plugin: plugin, controller: controller);
+      return Wrap(spacing: 8, runSpacing: 8, children: [
+        if (AppScope.of(context).backend.capabilities['pluginMaintenance'] ==
+            true)
+          PluginMaintenanceButton(plugin: plugin, controller: controller),
+        PluginPackageUninstallButton(plugin: plugin, controller: controller),
+      ]);
     }
     if (!supportsLogin && !supportsImport) return null;
     return PluginAccountActions(
@@ -393,7 +399,7 @@ class _PluginsPageState extends State<PluginsPage> {
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context).sources;
-    return AnimatedBuilder(
+    final page = AnimatedBuilder(
       animation: controller,
       builder: (context, _) => PageFrame(
         title: usesMobileUi(context) ? '站点插件' : '插件配置',
@@ -461,6 +467,16 @@ class _PluginsPageState extends State<PluginsPage> {
         ),
       ),
     );
+    return usesMobileUi(context) || widget.onBack == null
+        ? page
+        : DesktopSubpage(
+            title: '插件配置',
+            showContentTitle: false,
+            maxContentWidth: _desktopContentMaxWidth,
+            onBack: widget.onBack,
+            backLabel: '返回设置',
+            child: page,
+          );
   }
 }
 

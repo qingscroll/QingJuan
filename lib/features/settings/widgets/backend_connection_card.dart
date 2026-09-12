@@ -122,7 +122,7 @@ class BackendConnectionCard extends StatelessWidget {
               title: Text('本机模式使用固定回环地址'),
               content: Text(
                 '${AppState.defaultLocalBackendUrl}；保存后会检查并按需启动随包后端，无需连接 Token。'
-                '翻译模型、API 密钥与 OCR 直接在下方“翻译服务”中维护。',
+                '翻译模型、API 密钥与 OCR 直接在“翻译服务”分类中维护。',
               ),
               severity: InfoBarSeverity.info,
             ),

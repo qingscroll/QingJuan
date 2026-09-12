@@ -10,6 +10,7 @@ import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../about/about_page.dart';
 import '../library/library_page.dart';
+import '../discovery/discovery_page.dart';
 import '../manga_translation/manga_translation_page.dart';
 import '../search/search_page.dart';
 import '../settings/settings_page.dart';
@@ -31,6 +32,7 @@ class AppShell extends StatelessWidget {
 
   static const _desktopLocalSections = <AppSection>[
     AppSection.library,
+    AppSection.discovery,
     AppSection.search,
     AppSection.sources,
     AppSection.plugins,
@@ -41,6 +43,7 @@ class AppShell extends StatelessWidget {
 
   static const _desktopRemoteSections = <AppSection>[
     AppSection.library,
+    AppSection.discovery,
     AppSection.search,
     AppSection.sources,
     AppSection.tasks,
@@ -50,6 +53,7 @@ class AppShell extends StatelessWidget {
 
   static const _backendSections = <AppSection>{
     AppSection.library,
+    AppSection.discovery,
     AppSection.search,
     AppSection.sources,
     AppSection.plugins,
@@ -82,6 +86,10 @@ class AppShell extends StatelessWidget {
     }
     return switch (section) {
       AppSection.library => const LibraryPage(),
+      AppSection.discovery => DiscoveryPage(
+          key: ValueKey(
+              'discovery-${app.backendConnectionRevision}-${scope.auth.workspaceIdentity}'),
+        ),
       AppSection.search => const SearchPage(),
       AppSection.sources => const SourcesPage(),
       AppSection.plugins => PluginsPage(
@@ -98,6 +106,7 @@ class AppShell extends StatelessWidget {
 
   String _label(AppSection section) => switch (section) {
         AppSection.library => '书架',
+        AppSection.discovery => '推荐',
         AppSection.search => '搜索',
         AppSection.sources => '书源管理',
         AppSection.plugins => '插件配置',
@@ -109,6 +118,7 @@ class AppShell extends StatelessWidget {
 
   String _mobileLabel(AppSection section) => switch (section) {
         AppSection.library => '书架',
+        AppSection.discovery => '推荐',
         AppSection.search => '搜索',
         AppSection.sources => '书源',
         AppSection.plugins => '插件',
@@ -120,6 +130,7 @@ class AppShell extends StatelessWidget {
 
   IconData _icon(AppSection section) => switch (section) {
         AppSection.library => FluentIcons.library,
+        AppSection.discovery => FluentIcons.favorite_star,
         AppSection.search => FluentIcons.search,
         AppSection.sources => FluentIcons.database,
         AppSection.plugins => FluentIcons.plug_connected,

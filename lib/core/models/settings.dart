@@ -30,7 +30,7 @@ class TranslationModelCheck {
         supportsVision: json['supportsVision'] as bool? ?? false,
         checkedAt: DateTime.tryParse(json['checkedAt'] as String? ?? ''),
         latencyMs: (json['latencyMs'] as num?)?.toInt(),
-        message: json['message'] as String? ?? 'Linux 服务端模型自检失败',
+        message: json['message'] as String? ?? '后端模型自检失败',
         cached: json['cached'] as bool? ?? false,
       );
 

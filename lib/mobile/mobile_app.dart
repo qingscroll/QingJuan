@@ -15,6 +15,7 @@ import '../features/sources/plugins_page.dart';
 import '../shared/motion.dart';
 import '../shared/mobile_palette.dart';
 import 'mobile_library_page.dart';
+import 'mobile_discovery_page.dart';
 import 'mobile_auth_page.dart';
 import 'mobile_my_page.dart';
 import 'mobile_page.dart';
@@ -231,13 +232,15 @@ class MobileHomeShell extends StatefulWidget {
 
   static const primarySections = <AppSection>[
     AppSection.library,
+    AppSection.discovery,
     AppSection.search,
     AppSection.tasks,
     AppSection.settings,
   ];
   static String label(AppSection section) => switch (section) {
         AppSection.library => '书库',
-        AppSection.search => '发现',
+        AppSection.discovery => '推荐',
+        AppSection.search => '搜索',
         AppSection.tasks => '任务',
         AppSection.settings => '我的',
         AppSection.sources => '书源',
@@ -247,6 +250,7 @@ class MobileHomeShell extends StatefulWidget {
       };
   static IconData icon(AppSection section) => switch (section) {
         AppSection.library => Icons.auto_stories_outlined,
+        AppSection.discovery => Icons.explore_outlined,
         AppSection.search => Icons.search_rounded,
         AppSection.tasks => Icons.downloading_rounded,
         _ => Icons.person_outline_rounded,
@@ -302,6 +306,7 @@ class _MobileHomeShellState extends State<MobileHomeShell> {
     }
     return switch (section) {
       AppSection.library => const MobileLibraryPage(),
+      AppSection.discovery => const MobileDiscoveryPage(),
       AppSection.search => const MobileSearchPage(),
       AppSection.tasks => const MobileTasksPage(),
       AppSection.sources => const MobileSourcesPage(),
@@ -345,7 +350,10 @@ class _MobileHomeShellState extends State<MobileHomeShell> {
                 offstage: secondary,
                 child: IndexedStack(
                   key: ValueKey(identity),
-                  index: currentIndex < 0 ? 3 : currentIndex,
+                  index: currentIndex < 0
+                      ? MobileHomeShell.primarySections
+                          .indexOf(AppSection.settings)
+                      : currentIndex,
                   children: [
                     for (final item in MobileHomeShell.primarySections)
                       TickerMode(
@@ -527,8 +535,10 @@ class MobileBottomNavigation extends StatelessWidget {
     final dark = MiuixTheme.of(context).brightness == Brightness.dark;
     final reduced = MediaQuery.disableAnimationsOf(context) ||
         MediaQuery.highContrastOf(context);
-    final selected =
-        MobileHomeShell.primarySections.indexOf(section).clamp(0, 3);
+    final destinationCount = MobileHomeShell.primarySections.length;
+    final selected = MobileHomeShell.primarySections
+        .indexOf(section)
+        .clamp(0, destinationCount - 1);
     return SafeArea(
       key: const ValueKey('mobile-bottom-navigation'),
       top: false,
@@ -586,9 +596,11 @@ class MobileBottomNavigation extends StatelessWidget {
                                     AnimatedPositionedDirectional(
                                       duration: MobileTokens.duration(context),
                                       curve: Curves.easeOutCubic,
-                                      start:
-                                          constraints.maxWidth / 4 * selected,
-                                      width: constraints.maxWidth / 4,
+                                      start: constraints.maxWidth /
+                                          destinationCount *
+                                          selected,
+                                      width: constraints.maxWidth /
+                                          destinationCount,
                                       top: 0,
                                       bottom: 0,
                                       child: DecoratedBox(

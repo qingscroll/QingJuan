@@ -16,9 +16,17 @@ import '../core/backend/device_identity.dart';
 import '../core/backend/local_backend_process.dart';
 import '../core/backend/user_session_store.dart';
 import '../core/updates/app_update_controller.dart';
+import '../core/state/load_state.dart';
 import '../features/settings/widgets/app_update_card.dart';
 import '../features/auth/auth_controller.dart';
+import '../features/audiobook/audiobook_coordinator.dart';
+import '../features/audiobook/audiobook_media_runtime.dart';
+import '../features/audiobook/audiobook_workspace_binding.dart';
 import '../features/library/library_controller.dart';
+import '../features/offline/offline_cache_store.dart';
+import '../features/offline/offline_reading_controller.dart';
+import '../features/offline/offline_workspace_binding.dart';
+import '../features/discovery/discovery_controller.dart';
 import '../features/manga_translation/manga_translation_coordinator.dart';
 import '../features/settings/settings_controller.dart';
 import '../features/shell/app_shell.dart';
@@ -44,6 +52,9 @@ class QingJuanApp extends StatefulWidget {
     required this.settings,
     required this.mangaTranslation,
     this.updates,
+    this.offline,
+    this.audiobook,
+    this.onInitialized,
   });
 
   @visibleForTesting
@@ -58,6 +69,9 @@ class QingJuanApp extends StatefulWidget {
     required SettingsController settings,
     MangaTranslationCoordinator? mangaTranslation,
     AppUpdateController? updates,
+    OfflineReadingController? offline,
+    AudiobookCoordinator? audiobook,
+    VoidCallback? onInitialized,
   }) =>
       QingJuanApp._(
         appState: appState,
@@ -70,9 +84,12 @@ class QingJuanApp extends StatefulWidget {
         settings: settings,
         mangaTranslation: mangaTranslation ?? MangaTranslationCoordinator(api),
         updates: updates,
+        offline: offline,
+        audiobook: audiobook,
+        onInitialized: onInitialized,
       );
 
-  static Future<QingJuanApp> bootstrap() async {
+  static Future<QingJuanApp> bootstrap({VoidCallback? onInitialized}) async {
     final preferences = await SharedPreferences.getInstance();
     const secretStore = SecureConnectionSecretStore();
     final token = await secretStore.readToken() ?? '';
@@ -105,11 +122,16 @@ class QingJuanApp extends StatefulWidget {
       backendUrl: () => appState.backendUrl,
     );
     return QingJuanApp._(
+      onInitialized: onInitialized,
       appState: appState,
       api: api,
       backend: backend,
       auth: auth,
       library: LibraryController(api),
+      audiobook: createAudiobookCoordinator(),
+      offline: Platform.isAndroid
+          ? OfflineReadingController(api, OfflineCacheStore())
+          : null,
       sources: SourcesController(api),
       tasks: TasksController(api),
       settings: SettingsController(api),
@@ -134,15 +156,23 @@ class QingJuanApp extends StatefulWidget {
   final SettingsController settings;
   final MangaTranslationCoordinator mangaTranslation;
   final AppUpdateController? updates;
+  final OfflineReadingController? offline;
+  final AudiobookCoordinator? audiobook;
+  final VoidCallback? onInitialized;
 
   @override
   State<QingJuanApp> createState() => _QingJuanAppState();
 }
 
 class _QingJuanAppState extends State<QingJuanApp> {
+  OfflineWorkspaceBinding? _offlineBinding;
+  AudiobookWorkspaceBinding? _audiobookBinding;
+  late final DiscoveryController _discovery;
   final _navigatorKey = GlobalKey<NavigatorState>();
   final _rootNavigatorKey = GlobalKey<NavigatorState>();
   String? _activeWorkspaceIdentity;
+  String? _activeWorkspaceInstanceId;
+  bool _workspaceInvalidated = false;
   int _workspaceGeneration = 0;
   int _backendActivationOperation = 0;
   int _handledReadyEpoch = 0;
@@ -155,8 +185,24 @@ class _QingJuanAppState extends State<QingJuanApp> {
   @override
   void initState() {
     super.initState();
+    _discovery = DiscoveryController(widget.api);
     widget.auth.addListener(_handleAuthChanged);
     widget.backend.addListener(_handleBackendChanged);
+    if (widget.audiobook case final audiobook?) {
+      _audiobookBinding = AudiobookWorkspaceBinding(
+          app: widget.appState,
+          api: widget.api,
+          backend: widget.backend,
+          auth: widget.auth,
+          coordinator: audiobook);
+    }
+    if (widget.offline case final offline?) {
+      _offlineBinding = OfflineWorkspaceBinding(
+          app: widget.appState,
+          backend: widget.backend,
+          auth: widget.auth,
+          offline: offline);
+    }
     if (Platform.isAndroid) {
       _connectionLinkSubscription = AppLinks().uriLinkStream.listen(
             _receiveConnectionLink,
@@ -170,22 +216,37 @@ class _QingJuanAppState extends State<QingJuanApp> {
   }
 
   Future<void> _initialize() async {
-    await widget.backend.ensureReady();
-    if (!mounted) return;
-    if (!Platform.isAndroid) widget.appState.showNotice(widget.backend.message);
-    if (widget.backend.status == BackendStatus.ready) {
-      await _activateReadyBackend();
-    } else if (!Platform.isAndroid) {
-      widget.appState.selectSection(AppSection.settings);
+    try {
+      await widget.backend.ensureReady();
+      if (!mounted) return;
+      if (!Platform.isAndroid) {
+        widget.appState.showNotice(widget.backend.message);
+      }
+      if (widget.backend.status == BackendStatus.ready) {
+        await _activateReadyBackend();
+      } else if (!Platform.isAndroid) {
+        widget.appState.selectSection(AppSection.settings);
+      }
+      if (!mounted) return;
+      _initializing = false;
+      if (widget.backend.status == BackendStatus.ready) {
+        await _activateReadyBackend();
+      }
+      if (!mounted) return;
+      await _synchronizeWorkspace();
+    } catch (_) {
+      if (!mounted) return;
+      widget.appState.showNotice('应用初始化失败，请检查服务连接后重试。');
+      if (!Platform.isAndroid) {
+        widget.appState.selectSection(AppSection.settings);
+      }
+    } finally {
+      if (mounted) {
+        _initializing = false;
+        widget.onInitialized?.call();
+        _openPendingConnectionLink();
+      }
     }
-    if (!mounted) return;
-    _initializing = false;
-    if (widget.backend.status == BackendStatus.ready) {
-      await _activateReadyBackend();
-    }
-    if (!mounted) return;
-    await _synchronizeWorkspace();
-    _openPendingConnectionLink();
   }
 
   void _receiveConnectionLink(Uri uri) {
@@ -225,6 +286,7 @@ class _QingJuanAppState extends State<QingJuanApp> {
   }
 
   void _handleAuthChanged() {
+    _invalidateChangedWorkspace();
     if (_initializing || _activationEpochInProgress != 0) return;
     unawaited(_checkTranslationModelForCurrentUser());
     unawaited(_synchronizeWorkspace());
@@ -245,6 +307,9 @@ class _QingJuanAppState extends State<QingJuanApp> {
     }
     final operation = ++_backendActivationOperation;
     _activationEpochInProgress = readyEpoch;
+    final restoreDiscovery = _discovery.sitesState != LoadState.idle;
+    _invalidateChangedWorkspace();
+    _discovery.resetForBackendChange();
     try {
       await widget.auth.initializeForCurrentBackend(
         multiUser: widget.backend.multiUserEnabled,
@@ -264,6 +329,13 @@ class _QingJuanAppState extends State<QingJuanApp> {
         return;
       }
       await _synchronizeWorkspace();
+      if (mounted &&
+          widget.auth.canAccessWorkspace &&
+          (widget.appState.section == AppSection.discovery ||
+              restoreDiscovery) &&
+          _discovery.sitesState == LoadState.idle) {
+        await _discovery.loadSites();
+      }
     } catch (error) {
       if (mounted &&
           operation == _backendActivationOperation &&
@@ -277,6 +349,11 @@ class _QingJuanAppState extends State<QingJuanApp> {
     } finally {
       if (_activationEpochInProgress == readyEpoch) {
         _activationEpochInProgress = 0;
+        if (mounted &&
+            (_workspaceInvalidated ||
+                _workspaceIdentity != _activeWorkspaceIdentity)) {
+          await _synchronizeWorkspace();
+        }
         _openPendingConnectionLink();
       }
     }
@@ -293,16 +370,45 @@ class _QingJuanAppState extends State<QingJuanApp> {
     await widget.backend.checkTranslationModel();
   }
 
+  String? get _workspaceIdentity {
+    final identity = widget.auth.workspaceIdentity;
+    return identity == null ? null : '${widget.backend.instanceId}::$identity';
+  }
+
+  void _invalidateChangedWorkspace() {
+    if (!mounted || _activeWorkspaceIdentity == null || _workspaceInvalidated) {
+      return;
+    }
+    final instanceChanged = widget.backend.status == BackendStatus.ready &&
+        widget.backend.instanceId != _activeWorkspaceInstanceId;
+    final identityChanged = widget.auth.canAccessWorkspace &&
+        _workspaceIdentity != _activeWorkspaceIdentity;
+    final sessionEnded = !widget.auth.isBusy &&
+        !widget.auth.canAccessWorkspace &&
+        !widget.auth.canRestoreOfflineSession;
+    if (!instanceChanged && !identityChanged && !sessionEnded) return;
+
+    // Revoke old page actions before awaiting session restoration or model
+    // checks. A failed heartbeat or an unverified session is not a new identity.
+    _workspaceInvalidated = true;
+    _workspaceGeneration += 1;
+    _resetWorkspaceState();
+    _returnToWorkspaceRoot();
+  }
+
   Future<void> _synchronizeWorkspace() async {
     if (!mounted) return;
-    final identity = widget.auth.workspaceIdentity;
-    if (identity == _activeWorkspaceIdentity) {
+    final identity = _workspaceIdentity;
+    if (!_workspaceInvalidated && identity == _activeWorkspaceIdentity) {
       if (identity == null && !Platform.isAndroid) {
         widget.appState.selectSection(AppSection.settings);
       }
       return;
     }
     _activeWorkspaceIdentity = identity;
+    _activeWorkspaceInstanceId =
+        identity == null ? null : widget.backend.instanceId;
+    _workspaceInvalidated = false;
     final generation = ++_workspaceGeneration;
     _resetWorkspaceState();
     _returnToWorkspaceRoot();
@@ -315,16 +421,23 @@ class _QingJuanAppState extends State<QingJuanApp> {
       return;
     }
     if (Platform.isAndroid) widget.appState.selectSection(AppSection.library);
+    widget.library.imports.enabled =
+        widget.backend.capabilities['linkJobHistory'] == true;
+    widget.library.serials.enabled =
+        widget.backend.capabilities['bookUpdates'] == true;
     await Future.wait<void>(<Future<void>>[
       widget.library.load(),
       widget.sources.load(),
       widget.tasks.load(),
       widget.settings.load(),
+      if (widget.appState.section == AppSection.discovery)
+        _discovery.loadSites(),
     ]);
     if (!mounted || generation != _workspaceGeneration) return;
   }
 
   void _resetWorkspaceState() {
+    _discovery.resetForBackendChange();
     widget.library.resetForBackendSwitch();
     widget.sources.resetForBackendSwitch();
     widget.tasks.resetForBackendSwitch();
@@ -360,7 +473,12 @@ class _QingJuanAppState extends State<QingJuanApp> {
     _workspaceGeneration += 1;
     widget.auth.removeListener(_handleAuthChanged);
     widget.backend.removeListener(_handleBackendChanged);
+    _offlineBinding?.dispose();
+    _audiobookBinding?.dispose();
+    unawaited(widget.audiobook?.close());
+    widget.offline?.dispose();
     widget.library.dispose();
+    _discovery.dispose();
     widget.sources.dispose();
     widget.tasks.dispose();
     widget.settings.dispose();
@@ -381,11 +499,14 @@ class _QingJuanAppState extends State<QingJuanApp> {
       backend: widget.backend,
       auth: widget.auth,
       library: widget.library,
+      discovery: _discovery,
       sources: widget.sources,
       tasks: widget.tasks,
       settings: widget.settings,
       mangaTranslation: widget.mangaTranslation,
       updates: widget.updates,
+      offline: widget.offline,
+      audiobook: widget.audiobook,
       child: AnimatedBuilder(
         animation: widget.appState.themeModeListenable,
         builder: (context, _) {

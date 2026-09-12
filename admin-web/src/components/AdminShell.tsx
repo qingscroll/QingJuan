@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppstoreOutlined,
   ApiOutlined,
@@ -12,6 +12,7 @@ import {
   MenuOutlined,
   ReloadOutlined,
   SettingOutlined,
+  SaveOutlined,
   TeamOutlined,
   UnorderedListOutlined,
   UserAddOutlined,
@@ -19,6 +20,8 @@ import {
 import { Alert, App, Badge, Button, Layout, Menu, Space, Spin, Tooltip, Typography } from "antd";
 
 import * as api from "../api";
+import { formatDate } from "../format";
+export { formatDate } from "../format";
 import { ThemeToggle } from "../theme";
 import type {
   BackendServiceAction,
@@ -28,6 +31,7 @@ import type {
   Task,
 } from "../types";
 import { BackendUpgradePage } from "./BackendUpgradePage";
+import { BackupsPage } from "./BackupsPage";
 import { DevicesPage } from "./DevicesPage";
 import { DiagnosticsPage } from "./DiagnosticsPage";
 import { LibraryPage } from "./LibraryPage";
@@ -42,7 +46,7 @@ import { UsersPage } from "./UsersPage";
 
 const { Header, Content, Sider } = Layout;
 
-export type NavigationKey = "overview" | "devices" | "users" | "registration" | "library" | "tasks" | "diagnostics" | "upgrade" | "logs" | "sources" | "plugins" | "settings";
+export type NavigationKey = "overview" | "devices" | "users" | "registration" | "library" | "tasks" | "backups" | "diagnostics" | "upgrade" | "logs" | "sources" | "plugins" | "settings";
 
 const navigationKeys: readonly NavigationKey[] = [
   "overview",
@@ -51,6 +55,7 @@ const navigationKeys: readonly NavigationKey[] = [
   "registration",
   "library",
   "tasks",
+  "backups",
   "diagnostics",
   "upgrade",
   "logs",
@@ -65,6 +70,7 @@ export function navigationAvailable(
   key: NavigationKey,
   capabilities: Record<string, boolean> | null | undefined,
 ): boolean {
+  if (key === "backups") return capabilities?.backups === true;
   return !multiUserNavigationKeys.has(key) || capabilities?.multiUser === true;
 }
 
@@ -82,6 +88,7 @@ const navigation = [
   { key: "registration", icon: <UserAddOutlined />, label: "注册设置" },
   { key: "library", icon: <BookOutlined />, label: "书库管理" },
   { key: "tasks", icon: <UnorderedListOutlined />, label: "任务中心" },
+  { key: "backups", icon: <SaveOutlined />, label: "备份与恢复" },
   { key: "diagnostics", icon: <DashboardOutlined />, label: "系统诊断" },
   { key: "upgrade", icon: <CloudDownloadOutlined />, label: "后端升级" },
   { key: "logs", icon: <FileTextOutlined />, label: "运行日志" },
@@ -97,6 +104,7 @@ const pageTitles: Record<NavigationKey, { title: string; subtitle: string }> = {
   registration: { title: "注册设置", subtitle: "配置新用户注册判断、邮箱验证码与身份牌" },
   library: { title: "书库管理", subtitle: "查看当前服务保存的作品并处理无用内容" },
   tasks: { title: "任务中心", subtitle: "跟踪下载与翻译任务，查看诊断日志" },
+  backups: { title: "备份与恢复", subtitle: "备份书库数据、校验恢复文件与迁移后端" },
   diagnostics: { title: "系统诊断", subtitle: "检查服务健康、资源容量与近期异常" },
   upgrade: { title: "后端升级", subtitle: "检查、安装并验证 Linux 后端更新" },
   logs: { title: "运行日志", subtitle: "查看后端服务、任务程序与抓取器的详细输出" },
@@ -118,6 +126,13 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const taskRevision = useRef(0);
+  const loadRequest = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; loadRequest.current++; taskRevision.current++; };
+  }, []);
 
   const navigate = useCallback((key: NavigationKey) => {
     setSelected(key);
@@ -138,6 +153,10 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
   }, []);
 
   const loadAll = useCallback(async (silent = false) => {
+    const request = ++loadRequest.current;
+    // Refreshing after a restore replaces the task snapshot; polls issued
+    // against the previous library must no longer be allowed to publish.
+    const revision = ++taskRevision.current;
     if (silent) setRefreshing(true);
     else setLoading(true);
     setError("");
@@ -153,12 +172,19 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
         api.getSitePlugins(),
         api.getSettings(),
       ]);
-      setData({ meta, serviceControl, connectionToken, devices, books, tasks, sources, plugins, settings });
+      if (!mounted.current || request !== loadRequest.current) return;
+      setData((current) => ({ meta, serviceControl, connectionToken, devices, books,
+        tasks: revision === taskRevision.current ? tasks : current?.tasks ?? tasks,
+        sources, plugins, settings }));
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "管理数据加载失败");
+      if (mounted.current && request === loadRequest.current) {
+        setError(loadError instanceof Error ? loadError.message : "管理数据加载失败");
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (mounted.current && request === loadRequest.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -172,15 +198,22 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
     }
   }, [data, navigate, selected]);
 
-  const hasActiveTasks = data?.tasks.some((task) => ["queued", "running"].includes(task.status));
+  const hasActiveTasks = data?.tasks.some((task) => ["queued", "running", "pause_requested", "cancel_requested"].includes(task.status));
   useEffect(() => {
     if (!hasActiveTasks) return;
+    let cancelled = false;
+    let inFlight = false;
     const timer = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      const revision = taskRevision.current;
       api.getTasks().then((tasks) => {
-        setData((current) => (current ? { ...current, tasks } : current));
-      }).catch(() => undefined);
+        if (!cancelled && mounted.current && revision === taskRevision.current) {
+          setData((current) => (current ? { ...current, tasks } : current));
+        }
+      }).catch(() => undefined).finally(() => { inFlight = false; });
     }, 5000);
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [hasActiveTasks]);
 
   useEffect(() => {
@@ -208,11 +241,10 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
   };
 
   const retryTask = async (taskId: string) => {
+    taskRevision.current++;
     const retried = await api.retryTask(taskId);
-    setData((current) => current ? {
-      ...current,
-      tasks: current.tasks.map((task) => task.id === retried.id ? retried : task),
-    } : current);
+    if (!mounted.current) return;
+    updateTask(retried);
     message.success("任务已重新加入队列");
   };
 
@@ -249,6 +281,8 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
   };
 
   const updateTask = (task: Task) => {
+    if (!mounted.current) return;
+    taskRevision.current++;
     setData((current) => current ? {
       ...current,
       tasks: current.tasks.map((existing) => existing.id === task.id ? task : existing),
@@ -281,18 +315,20 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
       <TasksPage
         tasks={data.tasks}
         bookTitles={bookTitles}
-        onRetry={async (taskId) => {
-          await retryTask(taskId);
-          const refreshed = await api.getTasks();
-          const task = refreshed.find((item) => item.id === taskId);
-          if (task) updateTask(task);
-        }}
+        onControl={data.meta.capabilities.taskControl ? async (taskId, action) => {
+          taskRevision.current++;
+          updateTask(await api.controlTask(taskId, action));
+        } : undefined}
+        onRetry={retryTask}
       />
     ),
     diagnostics: <DiagnosticsPage onOpenLogs={() => navigate("logs")} />,
+    backups: navigationAvailable("backups", data.meta.capabilities)
+      ? <BackupsPage multiUser={data.meta.capabilities.multiUser === true} onRestored={() => void loadAll(true)} />
+      : null,
     upgrade: (
       <BackendUpgradePage
-        activeTaskCount={data.tasks.filter((task) => ["queued", "running"].includes(task.status)).length}
+        activeTaskCount={data.tasks.filter((task) => ["queued", "running", "pause_requested", "cancel_requested"].includes(task.status)).length}
       />
     ),
     logs: <LogsPage />,
@@ -302,6 +338,7 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
         plugins={data.plugins}
         onSetEnabled={setPluginEnabled}
         onDataChanged={refreshPluginBooks}
+        supportsMaintenance={data.meta.capabilities.pluginMaintenance === true}
       />
     ),
     settings: <SettingsPage settings={data.settings} onSave={saveSettings} />,
@@ -424,14 +461,4 @@ export function AdminShell({ session, onLogout }: AdminShellProps) {
       </Layout>
     </Layout>
   );
-}
-
-export function formatDate(value: string | null | undefined, timeOnly = false): string {
-  if (!value) return "–";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "–";
-  return new Intl.DateTimeFormat("zh-CN", timeOnly
-    ? { hour: "2-digit", minute: "2-digit", hour12: false }
-    : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
-  ).format(date);
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -10,9 +11,20 @@ import pytest
 from PIL import Image
 from starlette.datastructures import UploadFile
 
+from app import db
 from app import main as main_module
 from app.local_import import LocalImportError, inspect_local_document, write_local_document
 from app.models import BookExportPayload, BookRecord
+
+
+@pytest.fixture(autouse=True)
+def isolated_metadata_database(monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "data" / "qingjuan.db")
+    monkeypatch.setattr(db, "_DATA_DIR_READY", True)
+    monkeypatch.setattr(db, "_SITE_PLUGIN_STATE_CACHE", None)
+    db.init_db()
 
 
 def _write_test_epub(source: Path) -> None:
@@ -129,6 +141,104 @@ def test_unsupported_legacy_doc_has_actionable_error(tmp_path: Path) -> None:
         inspect_local_document(source, original_name=source.name, requested_kind="长小说")
 
 
+@pytest.mark.parametrize("suffix", ["txt", "docx"])
+def test_import_preserves_preamble_before_first_numbered_chapter(tmp_path, suffix):
+    source = tmp_path / f"book.{suffix}"
+    paragraphs = ["作者的话", "这是不能丢失的序言。", "第一章 初见", "初见的正文。", "第二章", "后续正文。"]
+    if suffix == "txt":
+        source.write_text("\n".join(paragraphs), encoding="utf-8")
+    else:
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+                             + "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in paragraphs)
+                             + "</w:body></w:document>")
+    plan = inspect_local_document(source, original_name=source.name, requested_kind="长小说")
+    manifest = write_local_document(plan, source, tmp_path / "book")
+    assert [chapter.title for chapter in plan.chapters] == ["序章", "第一章 初见", "第二章"]
+    saved = [(tmp_path / "book" / chapter["file_name"]).read_text("utf-8") for chapter in manifest]
+    assert saved == ["作者的话\n这是不能丢失的序言。", "初见的正文。", "后续正文。"]
+
+
+@pytest.mark.parametrize(("encoding", "body"), [
+    ("big5", "這是一個繁體中文故事，春天的風帶來新的希望。"),
+    ("shift_jis", "これは日本語の物語です。桜の花が咲いています。"),
+    ("gb18030", "这是一个简体中文故事，春天的风带来新的希望。"),
+])
+def test_legacy_encoding_import_preserves_text_or_requests_explicit_choice(tmp_path, encoding, body):
+    source = tmp_path / "book.txt"
+    source.write_bytes(body.encode(encoding))
+    # Automatic detection must never silently publish a different successful decode.
+    try:
+        automatic = inspect_local_document(source, original_name=source.name, requested_kind="长小说")
+    except LocalImportError as error:
+        assert "编码" in str(error)
+    else:
+        assert automatic.chapters[0].content == body
+    explicit = inspect_local_document(source, original_name=source.name, requested_kind="长小说", text_encoding=encoding)
+    chapters = write_local_document(explicit, source, tmp_path / "book")
+    assert (tmp_path / "book" / chapters[0]["file_name"]).read_text("utf-8") == body
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_bom_text_is_automatically_decoded(tmp_path, encoding):
+    source = tmp_path / "book.txt"
+    source.write_bytes("Chapter 1\n完整正文。".encode(encoding))
+    plan = inspect_local_document(source, original_name=source.name, requested_kind="长小说")
+    assert plan.chapters[0].content == "完整正文。"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("translate", [False, True])
+async def test_local_import_enqueues_all_chapters_only_when_translation_requested(monkeypatch, tmp_path, translate):
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(main_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(main_module, "LIBRARY_ROOT", data_dir / "library")
+    monkeypatch.setattr(main_module, "require_user_access", lambda _: SimpleNamespace(owner_id="user-admin"))
+    queue = asyncio.Queue()
+    monkeypatch.setattr(main_module, "TASK_QUEUE", queue)
+    body = "序言不能丟失。\n第一章\n初見的正文。\n第二章\n後續正文。"
+    upload = UploadFile(io.BytesIO(body.encode("big5")), filename="book.txt")
+    record = await main_module.post_import_local(
+        file=upload, bookKind="长小说", language="中文", request=object(),
+        needTranslation=translate, textEncoding="big5", title="",
+    )
+    assert db.get_book(record.id) is not None
+    tasks = db.list_tasks(book_id=record.id)
+    assert len(tasks) == int(translate)
+    assert queue.qsize() == int(translate)
+    if translate:
+        task = tasks[0]
+        assert queue.get_nowait() == task.id
+        assert task.ownerId == record.ownerId
+        assert task.chapterIndexes == [1, 2, 3]
+        assert task.taskType == "translate" and task.status == "queued"
+        assert task.totalCount == 3
+    assert not any((data_dir / "import-cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_import_reports_translation_queue_failure_without_deleting_imported_book(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(main_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(main_module, "LIBRARY_ROOT", data_dir / "library")
+    monkeypatch.setattr(main_module, "require_user_access", lambda _: SimpleNamespace(owner_id="user-admin"))
+
+    def fail_queue(*args):
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(main_module, "_enqueue_task", fail_queue)
+    with pytest.raises(HTTPException, match="作品已导入书库"):
+        await main_module.post_import_local(
+            file=UploadFile(io.BytesIO(b"Chapter 1\nOriginal content"), filename="book.txt"),
+            bookKind="长小说", language="英文", request=object(), needTranslation=True,
+        )
+    records = db.list_books("user-admin")
+    assert len(records) == 1
+    assert (data_dir / records[0].localPath / "manifest.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_local_import_route_persists_epub_metadata_and_removes_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -165,6 +275,31 @@ async def test_local_import_route_persists_epub_metadata_and_removes_cache(
     assert manifest["author"] == "EPUB 作者"
     assert manifest["source_format"] == "EPUB"
     assert not any((data_dir / "import-cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_committed_import_survives_a_presentation_read_failure(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(main_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(main_module, "LIBRARY_ROOT", data_dir / "library")
+    monkeypatch.setattr(main_module, "require_user_access", lambda _: SimpleNamespace(owner_id="user-admin"))
+
+    def fail_presentation(_book):
+        raise RuntimeError("metadata temporarily unavailable")
+
+    monkeypatch.setattr(main_module, "_present_book", fail_presentation)
+    upload = UploadFile(io.BytesIO("第一章\n\n完整正文。".encode()), filename="import.txt")
+    with pytest.raises(HTTPException):
+        await main_module.post_import_local(file=upload, bookKind="长小说", language="中文",
+                                            request=object(), needTranslation=False, title="保留已保存作品")
+    saved = db.list_books("user-admin")
+    assert len(saved) == 1
+    book_dir = data_dir / saved[0].localPath
+    assert (book_dir / "manifest.json").is_file()
+    manifest = json.loads((book_dir / "manifest.json").read_text("utf-8"))
+    assert (book_dir / manifest["chapters"][0]["file_name"]).is_file()
 
 
 @pytest.mark.parametrize(

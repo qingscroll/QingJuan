@@ -19,18 +19,11 @@ from .model_endpoint_security import (
     ValidatedModelNetworkBackend,
     resolve_model_endpoint_addresses,
 )
+from .public_dns import PublicDnsResolutionError, is_fake_ip_address, resolve_public_dns_addresses
 
 
 class ScraperNetworkSecurityError(ValueError):
     """A website request attempted to leave the public HTTP network boundary."""
-
-
-_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
-_DNS_HTTPS_SERVICES = (
-    ("https://cloudflare-dns.com/dns-query", "1.1.1.1"),
-    ("https://dns.google/resolve", "8.8.8.8"),
-)
-_DNS_HTTPS_TIMEOUT = 5.0
 
 
 def _public_addresses(addresses: tuple[IPAddress, ...]) -> tuple[IPAddress, ...]:
@@ -87,73 +80,15 @@ def validate_public_url(value: str) -> tuple[str, int]:
     return host, port
 
 
-async def _resolve_dns_service_addresses(host: str, port: int) -> tuple[IPAddress, ...]:
-    # Bootstrap DoH without system DNS, which may itself return Fake-IP answers.
-    for endpoint, address in _DNS_HTTPS_SERVICES:
-        if host == urlsplit(endpoint).hostname and port == 443:
-            return (ipaddress.ip_address(address),)
-    raise ModelEndpointSecurityError("不支持的加密 DNS 服务地址")
-
-
 async def _resolve_with_public_dns(host: str) -> tuple[IPAddress, ...]:
-    last_error: Exception | None = None
-    for endpoint, _ in _DNS_HTTPS_SERVICES:
-        try:
-            async with asyncio.timeout(_DNS_HTTPS_TIMEOUT):
-                async with httpx.AsyncClient(
-                    timeout=_DNS_HTTPS_TIMEOUT,
-                    trust_env=False,
-                    follow_redirects=False,
-                    transport=ValidatedModelHTTPTransport(
-                        allowlist=frozenset(), resolver=_resolve_dns_service_addresses
-                    ),
-                ) as client:
-                    responses = await asyncio.gather(
-                        *(
-                            client.get(
-                                endpoint,
-                                params={"name": host, "type": record_type},
-                                headers={"Accept": "application/dns-json"},
-                            )
-                            for record_type in (1, 28)
-                        ),
-                        return_exceptions=True,
-                    )
-            addresses: list[IPAddress] = []
-            for response in responses:
-                if isinstance(response, BaseException):
-                    raise response
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict) or payload.get("Status") != 0 or payload.get("TC"):
-                    raise ValueError("DNS lookup failed")
-                answers = payload.get("Answer", [])
-                if not isinstance(answers, list):
-                    raise ValueError("Invalid DNS answers")
-                for answer in answers:
-                    if not isinstance(answer, dict):
-                        raise ValueError("Invalid DNS answer")
-                    if answer.get("type") not in {1, 28}:
-                        continue
-                    raw_address = answer.get("data")
-                    if not isinstance(raw_address, str) or "%" in raw_address:
-                        raise ValueError("Invalid DNS address")
-                    address = ipaddress.ip_address(raw_address)
-                    if address.version != (4 if answer["type"] == 1 else 6):
-                        raise ValueError("Invalid DNS address family")
-                    if address not in addresses:
-                        addresses.append(address)
-            if not addresses:
-                raise ValueError("No DNS addresses")
-        except (httpx.HTTPError, TimeoutError, ValueError, TypeError) as error:
-            last_error = error
-            continue
-        # Apply the same policy to every A/AAAA answer, including mixed answers.
-        # A rejected answer must never trigger a direct connection to the Fake-IP.
-        return _public_addresses(tuple(addresses))
-    raise ScraperNetworkSecurityError(
-        "检测到代理 Fake-IP DNS，但无法解析真实公网地址；请检查网络，或将代理 DNS 改为真实 IP 模式（redir-host）"
-    ) from last_error
+    try:
+        addresses = await resolve_public_dns_addresses(host, transport_factory=ValidatedModelHTTPTransport)
+    except PublicDnsResolutionError as error:
+        raise ScraperNetworkSecurityError(
+            "检测到代理 Fake-IP DNS，但无法解析真实公网地址；请检查网络，或将代理 DNS 改为真实 IP 模式（redir-host）"
+        ) from error
+    # A valid but forbidden answer is rejected, never retried via another provider.
+    return _public_addresses(addresses)
 
 
 async def resolve_scraper_addresses(host: str, port: int) -> tuple[IPAddress, ...]:
@@ -164,14 +99,10 @@ async def resolve_scraper_addresses(host: str, port: int) -> tuple[IPAddress, ..
     except ModelEndpointSecurityError as error:
         raise ScraperNetworkSecurityError("抓取地址无法解析") from error
 
-    def is_fake_ip(address: IPAddress) -> bool:
-        effective = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else address
-        return effective is not None and effective in _FAKE_IP_NETWORK
-
-    if any(is_fake_ip(address) for address in addresses):
+    if any(is_fake_ip_address(address) for address in addresses):
         # TUN DNS can synthesize 198.18/15 addresses for public domain names.
         # Never allow that range: resolve real IPs instead, then pin the connection.
-        remaining = tuple(address for address in addresses if not is_fake_ip(address))
+        remaining = tuple(address for address in addresses if not is_fake_ip_address(address))
         if remaining:
             _public_addresses(remaining)
         return await _resolve_with_public_dns(host)

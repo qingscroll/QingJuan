@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -9,20 +9,15 @@ from ..process_lifecycle import require_business_service_running
 from ..site_plugins import shaoniandream_account as account
 from ..site_plugins.shaoniandream_login_page import LOGIN_HTML
 from ..user_auth import require_user_access
+from .shaoniandream_contract import PRIVATE_HEADERS, ShaonianDreamRoute
 
-router = APIRouter(prefix="/plugins/shaoniandream/account")
+router = APIRouter(prefix="/plugins/shaoniandream/account", route_class=ShaonianDreamRoute)
 public_router = APIRouter(
     prefix="/site-login/shaoniandream",
+    route_class=ShaonianDreamRoute,
     include_in_schema=False,
     dependencies=[Depends(require_business_service_running)],
 )
-PRIVATE_HEADERS = {
-    "Cache-Control": "no-store",
-    "Pragma": "no-cache",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-}
 
 
 class BrowserLoginFlow(BaseModel):
@@ -45,6 +40,7 @@ class PasswordLogin(BaseModel):
     geetest_challenge: str = Field(min_length=1, max_length=256)
     geetest_validate: SecretStr = Field(min_length=1, max_length=256)
     geetest_seccode: SecretStr = Field(min_length=1, max_length=256)
+    auto_login: int = Field(default=1, ge=0, le=1)
 
     @field_validator("username")
     @classmethod
@@ -56,7 +52,12 @@ class PasswordLogin(BaseModel):
 
 def enabled() -> None:
     if not list_site_plugin_enabled_states().get("shaoniandream", True):
-        raise HTTPException(409, "请先启用少年梦插件", headers=PRIVATE_HEADERS)
+        raise account.LoginFlowError(
+            "少年梦插件尚未启用",
+            code="plugin_disabled",
+            status_code=409,
+            hint="请先在插件配置中启用少年梦，再重新登录",
+        )
 
 
 def runtime(request: Request):
@@ -69,10 +70,7 @@ async def start(request: Request, response: Response):
     response.headers.update(PRIVATE_HEADERS)
     current = runtime(request)
     enabled()
-    try:
-        return current.start_login()
-    except account.LoginFlowError as exc:
-        raise HTTPException(429, str(exc), headers=PRIVATE_HEADERS) from None
+    return current.start_login()
 
 
 @router.get("/login-browser/{flow_id}", response_model=BrowserLoginStatus)
@@ -109,33 +107,30 @@ def browser_token(request: Request) -> str:
     enabled()
     token = request.headers.get("X-Login-Token", "")
     if len(token) != 43 or not token.isascii():
-        raise HTTPException(404, "请从青卷发起登录", headers=PRIVATE_HEADERS)
+        raise account.LoginFlowError(
+            "登录链接无效", code="invalid_token", status_code=404, hint="请从青卷发起登录"
+        )
     return token
 
 
 @public_router.get("/geetest")
 async def geetest(request: Request, response: Response):
     response.headers.update(PRIVATE_HEADERS)
-    try:
-        return await account.ACCOUNTS.geetest(browser_token(request))
-    except account.LoginFlowError as exc:
-        raise HTTPException(400, str(exc), headers=PRIVATE_HEADERS) from None
+    return await account.ACCOUNTS.geetest(browser_token(request))
 
 
 @public_router.post("/login")
 async def login(payload: PasswordLogin, request: Request, response: Response):
     response.headers.update(PRIVATE_HEADERS)
-    try:
-        await account.ACCOUNTS.login(
-            browser_token(request),
-            {
-                "username": payload.username.strip(),
-                "password": payload.password.get_secret_value(),
-                "geetest_challenge": payload.geetest_challenge,
-                "geetest_validate": payload.geetest_validate.get_secret_value(),
-                "geetest_seccode": payload.geetest_seccode.get_secret_value(),
-            },
-        )
-    except account.LoginFlowError as exc:
-        raise HTTPException(400, str(exc), headers=PRIVATE_HEADERS) from None
+    await account.ACCOUNTS.login(
+        browser_token(request),
+        {
+            "username": payload.username.strip(),
+            "password": payload.password.get_secret_value(),
+            "geetest_challenge": payload.geetest_challenge,
+            "geetest_validate": payload.geetest_validate.get_secret_value(),
+            "geetest_seccode": payload.geetest_seccode.get_secret_value(),
+        },
+        auto_login=payload.auto_login,
+    )
     return {"loggedIn": True}

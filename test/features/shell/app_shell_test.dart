@@ -221,7 +221,7 @@ void main() {
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
     expect(view.pane?.displayMode, PaneDisplayMode.compact);
-    expect(view.pane?.items, hasLength(6));
+    expect(view.pane?.items, hasLength(7));
     expect(view.pane?.footerItems, hasLength(2));
     expect(find.byKey(const ValueKey('tablet-navigation')), findsOneWidget);
     expect(find.byKey(const ValueKey('mobile-app-bar')), findsNothing);
@@ -237,8 +237,10 @@ void main() {
       find.byKey(const ValueKey('navigation-pane-toggle')),
       findsOneWidget,
     );
-    final sourceItem = view.pane!.items[2] as PaneItem;
-    final pluginItem = view.pane!.items[3] as PaneItem;
+    final recommendationItem = view.pane!.items[1] as PaneItem;
+    expect((recommendationItem.title as Text).data, '推荐');
+    final sourceItem = view.pane!.items[3] as PaneItem;
+    final pluginItem = view.pane!.items[4] as PaneItem;
     expect((sourceItem.title as Text).data, '书源管理');
     expect((pluginItem.title as Text).data, '插件配置');
     expect(
@@ -287,7 +289,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 180));
 
     final view = tester.widget<NavigationView>(find.byType(NavigationView));
-    expect(view.pane?.items, hasLength(5));
+    expect(view.pane?.items, hasLength(6));
     expect(
       view.pane?.items
           .whereType<PaneItem>()
@@ -416,6 +418,8 @@ void main() {
     await tester.pumpWidget(harness.widget);
     await tester.pump(const Duration(milliseconds: 600));
     expect(find.text('书源管理'), findsOneWidget);
+    await tester.dragFrom(const Offset(60, 420), const Offset(0, -240));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('漫画翻译'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
     expect(

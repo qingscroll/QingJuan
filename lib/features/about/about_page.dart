@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../core/app_metadata.dart';
 import '../../shared/app_surface.dart';
 import '../../shared/brand_logo.dart';
+import '../../shared/desktop_subpage.dart';
 import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 
@@ -29,7 +30,7 @@ class _AboutPageState extends State<AboutPage> {
 
   @override
   Widget build(BuildContext context) {
-    return PageFrame(
+    final body = PageFrame(
       title: '关于青卷',
       subtitle: usesMobileUi(context)
           ? '项目、平台支持与开源许可。'
@@ -179,6 +180,16 @@ class _AboutPageState extends State<AboutPage> {
         ],
       ),
     );
+    return usesMobileUi(context)
+        ? body
+        : DesktopSubpage(
+            title: '关于青卷',
+            showContentTitle: false,
+            maxContentWidth: contentMaxWidth(context),
+            onBack: widget.onBack,
+            backLabel: '返回设置',
+            child: body,
+          );
   }
 }
 

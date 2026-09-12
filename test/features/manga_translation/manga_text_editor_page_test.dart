@@ -71,7 +71,11 @@ void main() {
 
     expect(
         find.byKey(const ValueKey('manga-text-editor-page')), findsOneWidget);
-    expect(find.textContaining('漫画文本工作台 · page-0001.png'), findsOneWidget);
+    expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('manga-text-editor-title')))
+            .data,
+        '漫画文本工作台 · page-0001.png');
     expect(find.text('页面'), findsOneWidget);
     expect(find.text('画布'), findsOneWidget);
     expect(find.text('文本区域'), findsOneWidget);

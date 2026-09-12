@@ -97,6 +97,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
 
   Widget _localModelConfiguration(BuildContext context) {
     final settings = widget.settings.value;
+    final canEdit = !_saving && !widget.settings.saving;
     final canSubmit = widget.backend.status == BackendStatus.ready &&
         !_saving &&
         !widget.settings.saving;
@@ -116,7 +117,9 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
           subtitle: '小说和漫画翻译共用这套模型配置。',
           value: _translationEnabled,
           key: const ValueKey('translation-model-enabled'),
-          onChanged: (value) => setState(() => _translationEnabled = value),
+          onChanged: canEdit
+              ? (value) => setState(() => _translationEnabled = value)
+              : null,
         ),
         const SizedBox(height: 12),
         _translationModelStatusBar(),
@@ -128,7 +131,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
               child: TextBox(
                 key: const ValueKey('translation-model-base-url'),
                 controller: _translationBaseUrlController,
-                enabled: _translationEnabled,
+                enabled: canEdit,
                 placeholder: 'https://api.openai.com/v1',
               ),
             );
@@ -137,7 +140,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
               child: TextBox(
                 key: const ValueKey('translation-model-name'),
                 controller: _translationModelController,
-                enabled: _translationEnabled,
+                enabled: canEdit,
                 placeholder: 'gpt-5.4',
               ),
             );
@@ -170,7 +173,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
                 child: TextBox(
                   key: const ValueKey('translation-model-api-key'),
                   controller: _translationApiKeyController,
-                  enabled: _translationEnabled && !_clearTranslationApiKey,
+                  enabled: canEdit && !_clearTranslationApiKey,
                   obscureText: true,
                   enableSuggestions: false,
                   autocorrect: false,
@@ -183,7 +186,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
                 const SizedBox(width: 8),
                 Button(
                   key: const ValueKey('clear-translation-model-api-key'),
-                  onPressed: _translationEnabled
+                  onPressed: canEdit
                       ? () => setState(() {
                             _clearTranslationApiKey = !_clearTranslationApiKey;
                             if (_clearTranslationApiKey) {
@@ -208,7 +211,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
         ToggleSwitch(
           key: const ValueKey('translation-model-supports-vision'),
           checked: _supportsVision,
-          onChanged: _translationEnabled
+          onChanged: canEdit
               ? (value) => setState(() => _supportsVision = value)
               : null,
           content: const Text('模型支持视觉输入'),
@@ -219,6 +222,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
           child: TextBox(
             key: const ValueKey('translation-system-prompt'),
             controller: _systemPromptController,
+            enabled: canEdit,
             minLines: 4,
             maxLines: 8,
             placeholder: '输入翻译规则和输出要求',
@@ -232,7 +236,8 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
           subtitle: '关闭时继续使用 Windows 本机 RapidOCR 与系统 OCR。',
           value: _ocrEnabled,
           key: const ValueKey('manga-ocr-enabled'),
-          onChanged: (value) => setState(() => _ocrEnabled = value),
+          onChanged:
+              canEdit ? (value) => setState(() => _ocrEnabled = value) : null,
         ),
         const SizedBox(height: 12),
         InfoLabel(
@@ -240,7 +245,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
           child: TextBox(
             key: const ValueKey('manga-ocr-base-url'),
             controller: _ocrBaseUrlController,
-            enabled: _ocrEnabled,
+            enabled: canEdit,
             placeholder: 'https://example.com/ocr',
           ),
         ),
@@ -254,7 +259,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
                 child: TextBox(
                   key: const ValueKey('manga-ocr-api-key'),
                   controller: _ocrApiKeyController,
-                  enabled: _ocrEnabled && !_clearOcrApiKey,
+                  enabled: canEdit && !_clearOcrApiKey,
                   obscureText: true,
                   enableSuggestions: false,
                   autocorrect: false,
@@ -267,7 +272,7 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
                 const SizedBox(width: 8),
                 Button(
                   key: const ValueKey('clear-manga-ocr-api-key'),
-                  onPressed: _ocrEnabled
+                  onPressed: canEdit
                       ? () => setState(() {
                             _clearOcrApiKey = !_clearOcrApiKey;
                             if (_clearOcrApiKey) {
@@ -362,11 +367,18 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
     required String subtitle,
     required bool value,
     required Key key,
-    required ValueChanged<bool> onChanged,
+    required ValueChanged<bool>? onChanged,
   }) =>
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          ToggleSwitch(
+            key: key,
+            checked: value,
+            onChanged: onChanged,
+            semanticLabel: title,
+          ),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -380,8 +392,6 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
               ],
             ),
           ),
-          const SizedBox(width: 12),
-          ToggleSwitch(key: key, checked: value, onChanged: onChanged),
         ],
       );
 
@@ -490,18 +500,35 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
 
   Widget _translationModelStatusBar() {
     final check = widget.backend.translationModelCheck;
-    if (check == null) {
+    final location = widget.localConfiguration ? '本机' : '服务端';
+    if (widget.localConfiguration && !_translationEnabled) {
       return const InfoBar(
-        title: Text('等待服务端模型自检'),
-        content: Text('连接后端后会自动读取当前翻译模型状态。'),
+        title: Text('翻译模型未启用'),
+        content: Text('可以先填写下方配置；打开“启用 OpenAI 兼容翻译”并保存后，即可使用翻译。'),
+        severity: InfoBarSeverity.info,
+      );
+    }
+    if (widget.localConfiguration &&
+        !widget.settings.value.translationModel.enabled &&
+        _translationEnabled) {
+      return const InfoBar(
+        title: Text('翻译模型待保存'),
+        content: Text('填写 API 根地址、模型名称和密钥，然后点击“保存模型配置”完成启用与自检。'),
+        severity: InfoBarSeverity.info,
+      );
+    }
+    if (check == null) {
+      return InfoBar(
+        title: Text('等待$location模型自检'),
+        content: const Text('连接后端后会自动读取当前翻译模型状态。'),
         severity: InfoBarSeverity.info,
       );
     }
     final title = switch (check.status) {
-      TranslationModelCheckStatus.ready => '服务端翻译模型可用',
-      TranslationModelCheckStatus.disabled => '服务端翻译模型未启用',
-      TranslationModelCheckStatus.unconfigured => '服务端翻译模型未配置完整',
-      TranslationModelCheckStatus.failed => '服务端翻译模型自检失败',
+      TranslationModelCheckStatus.ready => '$location翻译模型可用',
+      TranslationModelCheckStatus.disabled => '$location翻译模型未启用',
+      TranslationModelCheckStatus.unconfigured => '$location翻译模型未配置完整',
+      TranslationModelCheckStatus.failed => '$location翻译模型自检失败',
     };
     final details = <String>[
       if (check.model != null && check.model!.isNotEmpty) check.model!,
@@ -514,7 +541,11 @@ class _TranslationModelCardState extends State<TranslationModelCard> {
       content: Text(
         check.available && details.isNotEmpty
             ? details.join(' · ')
-            : check.message,
+            : widget.localConfiguration
+                ? check.message
+                    .replaceAll('Linux 服务端', '本机后端')
+                    .replaceAll('Linux 管理界面', '本机翻译设置')
+                : check.message,
       ),
       severity: switch (check.status) {
         TranslationModelCheckStatus.ready => InfoBarSeverity.success,

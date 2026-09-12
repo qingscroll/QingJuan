@@ -333,9 +333,22 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) unawaited(_close());
       },
-      child: ScaffoldPage(
+      child: NavigationView(
         key: const ValueKey('manga-text-editor-page'),
-        padding: EdgeInsets.zero,
+        appBar: NavigationAppBar(
+          automaticallyImplyLeading: false,
+          backgroundColor: theme.micaBackgroundColor,
+          leading: Tooltip(
+            message: '返回漫画翻译',
+            child: IconButton(
+              key: const ValueKey('close-manga-text-editor'),
+              icon: const Icon(FluentIcons.back, semanticLabel: '返回漫画翻译'),
+              onPressed: _saving || _closing ? null : () => unawaited(_close()),
+            ),
+          ),
+          title: Text('漫画文本工作台 · ${_file.name}',
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
         content: ColoredBox(
           color: theme.micaBackgroundColor,
           child: Column(
@@ -388,50 +401,38 @@ class _MangaTextEditorPageState extends State<MangaTextEditorPage> {
 
   Widget _buildHeader(BuildContext context) {
     final theme = FluentTheme.of(context);
-    final title = Row(
+    final title = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        IconButton(
-          key: const ValueKey('close-manga-text-editor'),
-          icon: const Icon(FluentIcons.back, size: 16),
-          onPressed: _saving ? null : () => unawaited(_close()),
-        ),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Flexible(
-                    child: Text(
-                      '漫画文本工作台 · ${_file.name}',
-                      key: const ValueKey('manga-text-editor-title'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.typography.subtitle,
-                    ),
-                  ),
-                  if (_dirty) ...<Widget>[
-                    const SizedBox(width: 8),
-                    Text(
-                      '未保存',
-                      style: theme.typography.caption?.copyWith(
-                        color: const Color(0xFF9D5D00),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                '点击文字框修改；OCR 漏字处可用“框选新增”人工补译。',
+        Row(
+          children: <Widget>[
+            Flexible(
+              child: Text(
+                '漫画文本工作台 · ${_file.name}',
+                key: const ValueKey('manga-text-editor-title'),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                style: theme.typography.subtitle,
+              ),
+            ),
+            if (_dirty) ...<Widget>[
+              const SizedBox(width: 8),
+              Text(
+                '未保存',
                 style: theme.typography.caption?.copyWith(
-                  color: theme.resources.textFillColorSecondary,
+                  color: const Color(0xFF9D5D00),
                 ),
               ),
             ],
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '点击文字框修改；OCR 漏字处可用“框选新增”人工补译。',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.typography.caption?.copyWith(
+            color: theme.resources.textFillColorSecondary,
           ),
         ),
       ],

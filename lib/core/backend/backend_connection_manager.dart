@@ -39,6 +39,7 @@ class BackendConnectionManager implements Listenable {
   TranslationModelCheck? translationModelCheck;
   bool translationModelCheckInProgress = false;
   Map<String, dynamic> capabilities = const <String, dynamic>{};
+  String instanceId = '';
   bool multiUserEnabled = false;
   Timer? _heartbeatTimer;
   bool _heartbeatInProgress = false;
@@ -150,7 +151,10 @@ class BackendConnectionManager implements Listenable {
     required String label,
     bool requireMultiUser = true,
   }) {
-    final becameReady = status != BackendStatus.ready;
+    final nextInstanceId = meta['instanceId'] as String? ?? '';
+    final becameReady = status != BackendStatus.ready ||
+        (instanceId.isNotEmpty && nextInstanceId != instanceId);
+    instanceId = nextInstanceId;
     final rawCapabilities = meta['capabilities'];
     capabilities = rawCapabilities is Map
         ? Map<String, dynamic>.from(rawCapabilities)
@@ -238,6 +242,7 @@ class BackendConnectionManager implements Listenable {
   void _resetHealthState() {
     _invalidateModelCheck();
     capabilities = const <String, dynamic>{};
+    instanceId = '';
     multiUserEnabled = false;
   }
 

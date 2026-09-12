@@ -52,8 +52,18 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
 
 - `PUT /api/v1/books/{book_id}/progress` 兼容原有章节、滚动比例和段落/图片锚点，另接受可空的 `pageIndex`、`pageCount`、`layoutKey`、`contentMode`、`characterOffset`。响应使用对应的 `last*` 字段；书库记录提供 `lastReadPageIndex` 和 `lastReadPageCount`。页索引和字符偏移从零开始，页数为正，分页标识最多 256 字符，原文/译文模式为 `original` / `translated`。
 - SQLite 升级以可重复执行的新增可空列保留旧阅读数据。旧客户端保存时清空不再有效的新定位字段；章节被删除或缩减时同步清除失效页码和锚点。阅读进度继续严格按当前用户及其书籍授权。
-- 链接任务 POST 支持最长 128 字符的 `Idempotency-Key`，允许字母、数字和 `._:-`，按用户与键隔离。相同键与参数返回原任务，只调度一次；相同键但不同参数返回 409。去重与当前链接任务一致，仅在后端进程生命周期内有效，不承诺跨进程重启恢复同一操作。
+- 链接任务 POST 支持最长 128 字符的 `Idempotency-Key`，允许字母、数字和 `._:-`，按用户与键隔离。任务、参数、日志和操作键持久化到 SQLite；相同键与参数在进程重启后仍返回原任务，相同键但不同参数返回 409。启动时恢复 queued/running 导入，以稳定书籍 ID 防止重复入库。调度并发上限为 2，日志保留最近 500 条；历史接口分页并按当前账号限定，`activeOnly` 查询供客户端刷新已加载范围外的活动任务。
 - 网站抓取必须校验所有解析地址并将连接固定到已验证的公网 IP；HTTP、curl 重定向和浏览器子资源均使用同一公网边界，不继承模型服务的内网白名单。失败信息保存在任务或章节状态，不能写作正文；正文经过成功校验后才原子替换旧文件，部分下载成功时据实际章节状态显示结果。
+
+### 任务控制、完整备份与账号维护
+
+- 下载与翻译通过 `POST /api/v1/tasks/{id}/control/{pause|resume|cancel}` 控制。运行中的操作先进入 `pause_requested` 或 `cancel_requested`，完成正在写入的章节或漫画页面后停下；暂停使用 `paused`，取消使用 `cancelled`。恢复重用原任务及章节检查点，保留已完成内容。后台进度更新不能覆盖用户已提交的停止状态，重启时先收敛未完成的停止请求。
+- 链接历史使用 `GET /api/v1/link-jobs`，失败项通过 `POST /api/v1/link-jobs/{id}/retry` 重试原操作。Windows 和 Android 支持多链接依次提交、历史分页及失败项重试，切换后端或账号必须清空旧历史和未提交草稿。
+- 完整备份位于 `data/backups`。`/api/v1/backups` 整组接口只允许可信 Windows 回环管理员或管理 Cookie + CSRF，不能仅凭普通客户端 Token 访问。创建前确认包含敏感数据；下载使用带 CSRF 的 POST，并设置 `no-store`。ZIP 包含 SQLite、书库文件、数据库中的设置及插件包，以及恢复所需的独立 2FA 材料，不能公开分享。
+- 备份恢复先上传预检，检查清单版本、SHA-256、ZIP 路径/类型/数量/大小、SQLite 完整性及外键、书籍归属和插件包格式。预检返回数量、替换范围与短期确认标识；确认后重新检查文件及目标状态。维护期间拦截所有普通与管理请求，排空既有请求和后台写入，再停止工作器；长任务未结束时返回 409，要求先暂停任务。恢复失败回滚原数据库和书库，重载成功后开放请求；交换日志支持进程意外退出后的启动恢复。
+- Windows 本机到 Linux 多用户服务器仅使用显式 `migrate_local` 模式。目标书库、任务、阅读记录、导入历史和书库目录必须为空，指定一个已有有效账号接收书库。保留目标账号、验证邮箱、会话、注册/SMTP/GitHub 设置和设备；不迁移源账号挑战，替换源书库、书源、插件及翻译配置。完整恢复保留目标服务器环境凭据及实例标识，使用目标独立 2FA 密钥重新加密秘密。
+- 账号维护接口由 `/api/v1/auth/account/*` 提供：当前密码及已有 2FA 校验后改密、验证账号邮箱、查看及撤销自己的会话。旧账号邮箱不能因历史上填写过就视为已验证；注册邮箱验证码与账号创建同事务消费并记录验证状态。会话仅展示随机公开标识、平台、创建/最近访问/过期时间，不展示 Token、原始设备 ID 或网络地址。
+- `/api/v1/auth/password-reset/request` 对存在、不存在、未验证或不可用邮箱统一返回 202；确认找回仍保留现有 2FA 要求。8 位邮箱码仅保存带盐摘要，10 分钟过期、最多尝试 5 次、60 秒重发间隔，每地址每小时最多 5 次，并限制来源 IP。改密或找回成功撤销全部用户会话。发送邮件和验证失败信息不能泄露账号存在性或邮箱验证状态。
 
 ### 客户端设备登记与封禁
 
@@ -125,6 +135,8 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
   `QINGJUAN_MODEL_ENDPOINT_ALLOWLIST` 中配置精确 Origin，例如 `http://192.168.1.20:11434`；该白名单不得通过业务 API 修改。
   运维方应使用 `sudoedit /etc/qingjuan/backend.env` 添加或修改该值（多个 Origin 用逗号分隔），然后执行
   `sudo systemctl restart qingjuan-backend`；重跑安装脚本时必须保留已配置的白名单。
+- 公网模型及外部 OCR 域名遇到代理 TUN 的 `198.18.0.0/15` Fake-IP DNS 时，使用与抓取器共享的公共 DoH 解析模块恢复真实 A/AAAA 地址；DNS 服务本身固定连接已知公网 IP，不再依赖系统 DNS。模型请求仍校验全部结果、固定 TCP 地址并保留供应商 Host/TLS SNI。混合私网结果、直接填写的 Fake-IP 和云元数据地址不得通过该回退获得授权；正常公网 DNS 与显式私网白名单沿用原策略。DoH 失败在任务和自检中给出 Fake-IP / `redir-host` 提示，不回传模型密钥或供应商响应。
+- 模型自检与 Chat Completions 翻译请求明确发送 `stream: false`、`Accept: application/json`，并移除只适用于流式请求的 `stream_options`。供应商仍返回 SSE 时，由 `chat_completion_response.py` 按 choice 重组正文、推理字段、完成原因和用量，再交给原有业务处理；普通 JSON 和外部 OCR 请求保持兼容。流中错误、未完成的 choice、损坏数据及不受支持的非文本输出必须失败，不得把部分译文作为成功结果；异常不回显原始流内容。
 - 未启用或配置不完整属于可解释状态，接口仍返回 `200`；认证失败、接口不兼容、限流、网络或供应商故障映射为稳定的
   `failed` 状态。服务端日志只记录状态和模型名，不记录密钥、探针内容、API 地址或供应商响应正文。
 - `/api/v1/meta` 声明 `translationModelCheck` 能力。Flutter 在元数据握手成功后立即调用自检；模型不可用不阻断书库、
@@ -146,8 +158,20 @@ HTTPS，FastAPI 不直接承担公网 TLS 终止。
 
 ## 4. 抓取与外部服务
 
+### 站点推荐与排行榜
+
+- `python-backend/app/discovery/` 内置移植自 `all_book_order` 的 15 个站点适配器：番茄、起点、刺猬猫、笔趣阁、SF 轻小说、少年梦、夸克、Kakuyomu、哔哩哔哩漫画、禁漫、拷贝漫画、COMICORES、E-Hentai、Yanmaga 和 YoYo 漫画。共 218 个真实栏目，包括 25 个推荐位和 193 个排行；没有推荐位的站点只列出已有排行，不复制排行伪装推荐。
+- `GET /api/v1/discovery/sites` 返回 `{sites: [...]}`，包含站点标识、中文名称、小说/漫画类型以及各栏目的 `key/name/kind/group/pageable`。`GET /api/v1/discovery/sites/{site}/channels/{channel}` 接受 `page`（1–1000）、`limit`（1–100）和 `refresh`，返回统一书目、来源链接、名次、`has_more/cached/error`。`page` 是站点的页码；固定上游页长可能为 10、20、50 或 80，因此客户端请求 `limit=100` 保留整页，以 `has_more` 控制翻页。不可翻页栏目归一为第 1 页。
+- 推荐 API 复用连接 Token 和用户会话认证。站点是否启用由现有插件注册表按主页解析并读取插件开关；无专用插件的站点遵守通用网页开关。停用后不读取缓存内容，且每次出站重试前重新检查开关。未知站点/栏目为 404，参数校验失败为 422；单个站点失败返回空条目和稳定的中文 `error`，不影响其他站点。
+- 栏目缓存有效期为 10 分钟，最多 256 项；相同请求合并抓取，刷新替换缓存，调用方修改响应不会污染缓存。全局最多 6 个栏目抓取，总时限 45 秒、单次 HTTP 超时 15 秒、有限重试、响应最大 8 MiB。全部请求与重定向使用青卷公网 DNS 校验及 IP 固定传输；禁漫仅复用 `jmcomic` 的本地签名和解密，网络仍通过同一安全边界。公开响应不返回上游原始 `extra` 数据、账号 Cookie 或异常原文。
+- 适配器以静态导入随 Windows 后端打包，不依赖参考项目路径、另一个服务或新增 Python 依赖。HTTP 会话在抓取结束时关闭，Router 生命周期负责取消待完成抓取和清理缓存。回归测试位于 `python-backend/tests/test_discovery.py`，公网冒烟只记录站点、栏目、条数和脱敏错误，不作为 CI 前置条件。
+
 ### 少年梦账号登录
 
+- 按参考 API 2026-09-12 更新兼容登录请求：`/site-login/shaoniandream/login` 支持 JSON、URL 编码表单，以及未声明 Content-Type 或误声明为表单的裸 JSON。`auto_login` 默认 `1`，允许 `0`；仅传给少年梦 `autoLogin`，不改变青卷内存会话的有效期。
+- 登录错误统一为 `detail: {status, code, msg, hint}`。参数错误返回 `validation_error` 和经投影的字段提示，不返回原始密码、验证码或校验输入；重复字段、非对象 JSON 和超出 16 KiB 的请求被拒绝。此兼容层只用于少年梦登录，不改变其他业务请求的解析。
+- 浏览器及客户端展示 `msg` / `hint`；提交失败后清空密码并重新加载极验。流程取消或过期、插件停用、连续 5 次登录失败时结束当前流程，提示回到青卷重新发起。客户端轮询在失败后停止，单次请求最长 20 秒。
+- `QINGJUAN_DISABLE_ADMIN_WEB=1` 只关闭管理网页和管理公开路由；健康检查与少年梦登录页作为 `READER_PUBLIC_ROUTERS` 保留，保证 Windows 本机伴随后端可以打开登录页面。
 - 参照 `D:\Code\bookweb\shaonianmeng_book` 的直连登录契约，内置插件直接调用少年梦 `/author/startcaptchaservlet` 和 `/user/loginaction`；发布后无需外部 API 服务，也不引入参考服务的注册 / JWT 账号体系。
 - 插件声明 `account_login`、`browser_login`。客户端通过 `POST /api/v1/plugins/shaoniandream/account/login-browser` 创建五分钟登录流程，打开当前后端的 `/site-login/shaoniandream#<browserToken>`，在浏览器输入账号密码并完成 GeeTest v3。页面使用 [GeeTest 官方 Web 接入方式](https://docs.geetest.com/captcha/deploy/client/web/)。轮询与取消分别使用同路径 `/{flowId}` 的 GET、DELETE，退出账号沿用 `DELETE /api/v1/plugins/shaoniandream/account`。
 - 浏览器专用入口只接受短期随机票据，通过 `X-Login-Token` 提交，不能访问其他业务 API。票据放在 URL fragment，加载后立即移除；页面和响应禁止缓存与 Referer，连接 Token、青卷用户 Token 不进入浏览器。极验配置和登录请求复用同一上游 Cookie，成功或取消后禁止重放，单流程最多尝试五次。

@@ -6,6 +6,7 @@ import '../../../core/backend/backend_connection_manager.dart';
 import '../../../shared/responsive.dart';
 import '../../settings/widgets/settings_section_card.dart';
 import '../auth_controller.dart';
+import '../account_maintenance_form.dart';
 import 'account_security_dialog.dart';
 import 'github_device_dialog.dart';
 
@@ -384,6 +385,19 @@ class _AuthAccountCardState extends State<AuthAccountCard> {
             ],
           ),
         ),
+        if (!registering) ...<Widget>[
+          const SizedBox(height: 10),
+          Button(
+            key: const ValueKey('auth-forgot-password'),
+            onPressed: widget.auth.isBusy
+                ? null
+                : () => showAccountMaintenanceForm(
+                    context: context,
+                    auth: widget.auth,
+                    mode: AccountMaintenanceMode.resetPassword),
+            child: const Text('忘记密码'),
+          ),
+        ],
         if (!registering &&
             widget.auth.registrationPolicy?.githubLoginEnabled ==
                 true) ...<Widget>[

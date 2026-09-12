@@ -6,6 +6,7 @@ from collections.abc import Iterable
 import httpcore
 import pytest
 
+from app import model_endpoint_security as security
 from app.model_endpoint_security import (
     MODEL_ENDPOINT_ALLOWLIST_ENV,
     ModelEndpointSecurityError,
@@ -16,6 +17,7 @@ from app.model_endpoint_security import (
     validate_model_endpoint_url,
     validate_model_endpoint_url_policy,
 )
+from app.public_dns import PublicDnsResolutionError
 
 
 class _DummyStream(httpcore.AsyncNetworkStream):
@@ -206,3 +208,82 @@ async def test_model_http_client_disables_redirects_and_uses_validated_transport
         assert isinstance(client._transport, ValidatedModelHTTPTransport)
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "system_addresses",
+    [("198.18.1.30",), ("198.19.1.30", "2606:4700::1111"), ("::ffff:198.18.1.30",)],
+)
+async def test_model_validation_recovers_fake_ip_dns(monkeypatch, system_addresses):
+    async def system_resolver(host, port):
+        assert (host, port) == ("models.example.test", 443)
+        return tuple(ipaddress.ip_address(address) for address in system_addresses)
+
+    async def public_dns(host, *, transport_factory):
+        assert host == "models.example.test"
+        assert transport_factory is ValidatedModelHTTPTransport
+        return (ipaddress.ip_address("93.184.216.34"),)
+
+    monkeypatch.setattr(security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(security, "resolve_public_dns_addresses", public_dns)
+    assert await validate_model_endpoint_url("https://models.example.test/v1") == (
+        "https://models.example.test"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("system_addresses", "accepted"),
+    [(("93.184.216.34",), True), (("10.0.0.5",), False), (("198.18.1.30", "::1"), False)],
+)
+async def test_model_dns_recovery_does_not_override_other_answers(monkeypatch, system_addresses, accepted):
+    monkeypatch.delenv(MODEL_ENDPOINT_ALLOWLIST_ENV, raising=False)
+
+    async def system_resolver(host, port):
+        return tuple(ipaddress.ip_address(address) for address in system_addresses)
+
+    async def public_dns(*args, **kwargs):
+        raise AssertionError("Only synthetic DNS answers may trigger public DNS")
+
+    monkeypatch.setattr(security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(security, "resolve_public_dns_addresses", public_dns)
+    if accepted:
+        await validate_model_endpoint_url("https://models.example.test/v1")
+    else:
+        with pytest.raises(ModelEndpointSecurityError):
+            await validate_model_endpoint_url("https://models.example.test/v1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["198.18.2.3", "127.0.0.1", "169.254.169.254", "::ffff:10.0.0.1"])
+async def test_model_fake_ip_recovery_requires_every_answer_to_be_public(monkeypatch, address):
+    # Even an explicitly allowlisted model cannot use the DNS recovery as an SSRF bypass.
+    monkeypatch.setenv(MODEL_ENDPOINT_ALLOWLIST_ENV, "https://models.example.test")
+
+    async def system_resolver(host, port):
+        return (ipaddress.ip_address("198.18.1.30"),)
+
+    async def public_dns(*args, **kwargs):
+        return (ipaddress.ip_address("93.184.216.34"), ipaddress.ip_address(address))
+
+    monkeypatch.setattr(security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(security, "resolve_public_dns_addresses", public_dns)
+    with pytest.raises(ModelEndpointSecurityError):
+        await validate_model_endpoint_url("https://models.example.test/v1")
+
+
+@pytest.mark.asyncio
+async def test_model_fake_ip_dns_failure_has_actionable_sanitized_message(monkeypatch):
+    async def system_resolver(host, port):
+        return (ipaddress.ip_address("198.18.1.30"),)
+
+    async def public_dns(*args, **kwargs):
+        raise PublicDnsResolutionError("upstream details must not be shown")
+
+    monkeypatch.setattr(security, "resolve_model_endpoint_addresses", system_resolver)
+    monkeypatch.setattr(security, "resolve_public_dns_addresses", public_dns)
+    with pytest.raises(security.ModelEndpointDnsError, match="Fake-IP.*redir-host") as failure:
+        await validate_model_endpoint_url("https://models.example.test/v1")
+    assert "upstream details" not in str(failure.value)
+    assert "models.example.test" not in str(failure.value)

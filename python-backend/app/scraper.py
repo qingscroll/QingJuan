@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import copy
 import hmac
 import html
 import importlib
@@ -41,6 +42,21 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, UnidentifiedImageError
 
 try:
+    from .source_status import (
+        fanqie_publication_status,
+        html_publication_status,
+        manifest_publication_fields,
+        publication_status,
+    )
+except ImportError:
+    from app.source_status import (
+        fanqie_publication_status,
+        html_publication_status,
+        manifest_publication_fields,
+        publication_status,
+    )
+
+try:
     import cv2
     import numpy as np
 except Exception:  # pragma: no cover - RapidOCR environments normally provide both
@@ -48,6 +64,7 @@ except Exception:  # pragma: no cover - RapidOCR environments normally provide b
     np = None
 
 try:
+    from .chat_completion_response import CompletionStreamError, decode_chat_completion_response
     from .db import DATA_DIR, is_site_plugin_enabled
     from .manga_download import (
         MANGA_RETRYABLE_STATUS_CODES,
@@ -81,11 +98,14 @@ try:
         resolve_site_plugin,
         site_plugin_matches,
     )
+    from .task_boundaries import chapter_completed, checkpoint, stop_requested
+    from .task_io import blocking_write, cancel_and_drain
     from .translation_model_health import (
         normalize_openai_compatible_base_url,
         resolve_openai_compatible_model_config,
     )
 except ImportError:
+    from app.chat_completion_response import CompletionStreamError, decode_chat_completion_response
     from app.db import DATA_DIR, is_site_plugin_enabled
     from app.manga_download import (
         MANGA_RETRYABLE_STATUS_CODES,
@@ -119,6 +139,8 @@ except ImportError:
         resolve_site_plugin,
         site_plugin_matches,
     )
+    from app.task_boundaries import chapter_completed, checkpoint, stop_requested
+    from app.task_io import blocking_write, cancel_and_drain
     from app.translation_model_health import (
         normalize_openai_compatible_base_url,
         resolve_openai_compatible_model_config,
@@ -1579,7 +1601,9 @@ def repair_18comic_chapter_images(book_dir: Path, manifest: dict, chapter_index:
         original_bytes = target_path.read_bytes()
         descrambled_bytes = _18comic_descramble_bytes(original_bytes, image_url, chapter_url, scramble_id)
         if descrambled_bytes != original_bytes:
-            target_path.write_bytes(descrambled_bytes)
+            from app.storage_quota import quota_write_bytes
+
+            quota_write_bytes(target_path, descrambled_bytes)
             repaired = True
 
     chapter["images_repaired"] = True
@@ -2031,6 +2055,7 @@ def _preview_from_json_text(text: str, source_url: str, payload: AddBookPayload)
         chapters = [ChapterPreview(title=title, url=source_url)]
 
     return PreviewResponse(
+        **publication_status("json-book", data).preview_fields(),
         title=title,
         author=author,
         synopsis=synopsis or "未抓取到简介，建议后续针对目标站点补充规则。",
@@ -2471,9 +2496,18 @@ def load_manifest(book_dir: Path) -> dict:
 
 
 def save_manifest(book_dir: Path, manifest: dict) -> None:
-    (book_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    from app.manifest_storage import save_manifest as publish_manifest
+
+    publish_manifest(book_dir, manifest)
+
+
+def _manifest_for_publication(book_dir: Path, snapshot: dict) -> dict:
+    """Read just before a synchronous publication, retaining unrelated changes."""
+    path = book_dir / "manifest.json"
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else copy.deepcopy(snapshot)
+    if not isinstance(current, dict) or not isinstance(current.get("chapters"), list):
+        raise ValueError("作品目录无效，已停止发布章节结果")
+    return current
 
 
 def build_translated_filename(filename: str) -> str:
@@ -2546,12 +2580,9 @@ def _write_manga_translation_checkpoint(
         "pages": [page.model_dump(mode="python", exclude_none=True) for page in pages],
     }
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = Path(f"{checkpoint_path}.tmp")
-    temporary_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary_path.replace(checkpoint_path)
+    from app.storage_quota import quota_write_text
+
+    quota_write_text(checkpoint_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _load_manga_translation_checkpoint(
@@ -2562,6 +2593,7 @@ def _load_manga_translation_checkpoint(
     model: str,
     target_language: str,
     image_files: list[str],
+    output_dir: Path | None = None,
 ) -> list[MangaTranslatedPagePayload]:
     if not checkpoint_path.exists():
         return []
@@ -2589,7 +2621,7 @@ def _load_manga_translation_checkpoint(
         checkpoint_path.unlink(missing_ok=True)
         return []
 
-    resolved_book_dir = book_dir.resolve()
+    resolved_output_dir = (output_dir or book_dir).resolve()
     pages: list[MangaTranslatedPagePayload] = []
     for page_number, asset_path in enumerate(image_files, start=1):
         if page_number > len(raw_pages) or not isinstance(raw_pages[page_number - 1], dict):
@@ -2599,12 +2631,12 @@ def _load_manga_translation_checkpoint(
         except Exception:
             break
         translated_asset_path = build_translated_image_asset_path(asset_path)
-        translated_image_path = (book_dir / translated_asset_path).resolve()
+        translated_image_path = (resolved_output_dir / translated_asset_path).resolve()
         if (
             page.page_number != page_number
             or page.source_image_file != asset_path
             or page.translated_image_file != translated_asset_path
-            or not translated_image_path.is_relative_to(resolved_book_dir)
+            or not translated_image_path.is_relative_to(resolved_output_dir)
             or not is_valid_image_file(translated_image_path)
         ):
             break
@@ -2728,10 +2760,9 @@ def save_translated_page_payload(
         payload["page_count"] = len(translated_pages)
         if translated_pages:
             payload["target_language"] = translated_pages[0].target_language
-    target_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    from app.storage_quota import quota_write_text
+
+    quota_write_text(target_path, json.dumps(payload, ensure_ascii=False, indent=2))
     return target_path.name
 
 
@@ -2869,7 +2900,6 @@ async def download_selected_chapters(
 
     concurrency = max(1, concurrency)
     image_concurrency = _image_download_concurrency(str(manifest.get("source_url") or ""), concurrency)
-    updated = False
     completed_count = 0
     total_count = len(selected_indexes)
     active_titles: dict[int, str] = {}
@@ -2878,10 +2908,12 @@ async def download_selected_chapters(
 
     async with _build_http_client() as client:
 
-        async def worker(chapter_index: int) -> dict:
+        async def worker(chapter_index: int) -> dict | None:
             chapter = chapter_lookup[chapter_index]
             chapter_title = str(chapter.get("title") or f"第{chapter_index}章")
             async with semaphore:
+                if stop_requested():
+                    return None
                 active_titles[chapter_index] = chapter_title
                 await _notify_download_progress(
                     progress_callback, completed_count, total_count, list(active_titles.values())
@@ -2903,22 +2935,26 @@ async def download_selected_chapters(
         try:
             for pending_task in asyncio.as_completed(pending_tasks):
                 payload = await pending_task
-                apply_downloaded_chapter_payload(manifest, payload)
+                if payload is None:
+                    continue
+                # Readers may have cached another chapter while this download
+                # was in flight. Reload and merge without yielding to the loop.
+                current = _manifest_for_publication(book_dir, manifest)
+                if not apply_downloaded_chapter_payload(current, payload):
+                    raise ValueError("章节目录已变化，请重新加载后重试")
+                save_manifest(book_dir, current)
+                manifest.clear()
+                manifest.update(current)
                 completed_count += 1
-                updated = True
-                save_manifest(book_dir, manifest)
+                chapter_completed(payload["index"])
                 await _notify_download_progress(
                     progress_callback, completed_count, total_count, list(active_titles.values())
                 )
-        except Exception:
-            for task in pending_tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        except BaseException:
+            await cancel_and_drain(pending_tasks)
             raise
 
-    if updated:
-        save_manifest(book_dir, manifest)
+    checkpoint()
 
     return manifest
 
@@ -2937,6 +2973,8 @@ async def _notify_download_progress(
 
 
 def _write_chapter_text_atomic(target_path: Path, text: str) -> None:
+    from app.storage_quota import quota_replace
+
     if not text.strip():
         raise ValueError("未能取得有效章节正文，请稍后重试")
     temporary_path: Path | None = None
@@ -2953,7 +2991,7 @@ def _write_chapter_text_atomic(target_path: Path, text: str) -> None:
             temporary.write(text)
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_path, target_path)
+        quota_replace(temporary_path, target_path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -3052,6 +3090,9 @@ async def translate_selected_chapters(
     is_manga = str(manifest.get("book_kind") or "").strip() == "漫画"
 
     if is_manga:
+        from .manga_publication import publish_staged_chapter
+        from .storage_quota import quota_write_text
+
         for chapter_index in chapter_indexes:
             chapter = chapter_lookup.get(chapter_index)
             if not chapter:
@@ -3063,6 +3104,10 @@ async def translate_selected_chapters(
             translated_filename = build_translated_filename(filename)
             translated_meta_filename = build_translated_meta_filename(filename)
             checkpoint_path = translated_checkpoint_path(book_dir, filename)
+            staging_dir = book_dir / f".manga-translation-{sha256(filename.encode()).hexdigest()}.tmp"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            if (staging_dir / ".rollback-failed").exists() or (staging_dir / "__backup__").exists():
+                raise RuntimeError(f"上次译文发布尚未恢复，恢复副本已保留：{staging_dir}")
             source_title = str(chapter.get("title") or f"第{chapter_index}章")
             repair_18comic_chapter_images(book_dir, manifest, chapter_index)
             (
@@ -3079,24 +3124,42 @@ async def translate_selected_chapters(
                 log_callback=log_callback,
                 progress_callback=progress_callback,
                 checkpoint_path=checkpoint_path,
+                output_dir=staging_dir,
             )
             translated_text = _merge_page_translations(source_title, page_translations)
             save_translated_page_payload(
-                book_dir,
+                staging_dir,
                 filename,
                 page_translations,
                 translated_image_files,
                 translated_pages=translated_pages,
             )
+            quota_write_text(translated_text_path(staging_dir, filename), translated_text)
+            # No await during reload/merge/publication: reader cache commits
+            # cannot be interleaved with this chapter's short publication.
+            current = _manifest_for_publication(book_dir, manifest)
+            current_chapter = _chapter_lookup(current).get(chapter_index)
+            if current_chapter is None:
+                raise ValueError("章节目录已变化，请重新加载后重试")
+            current_chapter.update(
+                translated_meta_file_name=translated_meta_filename,
+                translated_image_files=translated_image_files,
+                translated=True,
+                translated_file_name=translated_filename,
+            )
+            save_manifest(staging_dir, current)
+            publish_staged_chapter(
+                book_dir, staging_dir,
+                [*translated_image_files, translated_meta_filename, translated_filename, "manifest.json"],
+            )
+            manifest.clear()
+            manifest.update(current)
             checkpoint_path.unlink(missing_ok=True)
-            chapter["translated_meta_file_name"] = translated_meta_filename
-            chapter["translated_image_files"] = translated_image_files
-            chapter["translated"] = True
-            chapter["translated_file_name"] = translated_filename
-            translated_text_path(book_dir, filename).write_text(translated_text, encoding="utf-8")
-            updated = True
+            shutil.rmtree(staging_dir, ignore_errors=True)
     else:
         _resolve_openai_compatible_model_config(settings, feature_name="翻译")
+        from .translation_quality_hooks import prepare_novel_translation, publish_novel_translation
+        from .translation_quality_usage import book_translation_context
 
         async with _create_model_http_client(timeout=120.0) as client:
             for chapter_index in chapter_indexes:
@@ -3112,17 +3175,19 @@ async def translate_selected_chapters(
                 translated_filename = build_translated_filename(filename)
                 source_title = str(chapter.get("title") or f"第{chapter_index}章")
                 source_text = source_path.read_text(encoding="utf-8")
-                translated_text = await _translate_text(
-                    client=client,
-                    settings=settings,
-                    target_language=language,
-                    title=source_title,
-                    content=source_text,
-                )
+                quality_snapshot = prepare_novel_translation(book_dir, chapter_index)
+                with book_translation_context(book_dir, chapter_index):
+                    translated_text = await _translate_text(
+                        client=client,
+                        settings=settings,
+                        target_language=language,
+                        title=source_title,
+                        content=source_text,
+                    )
                 chapter["translated_image_files"] = []
                 chapter["translated"] = True
                 chapter["translated_file_name"] = translated_filename
-                translated_text_path(book_dir, filename).write_text(translated_text, encoding="utf-8")
+                publish_novel_translation(book_dir, filename, chapter_index, translated_text, quality_snapshot)
                 updated = True
 
     if updated:
@@ -8734,6 +8799,7 @@ async def _translate_manga_pages_with_command_detailed(
     log_callback: Callable[[str, str], Awaitable[None] | None] | None = None,
     progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
     checkpoint_path: Path | None = None,
+    output_dir: Path | None = None,
 ) -> tuple[list[str], list[str], list[MangaTranslatedPagePayload]]:
     if not image_files:
         raise ValueError("漫画章节没有可翻译的页面图片")
@@ -8752,19 +8818,21 @@ async def _translate_manga_pages_with_command_detailed(
             model=image_model,
             target_language=resolved_target_language,
             image_files=image_files,
+            output_dir=output_dir,
         )
         if checkpoint_path is not None
         else []
     )
 
     for page_number, asset_path in enumerate(image_files, start=1):
+        checkpoint()
         page_started_at = time.perf_counter()
         image_path = (book_dir / asset_path).resolve()
         if not image_path.exists():
             raise ValueError(f"漫画页面文件不存在：{asset_path}")
 
         translated_asset_path = build_translated_image_asset_path(asset_path)
-        translated_image_path = (book_dir / translated_asset_path).resolve()
+        translated_image_path = ((output_dir or book_dir) / translated_asset_path).resolve()
         translated_image_path.parent.mkdir(parents=True, exist_ok=True)
 
         log_prefix = f"[漫画译图][第 {page_number}/{total_pages} 页] "
@@ -8784,7 +8852,6 @@ async def _translate_manga_pages_with_command_detailed(
                     await progress_result
             continue
 
-        translated_image_path.unlink(missing_ok=True)
         await _notify_task_log(
             log_callback,
             "info",
@@ -8813,7 +8880,9 @@ async def _translate_manga_pages_with_command_detailed(
         )
 
         normalized_bytes = _ensure_png_image_bytes(translated_bytes)
-        translated_image_path.write_bytes(normalized_bytes)
+        from app.storage_quota import quota_write_bytes
+
+        quota_write_bytes(translated_image_path, normalized_bytes)
         if translated_image_path.stat().st_size <= 0:
             raise RuntimeError(f"{log_prefix}未生成有效输出图片：{translated_image_path}")
 
@@ -8836,7 +8905,7 @@ async def _translate_manga_pages_with_command_detailed(
         translated_image_files.append(translated_asset_path)
         translated_pages.append(resolved_page_payload)
         if checkpoint_path is not None:
-            await asyncio.to_thread(
+            await blocking_write(
                 _write_manga_translation_checkpoint,
                 checkpoint_path,
                 book_dir=book_dir,
@@ -9885,6 +9954,7 @@ async def _preview_bika(source_url: str, payload: AddBookPayload) -> PreviewResp
     if not chapters:
         chapters = [ChapterPreview(title=title, url=f"{base_origin}/comic/reader/{comic_id}/1", pageCount=0)]
     return PreviewResponse(
+        **publication_status("bika", comic).preview_fields(),
         title=title,
         author=author,
         synopsis=synopsis,
@@ -9935,6 +10005,7 @@ async def _preview_kakuyomu(source_url: str, payload: AddBookPayload) -> Preview
         raise ValueError("Kakuyomu GraphQL 未返回任何公开章节")
 
     return PreviewResponse(
+        **publication_status("kakuyomu", graphql_payload["data"]["work"]).preview_fields(),
         title=work.title or payload.title or "未命名小说",
         author=work.author,
         synopsis=work.synopsis,
@@ -10356,6 +10427,7 @@ async def _preview_fanqie(source_url: str, payload: AddBookPayload) -> PreviewRe
     html, resolved_url = await _fetch_fanqie_html(source_url)
     book = parse_fanqie_book_page(html, resolved_url)
     return PreviewResponse(
+        **fanqie_publication_status(html).preview_fields(),
         title=book.title,
         author=book.author,
         synopsis=book.synopsis,
@@ -10398,6 +10470,7 @@ async def _preview_qidian(source_url: str, payload: AddBookPayload) -> PreviewRe
     category = str(book_info.get("chanName") or "")
     book_kind = "轻小说" if "轻小说" in category else payload.bookKind
     return PreviewResponse(
+        **publication_status("qidian", book_info).preview_fields(),
         title=str(book_info.get("bookName") or catalog.get("bookName") or "未命名作品"),
         author=str(book_info.get("authorName") or "").strip() or None,
         synopsis=synopsis,
@@ -10432,6 +10505,7 @@ async def _preview_quark(source_url: str, payload: AddBookPayload) -> PreviewRes
     if cover and cover.startswith("http://"):
         cover = f"https://{cover.removeprefix('http://')}"
     return PreviewResponse(
+        **publication_status("quark", book_info).preview_fields(),
         title=str(
             book_info.get("bookName") or chapters_info.get("bookName") or payload.title or "未命名作品"
         ).strip(),
@@ -10512,6 +10586,7 @@ async def _preview_copymanga(source_url: str, payload: AddBookPayload) -> Previe
         else []
     )
     return PreviewResponse(
+        **publication_status("copymanga", comic).preview_fields(),
         title=str(comic.get("name") or payload.title or path_word).strip(),
         author="、".join(authors) or None,
         synopsis=str(comic.get("brief") or "").strip(),
@@ -10611,6 +10686,7 @@ async def _preview_sfacg(source_url: str, payload: AddBookPayload) -> PreviewRes
         for item in catalogue
     ]
     return PreviewResponse(
+        **publication_status("sfacg", raw_book).preview_fields(),
         title=str(book.get("title") or payload.title or f"SF 轻小说 {novel_id}"),
         author=str(book.get("author") or "").strip() or None,
         synopsis=str(book.get("synopsis") or "").strip(),
@@ -10742,6 +10818,7 @@ async def preview_from_url(payload: AddBookPayload) -> PreviewResponse:
         chapters = [ChapterPreview(title=title, url=resolved_url)]
 
     result = PreviewResponse(
+        **html_publication_status(html).preview_fields(),
         title=title,
         author=author,
         synopsis=synopsis,
@@ -10851,6 +10928,8 @@ async def download_book(
         "cover_url": preview.cover,
         "cover_file": cover_file,
         "download_mode": "all",
+        **_manifest_source_reference(payload),
+        **manifest_publication_fields(preview),
         "chapter_count": len(chapter_manifest),
         "chapters": chapter_manifest,
     }
@@ -10863,6 +10942,11 @@ async def download_book(
         chapters=preview.chapters,
         local_path=book_dir,
     )
+
+
+def _manifest_source_reference(payload: AddBookPayload) -> dict[str, str | None]:
+    plugin = resolve_site_plugin(str(payload.sourceUrl))
+    return {"source_id": payload.sourceId, "site_plugin_id": plugin.id if plugin else None}
 
 
 async def create_book_manifest_only(
@@ -10916,6 +11000,8 @@ async def create_book_manifest_only(
         "cover_url": preview.cover,
         "cover_file": cover_file,
         "download_mode": "on_demand",
+        **_manifest_source_reference(payload),
+        **manifest_publication_fields(preview),
         "chapter_count": len(chapter_manifest),
         "chapters": chapter_manifest,
     }
@@ -12284,7 +12370,7 @@ async def _download_chapter_images(
 
         async def fetch_and_write() -> None:
             content = await _download_binary_bytes(client, image_url, referer)
-            await asyncio.to_thread(write_image_atomic, target_path, content)
+            await blocking_write(write_image_atomic, target_path, content)
 
         if image_download_semaphore is None:
             await fetch_and_write()
@@ -12294,12 +12380,15 @@ async def _download_chapter_images(
                     await fetch_and_write()
         return f"images/{filename}"
 
-    return await asyncio.gather(
-        *(
-            download_single_image(image_number, image_url)
-            for image_number, image_url in enumerate(image_urls, start=1)
-        )
-    )
+    tasks = [
+        asyncio.create_task(download_single_image(image_number, image_url))
+        for image_number, image_url in enumerate(image_urls, start=1)
+    ]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        await cancel_and_drain(tasks)
+        raise
 
 
 async def _download_cover_image(
@@ -12318,7 +12407,7 @@ async def _download_cover_image(
     filename = f"cover{extension}"
     target_path = covers_dir / filename
     if not await asyncio.to_thread(is_valid_image_file, target_path):
-        await asyncio.to_thread(write_image_atomic, target_path, image_bytes)
+        await blocking_write(write_image_atomic, target_path, image_bytes)
     return f"covers/{filename}"
 
 
@@ -12369,6 +12458,8 @@ async def _translate_text(
     title: str,
     content: str,
 ) -> str:
+    from .translation_quality_usage import glossary_instruction
+
     base_url, api_key, model = _resolve_openai_compatible_model_config(
         settings,
         feature_name="翻译",
@@ -12378,7 +12469,7 @@ async def _translate_text(
         f"章节标题：{title}\n"
         f"目标语言：{resolved_target_language}\n"
         f"请将以下章节内容翻译为{resolved_target_language}；如果原文已经是{resolved_target_language}，请保持原意并输出自然流畅的{resolved_target_language}版本。\n\n"
-        f"{content}"
+        f"{glossary_instruction(content)}{content}"
     )
 
     content = await _post_translation_completion_text(
@@ -12433,6 +12524,8 @@ def _translation_completion_request_payload(
     expects_json: bool,
 ) -> dict[str, Any]:
     request_payload = json.loads(json.dumps(payload))
+    request_payload["stream"] = False
+    request_payload.pop("stream_options", None)
     model = str(request_payload.get("model") or "")
     if _is_deepseek_v4_model(model):
         # DeepSeek V4 默认开启思考模式。翻译是确定性转换任务，关闭思考可避免
@@ -12553,7 +12646,9 @@ def _decode_translation_json_response(response: httpx.Response) -> dict[str, Any
         )
 
     try:
-        data = response.json()
+        data = decode_chat_completion_response(response)
+    except CompletionStreamError as exc:
+        raise ValueError(f"翻译服务流式响应解析失败（HTTP {status_code}）：{exc}") from exc
     except ValueError as exc:
         excerpt = _translation_response_excerpt(response)
         detail = f" 服务响应：{excerpt}" if excerpt else ""
@@ -12580,6 +12675,13 @@ async def _post_translation_json(
     payload: dict[str, Any],
     max_retries: int = 3,
 ) -> dict[str, Any]:
+    from .translation_quality_usage import record_model_usage
+
+    if urlparse(url).path.rstrip("/").endswith("/chat/completions"):
+        payload = {**payload, "stream": False}
+        payload.pop("stream_options", None)
+        headers = {**headers, "Accept": "application/json"}
+
     last_error: Exception | None = None
     retryable_status_codes = {408, 409, 425, 429, 500, 502, 503, 504}
     retryable_exceptions: tuple[type[Exception], ...] = (
@@ -12588,18 +12690,33 @@ async def _post_translation_json(
     )
 
     for attempt in range(1, max_retries + 1):
+        started_at = time.monotonic()
+        usage_recorded = False
         try:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code in retryable_status_codes and attempt < max_retries:
+                record_model_usage(payload.get("model", ""), None, "failed", int((time.monotonic() - started_at) * 1000))
+                usage_recorded = True
                 await asyncio.sleep(min(1.2 * attempt, 4.0))
                 continue
-            return _decode_translation_json_response(response)
+            decoded = _decode_translation_json_response(response)
+            record_model_usage(payload.get("model", ""), decoded, "completed", int((time.monotonic() - started_at) * 1000))
+            return decoded
+        except asyncio.CancelledError:
+            if not usage_recorded:
+                record_model_usage(payload.get("model", ""), None, "cancelled", int((time.monotonic() - started_at) * 1000))
+            raise
+        except ValueError:
+            record_model_usage(payload.get("model", ""), None, "failed", int((time.monotonic() - started_at) * 1000))
+            raise
         except httpx.HTTPStatusError as exc:
+            record_model_usage(payload.get("model", ""), None, "failed", int((time.monotonic() - started_at) * 1000))
             last_error = exc
             if exc.response.status_code not in retryable_status_codes or attempt >= max_retries:
                 raise
             await asyncio.sleep(min(1.2 * attempt, 4.0))
         except retryable_exceptions as exc:
+            record_model_usage(payload.get("model", ""), None, "failed", int((time.monotonic() - started_at) * 1000))
             last_error = exc
             if attempt >= max_retries:
                 break

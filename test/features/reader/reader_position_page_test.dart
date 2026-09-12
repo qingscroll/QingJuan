@@ -10,9 +10,12 @@ import 'package:qingjuan/app/app_theme.dart';
 import 'package:qingjuan/core/api/api_client.dart';
 import 'package:qingjuan/core/backend/backend_connection_manager.dart';
 import 'package:qingjuan/core/models/book.dart';
+import 'package:qingjuan/core/models/reading_progress_pending.dart';
 import 'package:qingjuan/features/auth/auth_controller.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
 import 'package:qingjuan/features/reader/reader_page.dart';
+import 'package:qingjuan/features/reader/reader_progress_store.dart';
+import 'package:qingjuan/features/reader/reader_progress_writer.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
 import 'package:qingjuan/features/tasks/tasks_controller.dart';
@@ -21,6 +24,72 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.windows]) {
+    testWidgets(
+        'failed text mode switch preserves body and saved mode on ${platform.name}',
+        (tester) async {
+      await tester.binding.setSurfaceSize(
+          Size(platform == TargetPlatform.windows ? 1200 : 420, 820));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final server = _ProgressServer()
+        ..paragraphOverride = ['已加载且应继续显示的译文正文。', '第二段已加载译文。']
+        ..chapterFailureStatus = 404;
+      final harness =
+          await _ReaderHarness.create(server, ReaderFlowMode.continuous);
+      addTearDown(harness.dispose);
+      await tester
+          .pumpWidget(harness.widget(server.detail, platform: platform));
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 600));
+      final body = find.textContaining('已加载且应继续显示的译文正文', findRichText: true);
+      expect(body, findsOneWidget);
+      server.failChapters = true;
+      await tester.tap(platform == TargetPlatform.android
+          ? find.byKey(const ValueKey('reader-content-mode'))
+          : find.byType(ToggleButton));
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(body, findsOneWidget);
+      await _close(tester);
+      expect(server.writes.last['contentMode'], 'translated');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'reopening preserves local pending chapter and explicitly adopts server chapter',
+      (tester) async {
+    final server = _ProgressServer()
+      ..versioning = true
+      ..progress =
+          const ReadingProgress(chapterIndex: 2, scrollRatio: 0, revision: 3);
+    final harness = await _ReaderHarness.create(server, ReaderFlowMode.paged);
+    addTearDown(harness.dispose);
+    final writer = ReaderProgressWriter(harness.api, 'position-book',
+        versioning: true,
+        initialProgress: server.progress,
+        store: _PendingStore(const PendingReadingProgress(
+            baseRevision: 0,
+            queued: ReadingProgress(chapterIndex: 1, scrollRatio: 0))));
+    addTearDown(writer.dispose);
+    await _open(tester, harness, server,
+        writer: writer, platform: TargetPlatform.windows);
+    expect(writer.restoredPosition?.chapterIndex, 1);
+    expect(find.text('阅读进度发生冲突'), findsOneWidget);
+    expect(server.writes, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('reader-progress-use-server')));
+    for (var frame = 0; frame < 12; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(find.text('阅读进度发生冲突'), findsNothing);
+    expect(find.textContaining(server.paragraphs(2).first), findsOneWidget);
+    await _close(tester);
+    expect(server.progress.chapterIndex, 2);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('closing and reopening restores the same chapter and exact page',
       (tester) async {
@@ -215,10 +284,13 @@ Future<void> _expectCurrentPageContains(
 }
 
 Future<void> _open(
-    WidgetTester tester, _ReaderHarness harness, _ProgressServer server) async {
+    WidgetTester tester, _ReaderHarness harness, _ProgressServer server,
+    {ReaderProgressWriter? writer,
+    TargetPlatform platform = TargetPlatform.android}) async {
   await tester.binding.setSurfaceSize(const Size(420, 820));
   addTearDown(() => tester.binding.setSurfaceSize(null));
-  await tester.pumpWidget(harness.widget(server.detail));
+  await tester.pumpWidget(
+      harness.widget(server.detail, writer: writer, platform: platform));
   await tester.runAsync(() => Future<void>.delayed(Duration.zero));
   // Restoring a distant lazy paragraph may require several measured frames.
   for (var frame = 0; frame < 12; frame++) {
@@ -237,6 +309,8 @@ class _ProgressServer {
       const ReadingProgress(chapterIndex: 2, scrollRatio: 0);
   final writes = <Map<String, dynamic>>[];
   bool failChapters = false;
+  int chapterFailureStatus = 503;
+  bool versioning = false;
   List<String>? paragraphOverride;
 
   List<String> paragraphs(int chapter) =>
@@ -245,18 +319,39 @@ class _ProgressServer {
           (index) => '第$chapter章段落${index + 1}：${'青卷阅读定位。' * (2 + index % 4)}');
 
   Future<http.Response> respond(http.Request request) async {
+    if (versioning &&
+        request.method == 'GET' &&
+        request.url.path.endsWith('/progress')) {
+      return http.Response(jsonEncode(readingProgressJson(progress)), 200,
+          headers: {'content-type': 'application/json; charset=utf-8'});
+    }
     if (request.method == 'PUT' && request.url.path.endsWith('/progress')) {
       final value = jsonDecode(request.body) as Map<String, dynamic>;
+      if (versioning && value['expectedRevision'] != progress.revision) {
+        return http.Response(
+            jsonEncode({
+              'detail': {
+                'code': 'reading_progress_conflict',
+                'current': readingProgressJson(progress)
+              }
+            }),
+            409,
+            headers: {'content-type': 'application/json; charset=utf-8'});
+      }
+      final revision = (progress.revision ?? 0) + 1;
       writes.add(value);
       progress = ReadingProgress.fromJson({
+        if (versioning) 'revision': revision,
         for (final entry in value.entries)
           'last${entry.key[0].toUpperCase()}${entry.key.substring(1)}':
               entry.value,
       });
-      return http.Response('{}', 200);
+      return http.Response(
+          versioning ? jsonEncode(readingProgressJson(progress)) : '{}', 200,
+          headers: {'content-type': 'application/json; charset=utf-8'});
     }
     if (failChapters) {
-      return http.Response('{"detail":"章节暂不可用，请重试"}', 503);
+      return http.Response('{"detail":"章节暂不可用，请重试"}', chapterFailureStatus);
     }
     final chapter = int.parse(request.url.pathSegments.last);
     return http.Response(
@@ -324,11 +419,14 @@ class _ReaderHarness {
   final TasksController tasks;
   final SettingsController settings;
 
-  Widget widget(BookDetail detail) => FluentApp(
+  Widget widget(BookDetail detail,
+          {ReaderProgressWriter? writer,
+          TargetPlatform platform = TargetPlatform.android}) =>
+      FluentApp(
         theme: buildQingJuanTheme(Brightness.light,
             platform: TargetPlatform.android),
         home: UiPlatformScope(
-          platform: TargetPlatform.android,
+          platform: platform,
           child: AppScope(
             appState: state,
             api: api,
@@ -340,6 +438,7 @@ class _ReaderHarness {
             settings: settings,
             child: ReaderPage(
                 detail: detail,
+                progressWriter: writer,
                 initialChapterIndex: detail.progress.chapterIndex),
           ),
         ),
@@ -354,5 +453,16 @@ class _ReaderHarness {
     backend.dispose();
     api.close();
     state.dispose();
+  }
+}
+
+class _PendingStore implements ReaderProgressStore {
+  _PendingStore(this.entry);
+  PendingReadingProgress? entry;
+  @override
+  Future<PendingReadingProgress?> load() async => entry;
+  @override
+  Future<void> save(PendingReadingProgress? value) async {
+    entry = value;
   }
 }

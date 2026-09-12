@@ -19,14 +19,22 @@ class SettingsSectionCard extends StatelessWidget {
       tone: AppSurfaceTone.elevated,
       borderRadius: usesMobileUi(context) ? 16 : 8,
       padding: const EdgeInsets.all(16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          AccentIcon(icon),
-          const SizedBox(width: 16),
-          Expanded(child: child),
-        ],
-      ),
+      child: LayoutBuilder(builder: (context, constraints) {
+        if (!usesMobileUi(context) && constraints.maxWidth < 500) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [AccentIcon(icon), const SizedBox(height: 12), child],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            AccentIcon(icon),
+            const SizedBox(width: 16),
+            Expanded(child: child),
+          ],
+        );
+      }),
     );
   }
 }

@@ -126,12 +126,14 @@ class _ThemeModeChoice extends StatelessWidget {
     final mobile = usesMobileUi(context);
     final accent = theme.accentColor.defaultBrushFor(theme.brightness);
     return SizedBox(
-      width: mobile ? double.infinity : 92,
+      width: mobile
+          ? double.infinity
+          : 20 + MediaQuery.textScalerOf(context).scale(12) * 6,
       child: AppSurface(
         onPressed: onPressed,
         selected: selected,
         tone: selected ? AppSurfaceTone.accent : AppSurfaceTone.muted,
-        borderRadius: 16,
+        borderRadius: mobile ? 16 : 8,
         padding: EdgeInsets.symmetric(
           horizontal: mobile ? 4 : 10,
           vertical: 12,

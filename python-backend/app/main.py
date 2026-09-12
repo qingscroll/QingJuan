@@ -49,7 +49,9 @@ try:
     )
     from .api.routers import (
         API_ROUTERS,
+        MANAGEMENT_ROUTERS,
         PUBLIC_ROUTERS,
+        READER_PUBLIC_ROUTERS,
         health_router,
         library_router,
         plugins_router,
@@ -87,8 +89,9 @@ try:
         save_site_plugin_enabled,
         save_task,
     )
+    from .fair_task_queue import create_task_queue
     from .fanqie_parser import canonical_fanqie_book_url, fanqie_book_id_from_url
-    from .link_jobs import LinkJobStore
+    from .link_job_repository import PersistentLinkJobStore
     from .local_import import (
         LOCAL_FILE_SIZE_LIMITS,
         SUPPORTED_LOCAL_EXTENSIONS,
@@ -163,10 +166,7 @@ try:
         build_translated_filename,
         build_translated_image_asset_path,
         build_translated_meta_filename,
-        create_book_manifest_only,
-        download_book,
         download_chapter_payload,
-        download_selected_chapters,
         load_manga_translation_page_payloads,
         load_manifest,
         load_translated_page_payload,
@@ -175,11 +175,22 @@ try:
         save_manifest,
         save_translated_page_payload,
         search_builtin_site_books,
-        translate_selected_chapters,
         translate_single_manga_image,
         translated_checkpoint_path,
         translated_image_payload_is_current,
         translated_text_path,
+    )
+    from .scraper import (
+        create_book_manifest_only as create_book_manifest_only,
+    )
+    from .scraper import (
+        download_book as download_book,
+    )
+    from .scraper import (
+        download_selected_chapters as download_selected_chapters,
+    )
+    from .scraper import (
+        translate_selected_chapters as translate_selected_chapters,
     )
     from .scraper_network_security import create_public_http_client
     from .security import API_PREFIX, API_VERSION, authentication_enabled
@@ -203,7 +214,9 @@ except ImportError:
     )
     from app.api.routers import (
         API_ROUTERS,
+        MANAGEMENT_ROUTERS,
         PUBLIC_ROUTERS,
+        READER_PUBLIC_ROUTERS,
         health_router,
         library_router,
         plugins_router,
@@ -241,8 +254,9 @@ except ImportError:
         save_site_plugin_enabled,
         save_task,
     )
+    from app.fair_task_queue import create_task_queue
     from app.fanqie_parser import canonical_fanqie_book_url, fanqie_book_id_from_url
-    from app.link_jobs import LinkJobStore
+    from app.link_job_repository import PersistentLinkJobStore
     from app.local_import import (
         LOCAL_FILE_SIZE_LIMITS,
         SUPPORTED_LOCAL_EXTENSIONS,
@@ -317,10 +331,7 @@ except ImportError:
         build_translated_filename,
         build_translated_image_asset_path,
         build_translated_meta_filename,
-        create_book_manifest_only,
-        download_book,
         download_chapter_payload,
-        download_selected_chapters,
         load_manga_translation_page_payloads,
         load_manifest,
         load_translated_page_payload,
@@ -329,11 +340,22 @@ except ImportError:
         save_manifest,
         save_translated_page_payload,
         search_builtin_site_books,
-        translate_selected_chapters,
         translate_single_manga_image,
         translated_checkpoint_path,
         translated_image_payload_is_current,
         translated_text_path,
+    )
+    from app.scraper import (
+        create_book_manifest_only as create_book_manifest_only,
+    )
+    from app.scraper import (
+        download_book as download_book,
+    )
+    from app.scraper import (
+        download_selected_chapters as download_selected_chapters,
+    )
+    from app.scraper import (
+        translate_selected_chapters as translate_selected_chapters,
     )
     from app.scraper_network_security import create_public_http_client
     from app.security import API_PREFIX, API_VERSION, authentication_enabled
@@ -354,8 +376,8 @@ except ImportError:
 LIBRARY_ROOT = DATA_DIR / "library"
 EXPORT_ROOT = DATA_DIR / "exports"
 EXPORT_TTL = timedelta(hours=24)
-TASK_QUEUE: asyncio.Queue[str] = asyncio.Queue()
-LINK_JOB_STORE = LinkJobStore()
+TASK_QUEUE: asyncio.Queue[str] = create_task_queue()
+LINK_JOB_STORE = PersistentLinkJobStore()
 SITE_PLUGIN_IMPORT_JOB_STORE = SitePluginImportJobStore()
 _USER_SITE_PLUGIN_RUNTIMES: dict[tuple[str, str], Any] = {}
 _RUNTIME_LOGGER = logging.getLogger("qingjuan.runtime")
@@ -390,6 +412,9 @@ async def _run_startup(app_instance: FastAPI) -> None:
     validate_admin_auth_configuration()
     configured_model_endpoint_allowlist()
     init_db()
+    from app.translation_quality_files import recover_translation_quality_writes
+
+    await asyncio.to_thread(recover_translation_quality_writes, DATA_DIR)
     from app.plugin_system.packages import load_installed_plugins
     await asyncio.to_thread(load_installed_plugins)
     _migrate_book_storage_keys()
@@ -401,8 +426,14 @@ async def _run_startup(app_instance: FastAPI) -> None:
     app_instance.state.chapter_manifest_locks = {}
     app_instance.state.chapter_cache_coordinator = _create_chapter_cache_coordinator()
     app_instance.state.link_job_tasks = set()
+    app_instance.state.scheduled_link_jobs = {}
+    app_instance.state.link_job_semaphore = asyncio.Semaphore(2)
+    app_instance.state.link_job_store = LINK_JOB_STORE
+    app_instance.state.schedule_link_job = _schedule_link_job
     app_instance.state.site_plugin_import_tasks = set()
     app_instance.state.task_queue = TASK_QUEUE
+    from app.task_control import settle_interrupted_controls
+    settle_interrupted_controls()
     for task in list_pending_tasks():
         task.status = "queued"
         task.message = "等待队列处理"
@@ -413,9 +444,28 @@ async def _run_startup(app_instance: FastAPI) -> None:
     service_controller = app_instance.state.backend_service_controller
     app_instance.state.queue_worker = asyncio.create_task(_task_worker(service_controller))
     _resume_server_managed_source_caches()
+    for job in LINK_JOB_STORE.recover():
+        _schedule_link_job(job.id)
+    from app.book_updates import BookUpdateService
+    from app.runtime_bindings import RuntimeBindings
+
+    app_instance.state.book_updates = BookUpdateService(RuntimeBindings(globals()))
+    app_instance.state.book_updates.start()
+    backup_service = getattr(app_instance.state, "backup_service", None)
+    if backup_service is not None:
+        backup_service.start_cleanup()
 
 
 async def _run_shutdown(app_instance: FastAPI) -> None:
+    backup_service = getattr(app_instance.state, "backup_service", None)
+    if backup_service is not None:
+        await backup_service.stop_cleanup()
+    preview_reading = getattr(app_instance.state, "preview_reading", None)
+    if preview_reading is not None:
+        preview_reading.clear()
+    book_updates = getattr(app_instance.state, "book_updates", None)
+    if book_updates is not None:
+        await book_updates.stop()
     export_cleanup_worker = getattr(app_instance.state, "export_cleanup_worker", None)
     if export_cleanup_worker is not None:
         export_cleanup_worker.cancel()
@@ -466,6 +516,9 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     startup_complete = False
     try:
         _RUNTIME_LOGGER.info("青卷后端开始启动，运行日志=%s", log_path.name)
+        backup_service = getattr(app_instance.state, "backup_service", None)
+        if backup_service is not None:
+            await asyncio.to_thread(backup_service.recover_interrupted_restore)
         await _run_startup(app_instance)
         startup_complete = True
         _RUNTIME_LOGGER.info("青卷后端启动完成")
@@ -509,6 +562,21 @@ async def get_service_meta() -> ServiceMetaResponse:
         apiVersion=API_VERSION,
         instanceId=_load_or_create_instance_id(),
         capabilities={
+            "taskControl": True,
+            "linkJobHistory": True,
+            "readingProgressVersioning": True,
+            "libraryMetadata": True,
+            "translationQuality": True,
+            "resourceLimits": True,
+            "readingAnnotations": True,
+            "cachedTextSearch": True,
+            "storageManagement": True,
+            "bookUpdates": True,
+            "previewReading": True,
+            "automaticBookUpdates": True,
+            "pluginMaintenance": True,
+            "backups": True,
+            "accountMaintenance": multi_user_enabled(),
             "adminWeb": admin_web_enabled(),
             "multiUser": multi_user_enabled(),
             "connectionTokenReveal": admin_web_enabled(),
@@ -769,6 +837,11 @@ def _site_plugin_remote_book_payload(
 
 
 async def _run_site_plugin_bookshelf_import(job_id: str, plugin_id: str) -> None:
+    async with app.state.maintenance_gate.operation():
+        await _execute_site_plugin_bookshelf_import(job_id, plugin_id)
+
+
+async def _execute_site_plugin_bookshelf_import(job_id: str, plugin_id: str) -> None:
     SITE_PLUGIN_IMPORT_JOB_STORE.start(job_id, "正在读取当前登录账号书架")
     plugin = get_site_plugin(plugin_id)
     if plugin is None:
@@ -1143,7 +1216,7 @@ async def get_books(request: Request) -> list[BookRecord]:
     owner_id = require_user_access(request).owner_id
     books: list[BookRecord] = []
     for book in list_books(owner_id):
-        books.append(await _hydrate_book_record_async(book))
+        books.append(_present_book(await _hydrate_book_record_async(book)))
     return books
 
 
@@ -1212,9 +1285,7 @@ async def get_chapter_content(
     translated_images_current = (
         translated_image_payload_is_current(book_dir, chapter.fileName) if is_translated_mode else False
     )
-    translated_image_assets = [
-        asset_path for asset_path in chapter.translatedImageFiles if (book_dir / asset_path).exists()
-    ]
+    translated_image_assets = _complete_translated_image_assets(book_dir, chapter)
     image_assets = (
         translated_image_assets
         if is_translated_mode and translated_images_current and translated_image_assets
@@ -1261,7 +1332,7 @@ async def post_book_export(
         payload.format,
         payload.chapterIndexes,
     )
-    file_name = _book_export_file_name(book, payload.format)
+    file_name = _book_export_file_name(_present_book(book), payload.format)
     return BookExportResponse(
         bookId=book.id,
         format=payload.format,
@@ -1331,6 +1402,8 @@ async def post_book_cover(
     file: Annotated[UploadFile, File()],
     request: Request,
 ) -> BookRecord:
+    from app.cover_storage import MAX_COVER_BYTES, publish_cover
+
     try:
         book = _get_book_or_404(book_id, require_user_access(request).owner_id)
         book_dir = _resolve_book_dir(book)
@@ -1339,35 +1412,11 @@ async def post_book_cover(
 
         original_name = _normalize_form_text(file.filename or "").strip()
         extension = _validate_cover_extension(original_name, file.content_type)
-        target_dir = book_dir / "covers"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / f"custom-cover{extension}"
-
-        previous_manifest = _load_or_initialize_manifest(book, book_dir)
-        previous_cover_file = _read_optional_string(previous_manifest, "cover_file")
-        if previous_cover_file:
-            previous_path = (book_dir / previous_cover_file).resolve()
-            if (
-                previous_path.exists()
-                and previous_path.is_file()
-                and previous_path.parent == target_dir.resolve()
-                and previous_path != target_path.resolve()
-            ):
-                previous_path.unlink(missing_ok=True)
-
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="封面文件为空")
-        target_path.write_bytes(content)
-
-        manifest = _load_or_initialize_manifest(book, book_dir)
-        manifest["cover_file"] = f"covers/{target_path.name}"
-        manifest["cover_url"] = None
-        save_manifest(book_dir, manifest)
-
-        updated_book = book.model_copy(update={"updatedAt": _now()})
-        save_book(updated_book)
-        return _hydrate_book_record(updated_book)
+        content = await file.read(MAX_COVER_BYTES + 1)
+        async with _chapter_manifest_lock_for(book_id):
+            manifest = publish_cover(book, book_dir, extension, content, _now())
+        updated_book = _get_book_or_404(book_id, book.ownerId)
+        return _present_book(updated_book.model_copy(update={"cover": _resolve_book_cover(updated_book, manifest)}), manifest)
     finally:
         await file.close()
 
@@ -1379,7 +1428,10 @@ async def post_translate_image(
     request: Request,
     title: Annotated[str, Form()] = "",
 ) -> Response:
-    require_user_access(request)
+    from app.resource_limits import ACTOR, ResourceLimitError
+
+    access = require_user_access(request)
+    actor_token = ACTOR.set(access.user.id)
     try:
         normalized_language = _validate_language(language)
         diagnostic_payload: dict[str, object] = {}
@@ -1421,9 +1473,12 @@ async def post_translate_image(
         )
     except HTTPException:
         raise
+    except ResourceLimitError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"图片翻译失败：{exc}") from exc
     finally:
+        ACTOR.reset(actor_token)
         await file.close()
 
 
@@ -1471,7 +1526,10 @@ async def post_image_workflow(
     translated_file: Annotated[UploadFile | None, File()] = None,
     upscale_factor: Annotated[int | None, Form()] = None,
 ) -> MangaWorkflowResponse:
-    require_user_access(request)
+    from app.resource_limits import ACTOR, ResourceLimitError
+
+    access = require_user_access(request)
+    actor_token = ACTOR.set(access.user.id)
     translated_upload = translatedFile or translated_file
     try:
         normalized_language = _validate_language(language)
@@ -1518,9 +1576,12 @@ async def post_image_workflow(
         )
     except HTTPException:
         raise
+    except ResourceLimitError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"漫画工作流失败：{exc}") from exc
     finally:
+        ACTOR.reset(actor_token)
         await file.close()
         for upload in (translatedFile, translated_file):
             if upload is not None:
@@ -1580,7 +1641,20 @@ async def put_reading_progress(
         lastContentMode=payload.contentMode,
         lastCharacterOffset=payload.characterOffset,
     )
-    return save_reading_progress(progress)
+    from app.reading_progress_repository import ProgressConflict, save_progress
+
+    try:
+        return save_progress(
+            progress, expected_revision=payload.expectedRevision, operation_id=payload.operationId,
+        )
+    except ProgressConflict as error:
+        raise HTTPException(status_code=409, detail={
+            "code": error.code,
+            "message": str(error),
+            "current": error.current.model_dump(exclude={"ownerId"}),
+        }) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="未找到书籍") from error
 
 
 @tasks_router.get("/books/{book_id}/tasks", response_model=list[TaskRecord])
@@ -1715,10 +1789,12 @@ async def post_retry_task(task_id: str, request: Request) -> TaskRecord:
 
 
 @library_router.post("/books/preview", response_model=PreviewResponse)
-async def post_preview(payload: AddBookPayload, request: Request) -> PreviewResponse:
+async def post_preview(payload: AddBookPayload, request: Request, response: Response) -> PreviewResponse:
     require_user_access(request)
+    response.headers["Cache-Control"] = "no-store"
     try:
-        return await preview_from_url(payload)
+        async with asyncio.timeout(90):
+            return await preview_from_url(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"解析失败：{exc}") from exc
 
@@ -1735,38 +1811,13 @@ async def _create_imported_book(
     preview: PreviewResponse,
     *,
     owner_id: str = DEFAULT_ADMIN_USER_ID,
+    book_id: str | None = None,
 ) -> BookRecord:
-    lightweight_import = _uses_manifest_only_import(payload)
-    book_id = f"book-{uuid4()}"
-    owner_library_root = LIBRARY_ROOT / owner_id / book_id
-    if lightweight_import:
-        result = await create_book_manifest_only(payload, preview, owner_library_root)
-    else:
-        result = await download_book(
-            payload,
-            preview,
-            owner_library_root,
-            **_site_account_download_kwargs(owner_id, str(payload.sourceUrl)),
-        )
-    record = BookRecord(
-        ownerId=owner_id,
-        id=book_id,
-        title=result.title,
-        sourceUrl=str(payload.sourceUrl),
-        bookKind=preview.bookKind,
-        language=payload.language,
-        status="待处理" if lightweight_import else "已下载",
-        chapterCount=len(result.chapters),
-        translated=False,
-        localPath=_storage_key_for_path(result.local_path),
-        updatedAt=_now(),
-        synopsis=result.synopsis,
-        cover=result.cover,
-    )
-    save_book(record)
-    if lightweight_import:
-        _schedule_server_managed_source_cache(record)
-    return _hydrate_book_record(record)
+    from app.book_import_execution import create_imported_book
+    from app.runtime_bindings import RuntimeBindings
+
+    return await create_imported_book(RuntimeBindings(globals()), payload, preview,
+        owner_id=owner_id, book_id=book_id)
 
 
 async def _run_link_job_stage(
@@ -1799,57 +1850,18 @@ async def _run_link_job_stage(
 
 
 async def _run_link_job(job_id: str) -> None:
-    request = LINK_JOB_STORE.get(job_id)
-    payload = LINK_JOB_STORE.payload_for(job_id)
-    owner_id = LINK_JOB_STORE.owner_for(job_id)
-    LINK_JOB_STORE.start(job_id, "开始识别作品链接")
-    LINK_JOB_STORE.append_log(job_id, "info", f"已提交链接：{payload.sourceUrl}", progress=5)
-    try:
-        preview = await _run_link_job_stage(
-            job_id,
-            asyncio.create_task(preview_from_url(payload)),
-            message="正在获取作品元数据和章节目录",
-            start_progress=12,
-            end_progress=60,
-        )
-        LINK_JOB_STORE.append_log(
-            job_id,
-            "info",
-            f"已解析《{preview.title}》，共 {preview.chapterCount} 章",
-            progress=65 if request.mode == "import" else 95,
-        )
-        if request.mode == "preview":
-            LINK_JOB_STORE.complete(job_id, "链接解析完成", preview=preview)
-            return
+    from app.link_import_execution import run_link_job
+    from app.runtime_bindings import RuntimeBindings
 
-        manifest_only = _uses_manifest_only_import(payload)
-        if manifest_only and _server_managed_chapter_cache_enabled():
-            import_start_message = "开始创建章节目录，完成后由 Linux 服务器顺序缓存正文"
-        else:
-            import_start_message = (
-                "开始创建章节目录，正文将在阅读时按需下载"
-                if manifest_only
-                else "开始下载全部正文并写入本地书库"
-            )
-        import_wait_message = "正在写入章节目录" if manifest_only else "正在下载全部正文并写入本地书库"
-        LINK_JOB_STORE.append_log(job_id, "info", import_start_message, progress=68)
-        book = await _run_link_job_stage(
-            job_id,
-            asyncio.create_task(_create_imported_book(payload, preview, owner_id=owner_id)),
-            message=import_wait_message,
-            start_progress=68,
-            end_progress=98,
-        )
-        if manifest_only and _server_managed_chapter_cache_enabled():
-            completion_message = "链接导入完成，Linux 服务器已开始顺序缓存正文"
-        else:
-            completion_message = "链接导入完成，已启用边看边下" if manifest_only else "链接导入完成"
-        LINK_JOB_STORE.complete(job_id, completion_message, preview=preview, book=book)
-    except asyncio.CancelledError:
-        LINK_JOB_STORE.fail(job_id, "应用正在关闭，链接任务已取消")
-        raise
-    except Exception as exc:
-        LINK_JOB_STORE.fail(job_id, exc)
+    async with app.state.maintenance_gate.operation():
+        await run_link_job(RuntimeBindings(globals()), job_id)
+
+
+def _schedule_link_job(job_id: str) -> None:
+    from app.link_import_execution import schedule_link_job
+    from app.runtime_bindings import RuntimeBindings
+
+    schedule_link_job(RuntimeBindings(globals()), job_id)
 
 
 @library_router.post("/books/link-jobs", response_model=PublicLinkJobRecord)
@@ -1870,11 +1882,7 @@ async def post_link_job(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not created:
         return job
-    task = asyncio.create_task(_run_link_job(job.id))
-    link_job_tasks: set[asyncio.Task[Any]] = getattr(app.state, "link_job_tasks", set())
-    link_job_tasks.add(task)
-    app.state.link_job_tasks = link_job_tasks
-    task.add_done_callback(link_job_tasks.discard)
+    _schedule_link_job(job.id)
     return job
 
 
@@ -1891,11 +1899,12 @@ async def post_import(payload: AddBookPayload, request: Request) -> BookRecord:
     owner_id = _effective_owner_id(require_user_access(request))
     try:
         preview = await preview_from_url(payload)
-        return await _create_imported_book(
+        imported = await _create_imported_book(
             payload,
             preview,
             owner_id=owner_id,
         )
+        return _present_book(imported)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1910,9 +1919,17 @@ async def post_import_local(
     request: Request,
     needTranslation: Annotated[bool, Form()] = False,
     title: Annotated[str, Form()] = "",
+    textEncoding: Annotated[str, Form()] = "auto",
 ) -> BookRecord:
+    from contextlib import ExitStack
+
+    from app.backup_service import run_blocking
+    from app.storage_quota import provisional_book_storage
+
+    storage = ExitStack()
     book_dir: Path | None = None
     temp_path: Path | None = None
+    persisted = False
     try:
         owner_id = _effective_owner_id(require_user_access(request))
         book_id = f"book-{uuid4()}"
@@ -1920,11 +1937,12 @@ async def post_import_local(
         normalized_language = _validate_language(language)
         original_name = _normalize_form_text(file.filename or "")
         temp_path = await _save_local_upload(file, original_name)
-        plan = await asyncio.to_thread(
+        plan = await run_blocking(
             inspect_local_document,
             temp_path,
             original_name=original_name,
             requested_kind=requested_book_kind,
+            text_encoding=textEncoding,
         )
         imported_title = (
             _normalize_form_text(title or "").strip()
@@ -1939,7 +1957,8 @@ async def post_import_local(
             imported_title,
         )
         book_dir.mkdir(parents=True, exist_ok=False)
-        chapter_manifest = await asyncio.to_thread(write_local_document, plan, temp_path, book_dir)
+        storage.enter_context(provisional_book_storage(owner_id, book_dir))
+        chapter_manifest = await run_blocking(write_local_document, plan, temp_path, book_dir)
         synopsis = (
             plan.synopsis.strip() or f"从本地 {plan.source_format} 文件导入，共 {len(chapter_manifest)} 章"
         )
@@ -1976,23 +1995,40 @@ async def post_import_local(
             },
         )
         save_book(record)
-        return _hydrate_book_record(record)
+        persisted = True
+        if needTranslation:
+            try:
+                _enqueue_task(
+                    record,
+                    "translate",
+                    ChapterActionPayload(chapterIndexes=list(range(1, len(chapter_manifest) + 1))),
+                )
+            except Exception as exc:
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                raise HTTPException(
+                    status_code=exc.status_code if isinstance(exc, HTTPException) else 503,
+                    detail=f"作品已导入书库，但翻译任务创建失败；请在作品详情重试翻译：{detail}",
+                ) from exc
+        return _present_book(_hydrate_book_record(record))
     except HTTPException:
-        if book_dir is not None and book_dir.exists():
+        if not persisted and book_dir is not None and book_dir.exists():
             shutil.rmtree(book_dir, ignore_errors=True)
         raise
     except LocalImportError as exc:
-        if book_dir is not None and book_dir.exists():
+        if not persisted and book_dir is not None and book_dir.exists():
             shutil.rmtree(book_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"本地导入失败：{exc}") from exc
     except Exception as exc:
-        if book_dir is not None and book_dir.exists():
+        if not persisted and book_dir is not None and book_dir.exists():
             shutil.rmtree(book_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"本地导入失败：{exc}") from exc
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        await file.close()
+        try:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            await file.close()
+        finally:
+            storage.close()
 
 
 @settings_router.get("/settings", response_model=TranslationSettingsView)
@@ -3765,6 +3801,11 @@ def _publish_staged_manga_translation_files(
     staging_dir: Path,
     relative_paths: list[str],
 ) -> None:
+    from contextlib import nullcontext
+
+    from app import db
+    from app.storage_quota import PUBLISH_LOCK, quota_replace
+
     resolved_book_dir = book_dir.resolve()
     resolved_staging_dir = staging_dir.resolve()
     backup_root = resolved_staging_dir / "__backup__"
@@ -3791,17 +3832,27 @@ def _publish_staged_manga_translation_files(
         prepared.append((staged_path, target_path, backup_path))
 
     published: list[tuple[Path, Path | None]] = []
+    managed = resolved_book_dir.is_relative_to((db.DATA_DIR / "library").absolute())
+    scope = db.get_connection() if managed else nullcontext(None)
+    locked = False
     try:
-        for staged_path, target_path, backup_path in prepared:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            backup: Path | None = None
-            if target_path.exists():
-                backup_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target_path, backup_path)
-                backup = backup_path
-            published.append((target_path, backup))
-            os.replace(staged_path, target_path)
-    except Exception as publish_error:
+        with scope as conn:
+            if managed:
+                conn.execute("BEGIN IMMEDIATE")
+            # Keep the shared lock through commit and any file rollback: another
+            # writer must never consume space temporarily freed by this batch.
+            PUBLISH_LOCK.acquire()
+            locked = True
+            for staged_path, target_path, backup_path in prepared:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                backup: Path | None = None
+                if target_path.exists():
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target_path, backup_path)
+                    backup = backup_path
+                published.append((target_path, backup))
+                quota_replace(staged_path, target_path, connection=conn)
+    except BaseException as publish_error:
         rollback_errors: list[Exception] = []
         for target_path, backup_path in reversed(published):
             try:
@@ -3821,6 +3872,9 @@ def _publish_staged_manga_translation_files(
             ) from publish_error
         shutil.rmtree(backup_root, ignore_errors=True)
         raise
+    finally:
+        if locked:
+            PUBLISH_LOCK.release()
 
 
 async def _commit_manga_chapter_translation(
@@ -4007,6 +4061,11 @@ async def _commit_manga_chapter_translation(
 
 
 async def _cache_source_chapter_by_id(book_id: str, chapter_index: int) -> None:
+    async with app.state.maintenance_gate.operation():
+        await _execute_source_chapter_cache(book_id, chapter_index)
+
+
+async def _execute_source_chapter_cache(book_id: str, chapter_index: int) -> None:
     if _is_book_deleted(book_id):
         raise HTTPException(status_code=404, detail="书籍已被删除")
     book = _get_book_or_404(book_id)
@@ -4279,6 +4338,12 @@ async def _hydrate_book_record_async(book: BookRecord, *, fetch_remote_metadata:
     return hydrated.model_copy(update={"cover": preview.cover or hydrated.cover})
 
 
+def _present_book(book: BookRecord, manifest: dict | None = None) -> BookRecord:
+    from app.library_metadata import apply_book_metadata
+
+    return apply_book_metadata(book, manifest)
+
+
 def _build_book_detail(book: BookRecord) -> BookDetailResponse:
     chapters = _load_chapter_records(book)
     manifest = _load_or_initialize_manifest(book, _resolve_book_dir(book))
@@ -4304,11 +4369,12 @@ def _build_book_detail(book: BookRecord) -> BookDetailResponse:
             "lastReadPageCount": progress.lastPageCount,
         })
 
+    refreshed_book = _present_book(refreshed_book, manifest)
     return BookDetailResponse(
         book=refreshed_book,
         title=refreshed_book.title,
-        author=_read_optional_string(manifest, "author"),
-        synopsis=_read_optional_string(manifest, "synopsis") or refreshed_book.synopsis,
+        author=refreshed_book.author,
+        synopsis=refreshed_book.synopsis,
         addedAt=refreshed_book.updatedAt,
         totalWords=sum(chapter.pageCount for chapter in chapters)
         if refreshed_book.bookKind == "漫画"
@@ -4523,9 +4589,12 @@ def _cleanup_expired_exports() -> None:
 
 
 async def _export_cleanup_loop() -> None:
+    from app.backup_service import run_blocking
+
     while True:
         await asyncio.sleep(3600)
-        await asyncio.to_thread(_cleanup_expired_exports)
+        async with app.state.maintenance_gate.operation():
+            await run_blocking(_cleanup_expired_exports)
 
 
 def _epub_language(language: str) -> str:
@@ -4554,6 +4623,19 @@ def _export_file_path(book: BookRecord, export_format: str) -> Path:
     return export_dir / f"{uuid4().hex}{extension}"
 
 
+def _complete_translated_image_assets(book_dir: Path, chapter: ChapterRecord) -> list[str]:
+    assets = chapter.translatedImageFiles
+    expected_pages = max(len(chapter.imageFiles), chapter.pageCount)
+    if (
+        not assets
+        or len(assets) != expected_pages
+        or len(set(assets)) != expected_pages
+        or any(not (book_dir / asset).is_file() for asset in assets)
+    ):
+        return []
+    return assets
+
+
 def _load_export_chapters(
     book: BookRecord,
     chapter_indexes: list[int] | None = None,
@@ -4575,9 +4657,7 @@ def _load_export_chapters(
             continue
         content = use_path.read_text(encoding="utf-8")
         image_paths: list[Path] = []
-        translated_image_assets = [
-            asset_path for asset_path in chapter.translatedImageFiles if (book_dir / asset_path).exists()
-        ]
+        translated_image_assets = _complete_translated_image_assets(book_dir, chapter)
         image_assets = (
             translated_image_assets
             if (
@@ -4827,9 +4907,7 @@ def _load_chapter_export_item(book: BookRecord, chapter_index: int) -> tuple[dic
     chapter, content_path = _load_single_chapter(book, chapter_index, mode="translated")
     content = content_path.read_text(encoding="utf-8")
     translated_path = _translated_path_for_chapter(book_dir, chapter)
-    translated_images = [
-        asset_path for asset_path in chapter.translatedImageFiles if (book_dir / asset_path).is_file()
-    ]
+    translated_images = _complete_translated_image_assets(book_dir, chapter)
     use_translated_images = (
         content_path == translated_path
         and bool(translated_images)
@@ -4956,6 +5034,8 @@ def _export_chapter(
     chapter_index: int,
     export_format: str,
 ) -> tuple[Path, int]:
+    from app.export_storage import staged_export
+
     novel_formats = {"txt", "text", "docx", "epub"}
     manga_formats = {"pdf", "images"}
     allowed_formats = manga_formats if book.bookKind == "漫画" else novel_formats
@@ -4966,25 +5046,30 @@ def _export_chapter(
         )
 
     manifest, export_item = _load_chapter_export_item(book, chapter_index)
+    source_book = book
+    presented = _present_book(book, manifest)
+    manifest = {**manifest, "title": presented.title, "author": presented.author, "synopsis": presented.synopsis}
+    book = presented
     chapter = export_item["chapter"]
     image_paths: list[Path] = list(export_item["image_paths"])
     try:
-        final_path = _chapter_export_file_path(book, export_format)
-        if export_format == "images":
-            file_count = _write_manga_images_zip(book, [export_item], final_path)
-        elif export_format in {"txt", "text"}:
-            content = str(export_item["content"]).strip()
-            final_path.write_text(f"{chapter.title}\n\n{content}\n", encoding="utf-8")
-            file_count = 1
-        elif export_format == "docx":
-            _write_docx_export(book, manifest, [export_item], final_path)
-            file_count = 1
-        elif export_format == "epub":
-            _write_epub_export(book, manifest, [export_item], final_path)
-            file_count = 1
-        else:
-            _write_pdf_chapter_export(image_paths, final_path)
-            file_count = len(image_paths)
+        final_path = _chapter_export_file_path(source_book, export_format)
+        with staged_export(final_path, source_book.ownerId) as output:
+            if export_format == "images":
+                file_count = _write_manga_images_zip(book, [export_item], output)
+            elif export_format in {"txt", "text"}:
+                content = str(export_item["content"]).strip()
+                output.write_text(f"{chapter.title}\n\n{content}\n", encoding="utf-8")
+                file_count = 1
+            elif export_format == "docx":
+                _write_docx_export(book, manifest, [export_item], output)
+                file_count = 1
+            elif export_format == "epub":
+                _write_epub_export(book, manifest, [export_item], output)
+                file_count = 1
+            else:
+                _write_pdf_chapter_export(image_paths, output)
+                file_count = len(image_paths)
     except HTTPException:
         raise
     except OSError as exc:
@@ -4997,6 +5082,8 @@ def _export_book(
     export_format: str,
     chapter_indexes: list[int] | None = None,
 ) -> tuple[Path, int, int]:
+    from app.export_storage import staged_export
+
     novel_formats = {"txt", "text", "docx", "epub"}
     manga_formats = {"pdf", "images"}
     allowed_formats = manga_formats if book.bookKind == "漫画" else novel_formats
@@ -5007,22 +5094,28 @@ def _export_book(
         )
 
     manifest, export_items = _load_export_chapters(book, chapter_indexes)
+    source_book = book
+    presented = _present_book(book, manifest)
+    manifest = {**manifest, "title": presented.title, "author": presented.author, "synopsis": presented.synopsis}
+    book = presented
     chapter_count = len(export_items)
     if export_format == "images":
-        export_path = _export_file_path(book, export_format)
-        image_count = _write_manga_images_zip(book, export_items, export_path)
+        export_path = _export_file_path(source_book, export_format)
+        with staged_export(export_path, source_book.ownerId) as output:
+            image_count = _write_manga_images_zip(book, export_items, output)
         return export_path, chapter_count, image_count
 
-    final_path = _export_file_path(book, export_format)
-    if export_format in {"txt", "text"}:
-        _write_txt_export(book, manifest, export_items, final_path)
-    elif export_format == "docx":
-        _write_docx_export(book, manifest, export_items, final_path)
-    elif export_format == "epub":
-        _write_epub_export(book, manifest, export_items, final_path)
-    else:
-        image_paths = [image_path for item in export_items for image_path in list(item["image_paths"])]
-        _write_pdf_chapter_export(image_paths, final_path)
+    final_path = _export_file_path(source_book, export_format)
+    with staged_export(final_path, source_book.ownerId) as output:
+        if export_format in {"txt", "text"}:
+            _write_txt_export(book, manifest, export_items, output)
+        elif export_format == "docx":
+            _write_docx_export(book, manifest, export_items, output)
+        elif export_format == "epub":
+            _write_epub_export(book, manifest, export_items, output)
+        else:
+            image_paths = [image_path for item in export_items for image_path in list(item["image_paths"])]
+            _write_pdf_chapter_export(image_paths, output)
     file_count = len(image_paths) if export_format == "pdf" else 1
     return final_path, chapter_count, file_count
 
@@ -5100,132 +5193,31 @@ async def _task_worker(service_controller: BackendServiceController) -> None:
             TASK_QUEUE.task_done()
 
 
+def _reset_task_queue() -> None:
+    global TASK_QUEUE
+    TASK_QUEUE = create_task_queue()
+
+
 async def _run_task(task_id: str) -> None:
-    task = get_task(task_id)
-    if task is None or task.status not in {"queued", "running"}:
-        return
+    from app.runtime_bindings import RuntimeBindings
+    from app.task_execution import run_task
 
-    book = _get_book_or_404(task.bookId, task.ownerId)
-    task.status = "running"
-    task.attempts += 1
-    task.error = None
-    task.message = "任务开始执行"
-    task.updatedAt = _now()
-    save_task(task)
-    _append_task_runtime_log(task, "info", "任务开始执行", update_message=False)
-
-    try:
-        if task.taskType == "download":
-            await _process_download_task(task, book)
-        else:
-            await _process_translate_task(task, book)
-
-        if _is_task_deleted(task.id) or _is_book_deleted(book.id):
-            return
-        task.status = "completed"
-        task.completedCount = task.totalCount
-        task.progress = 100
-        task.message = "任务已完成"
-        task.updatedAt = _now()
-        save_task(task)
-        _append_task_runtime_log(task, "info", "任务已完成", update_message=False)
-        if not _is_book_deleted(book.id):
-            _refresh_book_state(book)
-    except Exception as exc:
-        if _is_task_deleted(task.id) or _is_book_deleted(book.id):
-            return
-        task.status = "failed"
-        task.error = str(exc)
-        task.message = "任务执行失败"
-        task.updatedAt = _now()
-        save_task(task)
-        _append_task_runtime_log(task, "error", str(exc), update_message=False)
+    async with app.state.maintenance_gate.operation():
+        await run_task(RuntimeBindings(globals()), task_id)
 
 
 async def _process_download_task(task: TaskRecord, book: BookRecord) -> None:
-    book_dir = _resolve_book_dir(book)
-    manifest = _load_or_initialize_manifest(book, book_dir)
-    settings = load_settings()
-    concurrency = max(1, min(settings.downloadConcurrency, 8))
+    from app.runtime_bindings import RuntimeBindings
+    from app.task_execution import process_download
 
-    async def on_progress(completed_count: int, total_count: int, active_titles: list[str]) -> None:
-        _ensure_task_resources_exist(task.id, book.id)
-        task.completedCount = completed_count
-        task.progress = round(completed_count / total_count * 100, 2) if total_count else 0
-        if active_titles:
-            preview_titles = "、".join(active_titles[:3])
-            if len(active_titles) > 3:
-                preview_titles += " 等"
-            task.message = (
-                f"{concurrency} 线程下载中，已完成 {completed_count}/{total_count} 章，当前：{preview_titles}"
-            )
-        else:
-            task.message = f"{concurrency} 线程下载中，已完成 {completed_count}/{total_count} 章"
-        task.updatedAt = _now()
-        save_task(task)
-
-    download_kwargs = _site_account_download_kwargs(book.ownerId, book.sourceUrl)
-    await download_selected_chapters(
-        book_dir=book_dir,
-        manifest=manifest,
-        chapter_indexes=task.chapterIndexes,
-        concurrency=concurrency,
-        progress_callback=on_progress,
-        **download_kwargs,
-    )
+    await process_download(RuntimeBindings(globals()), task, book)
 
 
 async def _process_translate_task(task: TaskRecord, book: BookRecord) -> None:
-    book_dir = _resolve_book_dir(book)
-    manifest = _load_or_initialize_manifest(book, book_dir)
-    settings = load_settings()
-    unit = "话" if book.bookKind == "漫画" else "章"
+    from app.runtime_bindings import RuntimeBindings
+    from app.task_execution import process_translate
 
-    async def on_log(level: str, message: str) -> None:
-        _ensure_task_resources_exist(task.id, book.id)
-        _append_task_runtime_log(task, level, message)
-
-    for index, chapter_index in enumerate(task.chapterIndexes, start=1):
-        _ensure_task_resources_exist(task.id, book.id)
-        chapter_label = f"{unit} {chapter_index}"
-        _append_task_runtime_log(task, "info", f"开始处理{chapter_label}")
-
-        async def on_page_progress(
-            completed_pages: int,
-            total_pages: int,
-            chapter_position: int = index,
-        ) -> None:
-            _ensure_task_resources_exist(task.id, book.id)
-            chapter_fraction = completed_pages / total_pages if total_pages else 0
-            task.completedCount = chapter_position - 1
-            task.progress = round(
-                ((chapter_position - 1) + chapter_fraction) / task.totalCount * 100,
-                2,
-            )
-            task.message = (
-                f"正在翻译第 {chapter_position}/{task.totalCount} {unit}，"
-                f"本{unit}已完成 {completed_pages}/{total_pages} 页"
-            )
-            task.updatedAt = _now()
-            save_task(task)
-
-        await translate_selected_chapters(
-            book_dir=book_dir,
-            manifest=manifest,
-            chapter_indexes=[chapter_index],
-            language=book.language,
-            settings=settings,
-            log_callback=on_log,
-            progress_callback=on_page_progress,
-        )
-        _ensure_task_resources_exist(task.id, book.id)
-        task.completedCount = index
-        task.progress = round(index / task.totalCount * 100, 2)
-        task.message = f"已翻译 {index}/{task.totalCount} {unit}"
-        task.updatedAt = _now()
-        save_task(task)
-        _append_task_runtime_log(task, "info", f"已完成{chapter_label}", update_message=False)
-        manifest = load_manifest(book_dir)
+    await process_translate(RuntimeBindings(globals()), task, book)
 
 
 def _now() -> str:
@@ -5236,13 +5228,50 @@ _ADMIN_WEB_ENABLED = admin_web_enabled()
 
 app = create_application(
     routers=API_ROUTERS,
-    public_routers=PUBLIC_ROUTERS if _ADMIN_WEB_ENABLED else (health_router,),
+    management_routers=MANAGEMENT_ROUTERS,
+    public_routers=PUBLIC_ROUTERS if _ADMIN_WEB_ENABLED else READER_PUBLIC_ROUTERS,
     api_prefix=API_PREFIX,
     authenticate=True,
     lifespan=lifespan,
     admin_static_path=(Path(__file__).with_name("admin_static") if _ADMIN_WEB_ENABLED else None),
 )
 
+
+app.state.link_job_store = LINK_JOB_STORE
+app.state.schedule_link_job = _schedule_link_job
+
+def _create_backup_service():
+    from app.backend_maintenance import quiesce_backend
+    from app.backup_service import BackupService
+    from app.runtime_bindings import RuntimeBindings
+
+    return BackupService(
+        DATA_DIR, app.version,
+        quiesce=lambda operation: quiesce_backend(RuntimeBindings(globals()), operation),
+    )
+
+
+app.state.backup_service = _create_backup_service()
+
+
+def _create_storage_service():
+    from app.storage_maintenance import quiesce_storage
+    from app.storage_service import StorageService
+
+    return StorageService(quiesce=lambda operation: quiesce_storage(app.state.maintenance_gate, operation))
+
+
+app.state.storage_service = _create_storage_service()
+
+
+def _create_preview_reading_service():
+    from app.preview_reading import PreviewReadingService
+    from app.runtime_bindings import RuntimeBindings
+
+    return PreviewReadingService(RuntimeBindings(globals()))
+
+
+app.state.preview_reading = _create_preview_reading_service()
 
 if __name__ == "__main__":
     main()

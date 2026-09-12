@@ -9,6 +9,7 @@ class ReaderMangaImage extends StatefulWidget {
     required this.headers,
     required this.pageNumber,
     required this.palette,
+    this.imageProvider,
     super.key,
   });
 
@@ -16,6 +17,7 @@ class ReaderMangaImage extends StatefulWidget {
   final Map<String, String> headers;
   final int pageNumber;
   final ReaderPalette palette;
+  final ImageProvider<Object>? imageProvider;
 
   @override
   State<ReaderMangaImage> createState() => _ReaderMangaImageState();
@@ -32,7 +34,9 @@ class _ReaderMangaImageState extends State<ReaderMangaImage> {
   }
 
   Future<void> _retry() async {
-    await NetworkImage(widget.url, headers: widget.headers).evict();
+    await (widget.imageProvider ??
+            NetworkImage(widget.url, headers: widget.headers))
+        .evict();
     if (mounted) setState(() => _attempt++);
   }
 
@@ -49,10 +53,10 @@ class _ReaderMangaImageState extends State<ReaderMangaImage> {
           transformationController: _transform,
           minScale: 1,
           maxScale: 4,
-          child: Image.network(
-            widget.url,
+          child: Image(
+            image: widget.imageProvider ??
+                NetworkImage(widget.url, headers: widget.headers),
             key: ValueKey('${widget.url}:$_attempt'),
-            headers: widget.headers,
             width: double.infinity,
             fit: BoxFit.contain,
             filterQuality: FilterQuality.medium,

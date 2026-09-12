@@ -26,6 +26,13 @@ describe("admin deep links", () => {
     expect(navigationFromHash("#/upgrade")).toBe("upgrade");
   });
 
+  it("opens backup management only when the backend supports backups", () => {
+    expect(navigationFromHash("#backups")).toBe("backups");
+    expect(navigationAvailable("backups", { backups: true })).toBe(true);
+    expect(navigationAvailable("backups", { backups: false })).toBe(false);
+    expect(navigationAvailable("backups", undefined)).toBe(false);
+  });
+
   it("falls back to the overview for unknown hashes", () => {
     expect(navigationFromHash("#unknown" as string)).toBe("overview");
     expect(navigationFromHash("")).toBe("overview");

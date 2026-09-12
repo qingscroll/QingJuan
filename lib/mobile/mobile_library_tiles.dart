@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
 
 import '../core/models/book.dart';
+import '../core/models/book_metadata.dart';
 import 'mobile_action_button.dart';
 import 'mobile_book_cover.dart';
 
@@ -93,12 +94,14 @@ class MobileLibraryTile extends StatelessWidget {
       required this.selected,
       required this.onOpen,
       required this.onSelect,
+      this.newChapterCount = 0,
       super.key});
   final Book book;
   final bool selecting;
   final bool selected;
   final VoidCallback onOpen;
   final VoidCallback onSelect;
+  final int newChapterCount;
 
   @override
   Widget build(BuildContext context) {
@@ -107,7 +110,7 @@ class MobileLibraryTile extends StatelessWidget {
       button: true,
       selected: selecting ? selected : null,
       label:
-          '${book.title}，${book.kind}，${book.lastReadAt == null ? '尚未阅读' : '读到${book.readingPositionLabel}'}',
+          '${book.title}，${newChapterCount > 0 ? '更新 $newChapterCount 章，' : ''}${book.pinned ? '已置顶，' : ''}${book.groupName ?? '未分组'}，${readingStateLabels[book.readingState] ?? '未读'}，${book.kind}，${book.lastReadAt == null ? '尚未阅读' : '读到${book.readingPositionLabel}'}',
       child: MiuixPressable(
         onPressed: onOpen,
         onLongPress: onSelect,
@@ -121,6 +124,36 @@ class MobileLibraryTile extends StatelessWidget {
                   aspectRatio: 1 / 1.42,
                   child: Stack(fit: StackFit.expand, children: <Widget>[
                     MobileBookCover(title: book.title, cover: book.cover),
+                    if (newChapterCount > 0)
+                      Positioned(
+                          bottom: 0,
+                          left: 0,
+                          right: 0,
+                          child: DecoratedBox(
+                              decoration:
+                                  BoxDecoration(color: theme.colors.primary),
+                              child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 4, vertical: 3),
+                                  child: Text('更新 $newChapterCount 章',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textStyles.footnote2
+                                          .copyWith(
+                                              color:
+                                                  theme.colors.onPrimary))))),
+                    if (book.pinned && !selecting)
+                      Positioned(
+                          top: 6,
+                          right: 6,
+                          child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                  color: theme.colors.surfaceContainer,
+                                  borderRadius: BorderRadius.circular(6)),
+                              child: Padding(
+                                  padding: const EdgeInsets.all(5),
+                                  child: Icon(Icons.push_pin_rounded,
+                                      size: 17, color: theme.colors.primary)))),
                     if (selecting)
                       Positioned(
                           top: 6,
@@ -156,7 +189,7 @@ class MobileLibraryTile extends StatelessWidget {
                           color: theme.colors.onBackground))),
               const SizedBox(height: 3),
               Text(
-                  '${book.kind == '漫画' ? '漫画' : '小说'} · ${book.lastReadAt == null ? '未读' : book.readingPositionLabel}',
+                  '${book.kind == '漫画' ? '漫画' : '小说'} · ${readingStateLabels[book.readingState] ?? '未读'}${book.groupName == null ? '' : ' · ${book.groupName}'}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textStyles.footnote2.copyWith(

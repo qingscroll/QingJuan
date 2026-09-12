@@ -25,6 +25,7 @@ from .manifest import (
     PluginManifest,
     PluginPackageError,
 )
+from .usage import package_change
 
 _LOCK = threading.RLock()
 
@@ -76,7 +77,7 @@ def inspect_package(data: bytes) -> tuple[PluginManifest, str]:
         raise PluginPackageError("插件包损坏或不是有效的 UTF-8 ZIP 插件包") from None
 
 
-def _validate_conflicts(manifest: PluginManifest, *, updating: bool) -> None:
+def _validate_conflicts(manifest: PluginManifest, *, updating: bool, allow_rollback: bool = False) -> None:
     existing = get_site_plugin(manifest.id)
     if existing is not None:
         if existing.origin == "builtin":
@@ -84,9 +85,11 @@ def _validate_conflicts(manifest: PluginManifest, *, updating: bool) -> None:
         if not updating:
             raise PluginPackageError("该插件已安装，请选择更新已有插件", 409)
         # An identical version may repair a package that cannot load after an environment change.
-        if tuple(map(int, manifest.version.split("."))) <= tuple(
-            map(int, existing.version.split("."))
-        ) and not (existing.load_error and manifest.version == existing.version):
+        if (
+            not allow_rollback
+            and tuple(map(int, manifest.version.split("."))) <= tuple(map(int, existing.version.split(".")))
+            and not (existing.load_error and manifest.version == existing.version)
+        ):
             raise PluginPackageError("更新包必须使用更高的版本号", 409)
     for plugin in list_site_plugins():
         if plugin.id == manifest.id:
@@ -132,28 +135,64 @@ def _release_module(plugin: SitePlugin) -> None:
         sys.modules.pop(plugin.runtime.__name__, None)
 
 
+def _install_validated(data: bytes, manifest: PluginManifest, code: str) -> SitePlugin:
+    candidate = _load_runtime(manifest, code)
+    previous = installed_site_plugins()
+    updated = tuple(p for p in previous if p.id != candidate.id) + (candidate,)
+    try:
+        repository.save_package(
+            manifest.id,
+            manifest.model_dump_json(),
+            data,
+            hashlib.sha256(data).hexdigest(),
+            manifest.defaultEnabled,
+            publish=lambda: replace_installed_site_plugins(updated),
+        )
+    except BaseException as error:
+        if installed_site_plugins() is not previous:
+            replace_installed_site_plugins(previous)
+        _release_module(candidate)
+        if isinstance(error, (KeyboardInterrupt, GeneratorExit)):
+            raise
+        raise PluginPackageError("插件保存失败，请检查后端存储空间后重试；原插件保持不变", 503) from None
+    for plugin in previous:
+        if plugin.id == candidate.id:
+            _release_module(plugin)
+    return candidate
+
+
 def install_package(data: bytes, *, replace: bool = False) -> SitePlugin:
     manifest, code = inspect_package(data)
     with _LOCK:
         _validate_conflicts(manifest, updating=replace)
-        candidate = _load_runtime(manifest, code)
-        try:
-            repository.save_package(
-                manifest.id,
-                manifest.model_dump_json(),
-                data,
-                hashlib.sha256(data).hexdigest(),
-                manifest.defaultEnabled,
-            )
-        except Exception:
-            _release_module(candidate)
-            raise PluginPackageError("插件保存失败，请检查后端存储空间后重试；原插件保持不变", 503) from None
-        previous = installed_site_plugins()
-        replace_installed_site_plugins(tuple(p for p in previous if p.id != candidate.id) + (candidate,))
-        for plugin in previous:
-            if plugin.id == candidate.id:
-                _release_module(plugin)
-        return candidate
+        previous = get_site_plugin(manifest.id)
+        domains = tuple(set(manifest.domains) | set(previous.domains if previous else ()))
+        with package_change(manifest.id, domains):
+            return _install_validated(data, manifest, code)
+
+
+def rollback_package(plugin_id: str, *, expected_version: str, expected_sha256: str) -> SitePlugin:
+    with _LOCK:
+        current = repository.read_package(plugin_id)
+        previous = repository.read_package(plugin_id, previous=True)
+        plugin = get_site_plugin(plugin_id)
+        if current is None or plugin is None or plugin.origin != "installed":
+            raise PluginPackageError("只能回退已安装的外部插件", 404)
+        if previous is None:
+            raise PluginPackageError("没有保留的上一版本，请先导入更新版本", 409)
+        if (
+            plugin.version != expected_version
+            or hashlib.sha256(current.package).hexdigest() != expected_sha256
+        ):
+            raise PluginPackageError("插件版本已改变，请刷新并重新确认回退", 409)
+        if hashlib.sha256(previous.package).hexdigest() != previous.sha256:
+            raise PluginPackageError("上一版本备份损坏，当前插件保持不变")
+        manifest, code = inspect_package(previous.package)
+        if manifest.id != plugin_id or manifest != PluginManifest.model_validate_json(previous.manifest_json):
+            raise PluginPackageError("上一版本清单与插件包不一致，当前插件保持不变")
+        _validate_conflicts(manifest, updating=True, allow_rollback=True)
+        with package_change(plugin_id, tuple(set(plugin.domains) | set(manifest.domains))):
+            return _install_validated(previous.package, manifest, code)
 
 
 def uninstall_package(plugin_id: str) -> None:
@@ -163,12 +202,20 @@ def uninstall_package(plugin_id: str) -> None:
             raise PluginPackageError("插件不存在", 404)
         if plugin.origin != "installed":
             raise PluginPackageError("内置插件只能停用，不能卸载", 409)
-        try:
-            repository.delete_package(plugin_id)
-        except Exception:
-            raise PluginPackageError("插件卸载失败，请检查后端存储后重试", 503) from None
-        replace_installed_site_plugins(tuple(p for p in installed_site_plugins() if p.id != plugin_id))
-        _release_module(plugin)
+        with package_change(plugin_id, plugin.domains):
+            previous = installed_site_plugins()
+            try:
+                repository.delete_package(
+                    plugin_id,
+                    publish=lambda: replace_installed_site_plugins(
+                        tuple(p for p in previous if p.id != plugin_id)
+                    ),
+                )
+            except Exception:
+                if installed_site_plugins() is not previous:
+                    replace_installed_site_plugins(previous)
+                raise PluginPackageError("插件卸载失败，请检查后端存储后重试", 503) from None
+            _release_module(plugin)
 
 
 def clear_loaded_plugins() -> None:

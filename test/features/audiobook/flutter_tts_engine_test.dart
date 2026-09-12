@@ -50,6 +50,24 @@ void main() {
     await speaking;
     expect(completed, isTrue);
   });
+
+  test('paused speech remains pending and resumes using the original utterance',
+      () async {
+    final plugin = _FakeFlutterTts();
+    final engine = FlutterTtsEngine(flutterTts: plugin);
+    await engine.initialize('zh-CN');
+    var finished = false;
+    final speaking = engine.speak('完整的原始片段').then((_) => finished = true);
+    await Future<void>.delayed(Duration.zero);
+    await engine.pause();
+    await Future<void>.delayed(Duration.zero);
+    expect(finished, isFalse);
+    await engine.resume();
+    expect(plugin.spoken, ['完整的原始片段', '完整的原始片段']);
+    plugin.completeSpeech();
+    await speaking;
+    expect(finished, isTrue);
+  });
 }
 
 class _FakeFlutterTts extends FlutterTts {
@@ -106,6 +124,12 @@ class _FakeFlutterTts extends FlutterTts {
 
   @override
   Future<dynamic> stop() async {
+    _cancelHandler?.call();
+    return 1;
+  }
+
+  @override
+  Future<dynamic> pause() async {
     _cancelHandler?.call();
     return 1;
   }

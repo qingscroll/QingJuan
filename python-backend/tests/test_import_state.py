@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import main
+from app import db, main
 from app.models import AddBookPayload, BookRecord, BookSourceRecord, PreviewResponse
 from app.scraper_network_security import ScraperNetworkSecurityError
 
@@ -15,6 +15,11 @@ from app.scraper_network_security import ScraperNetworkSecurityError
 async def test_full_import_reports_actual_downloaded_chapter_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path, downloaded_count: int, expected: str,
 ) -> None:
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "qingjuan.db")
+    monkeypatch.setattr(db, "_DATA_DIR_READY", True)
+    monkeypatch.setattr(db, "_SITE_PLUGIN_STATE_CACHE", None)
+    db.init_db()
     preview = PreviewResponse(
         title="部分下载作品", chapterCount=2, bookKind="长小说",
         chapters=[

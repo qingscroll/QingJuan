@@ -11,7 +11,7 @@ from .multi_user import DEFAULT_ADMIN_USER_ID
 BookKind = Literal["长小说", "轻小说", "漫画"]
 Language = Literal["中文", "英文", "日文"]
 TaskType = Literal["download", "translate"]
-TaskStatus = Literal["queued", "running", "completed", "failed"]
+TaskStatus = Literal["queued", "running", "pause_requested", "paused", "cancel_requested", "cancelled", "completed", "failed"]
 TaskLogLevel = Literal["info", "warning", "error"]
 LinkJobMode = Literal["preview", "import"]
 DownloadMode = Literal["all", "on_demand"]
@@ -212,6 +212,8 @@ class PreviewResponse(BaseModel):
     chapterCount: int
     chapters: list[ChapterPreview]
     bookKind: BookKind = "轻小说"
+    sourceStatus: Literal["ongoing", "completed", "unknown"] = "unknown"
+    sourceStatusEvidence: str | None = Field(default=None, max_length=128)
 
 
 class BookRecord(BaseModel):
@@ -232,6 +234,12 @@ class BookRecord(BaseModel):
     lastReadAt: str | None = None
     lastReadPageIndex: int | None = None
     lastReadPageCount: int | None = None
+    author: str = ""
+    groupName: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    pinned: bool = False
+    readingState: Literal["unread", "reading", "finished", "on_hold"] = "unread"
+    metadataRevision: int = 0
 
 
 class PublicBookRecord(BaseModel):
@@ -252,6 +260,12 @@ class PublicBookRecord(BaseModel):
     lastReadAt: str | None = None
     lastReadPageIndex: int | None = None
     lastReadPageCount: int | None = None
+    author: str = ""
+    groupName: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    pinned: bool = False
+    readingState: Literal["unread", "reading", "finished", "on_hold"] = "unread"
+    metadataRevision: int = 0
 
 
 class LinkJobStartPayload(BaseModel):
@@ -268,6 +282,7 @@ class LinkJobLogRecord(BaseModel):
 
 class LinkJobRecord(BaseModel):
     id: str
+    sourceUrl: str = ""
     mode: LinkJobMode
     status: TaskStatus
     progress: float = 0
@@ -284,6 +299,7 @@ class PublicLinkJobRecord(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    sourceUrl: str = ""
     mode: LinkJobMode
     status: TaskStatus
     progress: float = 0
@@ -341,6 +357,7 @@ class ReadingProgressRecord(BaseModel):
     lastLayoutKey: str | None = None
     lastContentMode: Literal["original", "translated"] | None = None
     lastCharacterOffset: int | None = None
+    revision: int = 0
 
 
 class ReadingProgressPayload(BaseModel):
@@ -354,9 +371,13 @@ class ReadingProgressPayload(BaseModel):
     layoutKey: str | None = Field(default=None, max_length=256)
     contentMode: Literal["original", "translated"] | None = None
     characterOffset: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    expectedRevision: int | None = Field(default=None, ge=0)
+    operationId: str | None = Field(default=None, min_length=16, max_length=128)
 
     @model_validator(mode="after")
     def validate_page_bounds(self) -> Self:
+        if (self.expectedRevision is None) != (self.operationId is None):
+            raise ValueError("进度版本与操作标识必须同时提供")
         if self.pageIndex is not None and self.pageCount is not None and self.pageIndex >= self.pageCount:
             raise ValueError("页索引必须小于章节总页数")
         return self

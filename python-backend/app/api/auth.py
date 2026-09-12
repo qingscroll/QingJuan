@@ -16,7 +16,6 @@ from ..registration import (
     EmailCodeRateLimited,
     RegistrationPolicy,
     activate_email_code,
-    consume_email_code,
     discard_email_code,
     generate_email_code,
     load_registration_settings,
@@ -37,6 +36,7 @@ from ..user_auth import (
     register_user,
     require_multi_user_mode,
 )
+from .account_maintenance import router as account_maintenance_router
 from .auth_security import (
     PasswordLoginResponse,
     finalize_or_challenge,
@@ -290,6 +290,7 @@ async def register(
             display_name=payload.displayName,
             password=payload.password.get_secret_value(),
             email=email,
+            email_verification_code_hash=verified_code_hash,
         )
     except ValueError as error:
         raise _registration_error(error) from error
@@ -306,8 +307,6 @@ async def register(
             status_code=status.HTTP_409_CONFLICT,
             detail="用户认证状态已变更，请重新登录",
         ) from error
-    if verified_code_hash is not None:
-        await asyncio.to_thread(consume_email_code, email_key, verified_code_hash)
     return UserSessionResponse(token=token, user=user)
 
 
@@ -414,3 +413,4 @@ async def _discard_email_code_safely(email_key: str, code_hash: str) -> None:
 
 
 router.include_router(auth_security_router)
+router.include_router(account_maintenance_router)

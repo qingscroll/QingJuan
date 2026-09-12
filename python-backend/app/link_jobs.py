@@ -66,6 +66,7 @@ class LinkJobStore:
         timestamp = _now()
         record = LinkJobRecord(
             id=f"link-{uuid4()}",
+            sourceUrl=str(payload.sourceUrl),
             mode=mode,
             status="queued",
             progress=0,
@@ -155,6 +156,25 @@ class LinkJobStore:
     def logs_after(self, job_id: str, sequence: int) -> list[LinkJobLogRecord]:
         stored = self._require(job_id)
         return [item.model_copy(deep=True) for item in stored.record.logs if item.sequence > max(0, sequence)]
+
+    def defer(self, job_id: str) -> LinkJobRecord:
+        stored = self._require(job_id)
+        stored.record.status = "queued"
+        stored.record.error = None
+        self.append_log(job_id, "info", "服务中断，等待重新连接后继续导入")
+        return stored.record.model_copy(deep=True)
+
+    def retry(self, job_id: str, owner_id: str | None = None) -> tuple[LinkJobRecord, bool]:
+        stored = self._require(job_id)
+        self._check_owner(stored, job_id, owner_id)
+        if stored.record.status in {"queued", "running"}:
+            return stored.record.model_copy(deep=True), False
+        if stored.record.status != "failed":
+            raise ValueError("只有失败的导入任务才能重试")
+        stored.record.status = "queued"
+        stored.record.error = None
+        self.append_log(job_id, "info", "等待重试导入")
+        return stored.record.model_copy(deep=True), True
 
     def _require(self, job_id: str) -> _StoredLinkJob:
         try:

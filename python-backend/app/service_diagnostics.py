@@ -227,7 +227,7 @@ def _read_workload(application: FastAPI) -> tuple[DiagnosticWorkload, Diagnostic
             books=len(books),
             tasks=len(tasks),
             queuedTasks=sum(task.status == "queued" for task in tasks),
-            runningTasks=sum(task.status == "running" for task in tasks),
+            runningTasks=sum(task.status in {"running", "pause_requested", "cancel_requested"} for task in tasks),
             failedTasks=sum(task.status == "failed" for task in tasks),
             pendingQueueItems=queue_size,
             devices=len(devices),

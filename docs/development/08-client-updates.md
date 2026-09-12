@@ -19,7 +19,7 @@ Android 复用版本检查，在“我的 → 软件更新”中打开官方 APK
 ```powershell
 ./tool/build_windows.ps1
 ./tool/smoke_test_windows_release.ps1
-./tool/package_windows.ps1 -Tag v2.2.1
+./tool/package_windows.ps1 -Tag v2.3.0
 ./tool/test_windows_installer.ps1
 ```
 

@@ -10,11 +10,14 @@ import '../../shared/mobile_sheet.dart';
 import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../audiobook/tts_voice_service.dart';
+import '../audiobook/audiobook_resume_entry.dart';
 import '../auth/widgets/auth_account_card.dart';
+import '../backups/backups_dialog.dart';
 import 'widgets/backend_connection_card.dart';
 import 'widgets/backend_share_card.dart';
 import 'widgets/app_update_card.dart';
 import 'widgets/mobile_my_dashboard.dart';
+import 'widgets/desktop_settings_workspace.dart';
 import 'widgets/settings_section_card.dart';
 import 'widgets/theme_settings_card.dart';
 import 'widgets/translation_model_card.dart';
@@ -145,7 +148,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       builder: (context, _) => PageFrame(
         title: compact ? '我的' : '设置',
-        subtitle: '账户、阅读偏好与当前后端服务。',
+        subtitle: '管理服务连接、阅读偏好与应用数据。',
+        scrollable: compact,
+        maxContentWidth: compact ? null : 1440,
         compactHeader: ReadingPageHeader(
           title: '我的',
           subtitle: scope.auth.canAccessWorkspace ? '你的账户与阅读空间' : '登录后使用独立书架',
@@ -178,7 +183,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         child: compact
             ? _buildMobileDashboard(scope)
-            : _buildDesktopSettings(scope),
+            : Expanded(child: _buildDesktopSettings(scope)),
       ),
     );
   }
@@ -293,94 +298,186 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _buildDesktopSettings(AppScope scope) {
     final settings = scope.settings;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        if (scope.updates case final updates?) ...<Widget>[
-          AppUpdateCard(controller: updates),
-          const SizedBox(height: 30),
-        ],
-        const SectionTitle('账户概览'),
-        AuthAccountCard(
+    final localMode =
+        scope.appState.connectionMode == BackendConnectionMode.local;
+    return DesktopSettingsWorkspace(sections: [
+      DesktopSettingsSection(
+        category: SettingsCategory.connection,
+        title: '服务连接',
+        description: '选择当前服务，或将连接分享给其他设备。',
+        icon: FluentIcons.plug_connected,
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          BackendConnectionCard(
+            backend: scope.backend,
+            activeMode: scope.appState.connectionMode,
+            draftMode: _connectionMode,
+            localBackendSupported: scope.appState.localBackendSupported,
+            backendUrlController: _backendController,
+            backendTokenController: _backendTokenController,
+            onModeChanged: (mode) => setState(() => _connectionMode = mode),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: FilledButton(
+              key: const ValueKey('save-backend-connection'),
+              onPressed: _savingConnection || settings.saving ? null : _save,
+              child: Text(_savingConnection ? '正在保存' : '保存连接'),
+            ),
+          ),
+          const SizedBox(height: 24),
+          const BackendShareCard(),
+        ]),
+      ),
+      DesktopSettingsSection(
+        category: SettingsCategory.account,
+        title: '账户管理',
+        description: '查看当前账户，管理登录状态与个人信息。',
+        icon: FluentIcons.contact,
+        child: AuthAccountCard(
           auth: scope.auth,
           backend: scope.backend,
-          isLocalMode:
-              scope.appState.connectionMode == BackendConnectionMode.local,
+          isLocalMode: localMode,
           backendUrl: scope.appState.backendUrl,
           backendRevision: scope.appState.backendConnectionRevision,
         ),
-        const SizedBox(height: 30),
-        const SectionTitle('后端连接'),
-        BackendConnectionCard(
-          backend: scope.backend,
-          activeMode: scope.appState.connectionMode,
-          draftMode: _connectionMode,
-          localBackendSupported: scope.appState.localBackendSupported,
-          backendUrlController: _backendController,
-          backendTokenController: _backendTokenController,
-          onModeChanged: (mode) => setState(() => _connectionMode = mode),
-        ),
-        const SizedBox(height: 12),
-        Align(
-          alignment: AlignmentDirectional.centerEnd,
-          child: FilledButton(
-            key: const ValueKey('save-backend-connection'),
-            onPressed: _savingConnection || settings.saving ? null : _save,
-            child: Text(_savingConnection ? '正在保存' : '保存连接'),
+      ),
+      DesktopSettingsSection(
+        category: SettingsCategory.appearance,
+        title: '外观与听书',
+        description: '设置界面主题，选择适合你的听书声音。',
+        icon: FluentIcons.color,
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          ThemeSettingsCard(
+            themeMode: scope.appState.themeMode,
+            onChanged: (mode) => unawaited(scope.appState.setThemeMode(mode)),
           ),
-        ),
-        const SizedBox(height: 30),
-        const BackendShareCard(),
-        const SizedBox(height: 30),
-        const SectionTitle('界面主题'),
-        ThemeSettingsCard(
-          themeMode: scope.appState.themeMode,
-          onChanged: (mode) => unawaited(scope.appState.setThemeMode(mode)),
-        ),
-        const SizedBox(height: 30),
-        const SectionTitle('听书声音'),
-        TtsVoiceSettingsCard(
-          appState: scope.appState,
-          compact: false,
-          voiceService: widget.voiceService,
-        ),
-        const SizedBox(height: 30),
-        const SectionTitle('翻译服务'),
-        TranslationModelCard(
-          backend: scope.backend,
-          settings: settings,
-          localConfiguration:
-              scope.appState.connectionMode == BackendConnectionMode.local,
-          checking: _modelChecking,
-          onCheck: (force) => _checkTranslationModel(scope, force: force),
-        ),
-        if (settings.error case final error?) ...<Widget>[
-          const SizedBox(height: 16),
-          InfoBar(
-            title: const Text('设置服务不可用'),
-            content: Text(error),
-            severity: InfoBarSeverity.warning,
+          const SizedBox(height: 24),
+          TtsVoiceSettingsCard(
+            appState: scope.appState,
+            compact: false,
+            voiceService: widget.voiceService,
           ),
-        ],
-        const SizedBox(height: 30),
-        const SectionTitle('关于'),
-        SettingsSectionCard(
-          icon: FluentIcons.info,
-          child: Row(
-            children: <Widget>[
-              const Expanded(child: Text('版本信息、项目许可与开发说明。')),
-              const SizedBox(width: 12),
+          if (scope.audiobook case final audiobook?) ...[
+            const SizedBox(height: 24),
+            AudiobookResumeEntry(
+              coordinator: audiobook,
+              voice: scope.appState.ttsVoice,
+              onStyleChanged: scope.appState.setTtsSpeechStyle,
+            ),
+          ],
+        ]),
+      ),
+      DesktopSettingsSection(
+        category: SettingsCategory.translation,
+        title: '翻译服务',
+        description: localMode ? '配置翻译模型，检查服务是否可用。' : '查看服务器的翻译配置与模型状态。',
+        icon: FluentIcons.translate,
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          TranslationModelCard(
+            backend: scope.backend,
+            settings: settings,
+            localConfiguration: localMode,
+            checking: _modelChecking,
+            onCheck: (force) => _checkTranslationModel(scope, force: force),
+          ),
+          if (settings.error case final error?) ...[
+            const SizedBox(height: 16),
+            InfoBar(
+              title: const Text('设置服务不可用'),
+              content: Text(error),
+              severity: InfoBarSeverity.warning,
+            ),
+          ],
+        ]),
+      ),
+      DesktopSettingsSection(
+        category: SettingsCategory.application,
+        title: '数据与应用',
+        description: localMode ? '管理本机数据，查看应用更新与版本信息。' : '查看应用更新、版本信息与项目说明。',
+        icon: FluentIcons.database,
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (scope.appState.localBackendSupported &&
+              localMode &&
+              scope.backend.capabilities['backups'] == true) ...[
+            SettingsSectionCard(
+              icon: FluentIcons.database,
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('备份与恢复',
+                        style: FluentTheme.of(context).typography.subtitle),
+                    const SizedBox(height: 8),
+                    const Text('完整备份书库、阅读记录、任务、设置和插件，也可从已有备份恢复。'),
+                    const SizedBox(height: 16),
+                    Button(
+                      key: const ValueKey('settings-backups-button'),
+                      onPressed: scope.backend.status == BackendStatus.ready
+                          ? () => unawaited(_openBackups(scope))
+                          : null,
+                      child: const Text('管理备份'),
+                    ),
+                  ]),
+            ),
+            const SizedBox(height: 24),
+          ],
+          if (scope.updates case final updates?) ...[
+            AppUpdateCard(controller: updates),
+            const SizedBox(height: 24),
+          ],
+          SettingsSectionCard(
+            icon: FluentIcons.info,
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('关于青卷', style: FluentTheme.of(context).typography.subtitle),
+              const SizedBox(height: 8),
+              const Text('版本信息、项目许可与开发说明。'),
+              const SizedBox(height: 16),
               Button(
                 key: const ValueKey('settings-about-card-button'),
                 onPressed: () => scope.appState.selectSection(AppSection.about),
-                child: const Text('关于青卷'),
+                child: const Text('查看版本信息'),
               ),
-            ],
+            ]),
           ),
-        ),
-      ],
-    );
+        ]),
+      ),
+    ]);
   }
+
+  Future<void> _openBackups(AppScope scope) => showDialog<void>(
+        context: context,
+        builder: (_) => BackupsDialog(
+          api: scope.api,
+          appState: scope.appState,
+          backend: scope.backend,
+          onRestored: () async {
+            scope.library.resetForBackendSwitch();
+            scope.tasks.resetForBackendSwitch();
+            scope.sources.resetForBackendSwitch();
+            scope.settings.resetForBackendSwitch();
+            scope.mangaTranslation?.resetForBackendSwitch();
+            scope.library.imports.enabled =
+                scope.backend.capabilities['linkJobHistory'] == true;
+            await Future.wait<void>([
+              scope.library.load(),
+              scope.tasks.load(),
+              scope.sources.load(),
+              scope.settings.load(),
+            ]);
+            if (scope.library.error != null ||
+                scope.tasks.error != null ||
+                scope.sources.error != null ||
+                scope.settings.error != null) {
+              throw StateError('恢复后的客户端数据刷新未完成');
+            }
+          },
+        ),
+      );
 
   Future<void> _openAccountSettings(AppScope scope) => _showSettingsSheet(
         title: '账号管理',

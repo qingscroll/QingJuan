@@ -88,6 +88,20 @@ def _save_book(data_dir: Path, *, owner_id: str, book_id: str, title: str) -> Bo
     book_dir.mkdir(parents=True)
     (book_dir / "0001.txt").write_text(f"{title} 正文", encoding="utf-8")
     (book_dir / "cover.png").write_bytes(b"private-image")
+    book = BookRecord(
+        ownerId=owner_id,
+        id=book_id,
+        title=title,
+        sourceUrl="",
+        bookKind="长小说",
+        language="中文",
+        status="已下载",
+        chapterCount=1,
+        translated=False,
+        localPath=book_dir.relative_to(data_dir).as_posix(),
+        synopsis=f"{title} 简介",
+    )
+    db.save_book(book)
     main.save_manifest(
         book_dir,
         {
@@ -105,20 +119,6 @@ def _save_book(data_dir: Path, *, owner_id: str, book_id: str, title: str) -> Bo
             ],
         },
     )
-    book = BookRecord(
-        ownerId=owner_id,
-        id=book_id,
-        title=title,
-        sourceUrl="",
-        bookKind="长小说",
-        language="中文",
-        status="已下载",
-        chapterCount=1,
-        translated=False,
-        localPath=book_dir.relative_to(data_dir).as_posix(),
-        synopsis=f"{title} 简介",
-    )
-    db.save_book(book)
     return book
 
 

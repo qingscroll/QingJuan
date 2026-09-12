@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sqlite3
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import db
 from ..admin_auth import require_admin_write_access
@@ -14,15 +16,80 @@ from ..models import (
     SitePluginPackageInspection,
     SitePluginView,
 )
+from ..plugin_system.maintenance import PluginMaintenanceReport, inspect_installed_plugin, rollback_plugin
 from ..plugin_system.manifest import MAX_PACKAGE_BYTES, PluginPackageError
 from ..plugin_system.packages import inspect_package, install_package, uninstall_package
 from ..plugin_system.runtime import search_plugin
+from ..plugin_system.usage import run_package_operation
 from ..plugin_system.views import plugin_view
 from ..site_plugins import get_site_plugin, list_site_plugins
 from ..user_auth import require_user_access
 
 router = APIRouter(tags=["plugins"])
 SEARCH_TIMEOUT_SECONDS = 35
+
+
+class PluginRollbackPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expectedVersion: str = Field(
+        pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", max_length=32
+    )
+    expectedSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.get(
+    "/plugins/{plugin_id}/maintenance",
+    response_model=PluginMaintenanceReport,
+    dependencies=[Depends(require_admin_write_access)],
+)
+@router.post(
+    "/plugins/{plugin_id}/check",
+    response_model=PluginMaintenanceReport,
+    dependencies=[Depends(require_admin_write_access)],
+)
+async def check_installed_plugin(plugin_id: str, response: Response) -> PluginMaintenanceReport:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_package_operation(inspect_installed_plugin, plugin_id)
+    except PluginPackageError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail=str(error), headers={"Cache-Control": "no-store"}
+        ) from None
+    except (OSError, sqlite3.Error):
+        raise HTTPException(
+            status_code=503,
+            detail="插件检查暂时不可用，请检查后端存储后重试",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+
+
+@router.post(
+    "/plugins/{plugin_id}/rollback",
+    response_model=SitePluginView,
+    dependencies=[Depends(require_admin_write_access)],
+)
+async def rollback_installed_plugin(
+    plugin_id: str, payload: PluginRollbackPayload, response: Response
+) -> SitePluginView:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        plugin = await run_package_operation(
+            rollback_plugin,
+            plugin_id,
+            expected_version=payload.expectedVersion,
+            expected_sha256=payload.expectedSha256,
+        )
+    except PluginPackageError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail=str(error), headers={"Cache-Control": "no-store"}
+        ) from None
+    except (OSError, sqlite3.Error):
+        raise HTTPException(
+            status_code=503,
+            detail="插件回退暂时不可用，请检查后端存储后重试",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    return plugin_view(plugin, db.is_site_plugin_enabled(plugin.id))
 
 
 async def _read_package(file: UploadFile) -> bytes:
@@ -43,7 +110,7 @@ async def _read_package(file: UploadFile) -> bytes:
 async def inspect_plugin_package(file: Annotated[UploadFile, File()]) -> SitePluginPackageInspection:
     data = await _read_package(file)
     try:
-        manifest, _ = await asyncio.to_thread(inspect_package, data)
+        manifest, _ = await run_package_operation(inspect_package, data)
     except PluginPackageError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from None
     existing = get_site_plugin(manifest.id)
@@ -66,7 +133,7 @@ async def import_plugin_package(
 ) -> SitePluginView:
     data = await _read_package(file)
     try:
-        plugin = await asyncio.to_thread(install_package, data, replace=replace)
+        plugin = await run_package_operation(install_package, data, replace=replace)
     except PluginPackageError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from None
     return plugin_view(plugin, db.is_site_plugin_enabled(plugin.id))
@@ -75,7 +142,7 @@ async def import_plugin_package(
 @router.delete("/plugins/{plugin_id}", status_code=204, dependencies=[Depends(require_admin_write_access)])
 async def delete_plugin_package(plugin_id: str) -> Response:
     try:
-        await asyncio.to_thread(uninstall_package, plugin_id)
+        await run_package_operation(uninstall_package, plugin_id)
     except PluginPackageError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from None
     return Response(status_code=204)

@@ -5,6 +5,7 @@ import '../app/app_scope.dart';
 import '../core/models/book.dart';
 import '../core/models/source.dart';
 import '../features/detail/book_detail_page.dart';
+import '../features/preview/book_preview_page.dart';
 import '../features/sources/sources_controller.dart';
 import 'mobile_action_button.dart';
 import 'mobile_book_cover.dart';
@@ -12,7 +13,6 @@ import 'mobile_import_progress.dart';
 import 'mobile_import_sheet.dart';
 import 'mobile_page.dart';
 import 'mobile_search_field.dart';
-import 'mobile_sheet.dart';
 import 'mobile_state.dart';
 import 'mobile_widgets.dart';
 
@@ -103,66 +103,20 @@ class _MobileSearchPageState extends State<MobileSearchPage> {
     }
   }
 
-  Future<void> _preview(SourceSearchResult result) async {
-    final existing = AppScope.of(context)
-        .library
-        .books
-        .where((book) => book.sourceUrl == result.sourceUrl)
-        .firstOrNull;
-    final add = await showMobileSheet<bool>(
-      context: context,
-      title: '作品预览',
-      child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  SizedBox(
-                      width: 86,
-                      height: 122,
-                      child: MobileBookCover(
-                          title: result.title, cover: result.cover)),
-                  const SizedBox(width: 16),
-                  Expanded(
-                      child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                        Text(result.title,
-                            style: MiuixTheme.of(context).textStyles.subtitle),
-                        const SizedBox(height: 8),
-                        if (result.author.isNotEmpty) Text(result.author),
-                        const SizedBox(height: 6),
-                        Text('${result.kind} · ${result.language}'),
-                        const SizedBox(height: 6),
-                        Text(result.sourceName),
-                      ])),
-                ]),
-            const SizedBox(height: 24),
-            Text(
-                result.synopsis.isEmpty
-                    ? '书源暂未提供简介。导入后可查看作品目录。'
-                    : result.synopsis,
-                style: MiuixTheme.of(context)
-                    .textStyles
-                    .body2
-                    .copyWith(height: 1.65)),
-            const SizedBox(height: 24),
-            MobileActionButton(
-                onPressed: () => Navigator.pop(context, true),
-                icon: existing != null
-                    ? Icons.auto_stories_outlined
-                    : Icons.library_add_outlined,
-                child: Text(existing != null ? '打开书库中的作品' : '加入书库')),
-          ]),
-    );
-    if (!mounted || add != true) return;
-    if (existing != null) {
-      _openBook(existing);
-    } else {
-      await _import(result);
-    }
-  }
+  Future<void> _preview(SourceSearchResult result) => showBookPreview(
+        context,
+        payload: {
+          ...result.toImportPayload(),
+          'author': result.author,
+          if (const <String>{
+            'source-builtin-quark',
+            'source-builtin-fanqie',
+            'source-builtin-qidian',
+            'source-builtin-biqvge'
+          }.contains(result.sourceId))
+            'downloadMode': 'on_demand',
+        },
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -172,7 +126,7 @@ class _MobileSearchPageState extends State<MobileSearchPage> {
     return AnimatedBuilder(
       animation: Listenable.merge(<Listenable>[sources, scope.library]),
       builder: (context, _) => MobilePage(
-        title: '发现',
+        title: '搜索',
         actions: <Widget>[
           IconButton(
               tooltip: '导入作品',
@@ -398,10 +352,12 @@ class _SearchResultRow extends StatelessWidget {
                 const SizedBox(height: 8),
                 Wrap(spacing: 8, runSpacing: 8, children: <Widget>[
                   MobileActionButton(
-                      tonal: true,
+                      key:
+                          ValueKey('mobile-search-preview-${result.sourceUrl}'),
                       onPressed: onPreview,
-                      child: const Text('预览')),
+                      child: const Text('查看内容')),
                   MobileActionButton(
+                      tonal: true,
                       onPressed: onImport,
                       busy: importing,
                       icon: existing

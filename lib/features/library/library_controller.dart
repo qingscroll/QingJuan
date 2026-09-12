@@ -5,11 +5,34 @@ import 'package:flutter/foundation.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/api_exception.dart';
 import '../../core/models/book.dart';
+import '../../core/models/book_metadata.dart';
 import '../../core/models/link_job.dart';
 import '../../core/state/load_state.dart';
+import 'link_history_controller.dart';
+import 'book_updates_controller.dart';
+
+enum LibrarySort {
+  recent('最近阅读'),
+  title('按书名'),
+  author('按作者'),
+  server('书库顺序');
+
+  const LibrarySort(this.label);
+  final String label;
+}
 
 class LibraryController extends ChangeNotifier {
-  LibraryController(this.api);
+  LibraryController(this.api)
+      : imports = LinkHistoryController(api),
+        serials = BookUpdatesController(api) {
+    imports.onBooksChanged = () => load(silent: true);
+    imports.addListener(notifyListeners);
+    serials.onBooksChanged = () => load(silent: true);
+    serials.addListener(notifyListeners);
+  }
+
+  final LinkHistoryController imports;
+  final BookUpdatesController serials;
 
   final ApiClient api;
   LoadState state = LoadState.idle;
@@ -26,12 +49,59 @@ class LibraryController extends ChangeNotifier {
   String? _linkJobMode;
   bool _disposed = false;
   int _contextGeneration = 0;
+  int _loadRequest = 0;
+  String? groupFilter;
+  String? tagFilter;
+  String? readingStateFilter;
+  bool pinnedOnly = false;
+  bool onlyNewUpdates = false;
+  LibrarySort sort = LibrarySort.recent;
   double? importProgress;
+
+  int get contextGeneration => _contextGeneration;
+  List<String> get groups =>
+      (books.map((b) => b.groupName).whereType<String>().toSet().toList()
+        ..sort());
+  List<String> get tags =>
+      (books.expand((b) => b.tags).toSet().toList()..sort());
+  bool get hasOrganizationFilters =>
+      groupFilter != null ||
+      tagFilter != null ||
+      readingStateFilter != null ||
+      pinnedOnly ||
+      onlyNewUpdates;
+
+  void setOnlyNewUpdates(bool value) {
+    onlyNewUpdates = value;
+    notifyListeners();
+  }
+
+  void setOrganization(
+      {String? group,
+      String? tag,
+      String? readingState,
+      bool pinned = false,
+      bool newUpdates = false}) {
+    groupFilter = group;
+    tagFilter = tag;
+    readingStateFilter = readingState;
+    pinnedOnly = pinned;
+    onlyNewUpdates = newUpdates;
+    notifyListeners();
+  }
+
+  void setSort(LibrarySort value) {
+    sort = value;
+    notifyListeners();
+  }
 
   bool get hasActiveLinkJob => linkJob?.isActive ?? false;
 
   void resetForBackendSwitch() {
+    imports.reset();
+    serials.reset();
     _contextGeneration += 1;
+    _loadRequest += 1;
     _linkJobPoller?.cancel();
     _linkJobPoller = null;
     _linkJobLoadInProgress = false;
@@ -41,6 +111,10 @@ class LibraryController extends ChangeNotifier {
     importProgress = null;
     books = const [];
     query = '';
+    groupFilter = tagFilter = readingStateFilter = null;
+    pinnedOnly = false;
+    onlyNewUpdates = false;
+    sort = LibrarySort.recent;
     error = null;
     linkJob = null;
     linkJobPayload = null;
@@ -51,18 +125,47 @@ class LibraryController extends ChangeNotifier {
 
   List<Book> get filteredBooks {
     final needle = query.trim().toLowerCase();
-    if (needle.isEmpty) return books;
-    return books
-        .where(
-          (book) =>
-              book.title.toLowerCase().contains(needle) ||
-              book.synopsis.toLowerCase().contains(needle),
-        )
-        .toList();
+    final updateStates = serials.records;
+    final result = books.where((book) {
+      if (groupFilter != null && (book.groupName ?? '') != groupFilter) {
+        return false;
+      }
+      if (tagFilter != null && !book.tags.contains(tagFilter)) return false;
+      if (readingStateFilter != null &&
+          book.readingState != readingStateFilter) {
+        return false;
+      }
+      if (pinnedOnly && !book.pinned) return false;
+      if (onlyNewUpdates &&
+          (updateStates[book.id]?.newChapterCount ?? 0) == 0) {
+        return false;
+      }
+      return needle.isEmpty ||
+          [book.title, book.author, book.synopsis, ...book.tags]
+              .any((value) => value.toLowerCase().contains(needle));
+    }).toList();
+    final order = {for (var i = 0; i < books.length; i++) books[i].id: i};
+    result.sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      final comparison = switch (sort) {
+        LibrarySort.recent =>
+          (b.lastReadAt ?? '').compareTo(a.lastReadAt ?? ''),
+        LibrarySort.title => a.title.compareTo(b.title),
+        LibrarySort.author => a.author.compareTo(b.author),
+        LibrarySort.server => 0,
+      };
+      return comparison != 0
+          ? comparison
+          : order[a.id]!.compareTo(order[b.id]!);
+    });
+    return List.unmodifiable(result);
   }
 
   Future<void> load({bool silent = false}) async {
+    if (imports.enabled) unawaited(imports.load());
+    if (serials.enabled) unawaited(serials.load());
     final generation = _contextGeneration;
+    final request = ++_loadRequest;
     if (!silent) {
       state = LoadState.loading;
       error = null;
@@ -70,15 +173,57 @@ class LibraryController extends ChangeNotifier {
     }
     try {
       final loadedBooks = await api.fetchBooks();
-      if (_disposed || generation != _contextGeneration) return;
-      books = loadedBooks;
+      if (_disposed ||
+          generation != _contextGeneration ||
+          request != _loadRequest) {
+        return;
+      }
+      books = List.unmodifiable(loadedBooks);
+      error = null;
       state = books.isEmpty ? LoadState.empty : LoadState.ready;
     } catch (exception) {
-      if (_disposed || generation != _contextGeneration) return;
+      if (_disposed ||
+          generation != _contextGeneration ||
+          request != _loadRequest) {
+        return;
+      }
       error = '$exception';
       state = LoadState.error;
     }
-    if (!_disposed && generation == _contextGeneration) notifyListeners();
+    if (!_disposed &&
+        generation == _contextGeneration &&
+        request == _loadRequest) {
+      notifyListeners();
+    }
+  }
+
+  void _invalidateLoad() {
+    _loadRequest++;
+    if (state == LoadState.loading) {
+      state = books.isEmpty ? LoadState.empty : LoadState.ready;
+    }
+  }
+
+  Future<BookMetadata?> updateMetadata(String bookId, JsonMap patch) async {
+    final generation = _contextGeneration;
+    _invalidateLoad();
+    try {
+      final metadata = await api.updateBookMetadata(bookId,
+          expectedRevision: patch['expectedRevision'] as int,
+          changes: Map<String, dynamic>.from(patch)
+            ..remove('expectedRevision'));
+      if (_disposed || generation != _contextGeneration) return null;
+      _invalidateLoad();
+      books = List.unmodifiable(books
+          .map((book) => book.id == bookId ? metadata.applyTo(book) : book));
+      notifyListeners();
+      return metadata;
+    } finally {
+      if (!_disposed && generation == _contextGeneration) {
+        _invalidateLoad();
+        notifyListeners();
+      }
+    }
   }
 
   void setQuery(String value) {
@@ -231,6 +376,7 @@ class LibraryController extends ChangeNotifier {
     required String language,
     required bool translate,
     String? title,
+    String textEncoding = 'auto',
   }) async {
     final generation = _contextGeneration;
     importProgress = 0;
@@ -242,6 +388,7 @@ class LibraryController extends ChangeNotifier {
         language: language,
         translate: translate,
         title: title,
+        textEncoding: textEncoding,
         onProgress: (sentBytes, totalBytes) {
           if (_disposed ||
               generation != _contextGeneration ||
@@ -268,6 +415,7 @@ class LibraryController extends ChangeNotifier {
     final generation = _contextGeneration;
     await api.deleteBook(bookId);
     if (_disposed || generation != _contextGeneration) return;
+    _invalidateLoad();
     books = books.where((book) => book.id != bookId).toList();
     state = books.isEmpty ? LoadState.empty : LoadState.ready;
     notifyListeners();
@@ -276,6 +424,8 @@ class LibraryController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    imports.dispose();
+    serials.dispose();
     _linkJobPoller?.cancel();
     super.dispose();
   }

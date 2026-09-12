@@ -10,6 +10,7 @@ import '../../../mobile/mobile_settings_route.dart';
 import '../../../mobile/mobile_security_controls.dart';
 import '../../../shared/responsive.dart';
 import '../auth_controller.dart';
+import '../account_maintenance_dialog.dart';
 import 'github_device_dialog.dart';
 
 Future<void> showAccountSecurityDialog({
@@ -219,6 +220,17 @@ class _AccountSecurityDialogState extends State<_AccountSecurityDialog> {
           const SizedBox(height: 14),
           const ProgressBar(),
         ],
+        const SizedBox(height: 14),
+        mobileSecurityAction(
+          context,
+          mobile: widget.mobile,
+          key: const ValueKey('account-maintenance-open'),
+          onPressed: auth.accountSecurityBusy
+              ? null
+              : () =>
+                  showAccountMaintenanceDialog(context: context, auth: auth),
+          child: const Text('密码、邮箱与登录设备'),
+        ),
         const SizedBox(height: 14),
         mobileSecurityNotice(
           context,
