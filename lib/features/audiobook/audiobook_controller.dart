@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 
 import '../../core/models/book.dart';
 import '../../core/models/tts_speech_style.dart';
+import '../../core/models/audiobook_position.dart';
+import 'audiobook_positioning.dart';
 
 typedef ChapterLoader = Future<ChapterContent> Function(
   int chapterIndex,
@@ -20,6 +22,8 @@ enum AudiobookPlaybackState {
   completed,
   error,
 }
+
+enum AudiobookControlIntent { play, pause, stop, chapter, mode }
 
 abstract class TtsEngine {
   Future<void> initialize(String language);
@@ -74,8 +78,15 @@ class AudiobookController extends ChangeNotifier {
     required this.loadChapter,
     int? initialChapterIndex,
     this.initialStyle = TtsSpeechStyle.natural,
-  })  : chapterIndex = (initialChapterIndex ?? detail.progress.chapterIndex)
+    AudiobookPosition? initialPosition,
+    this.beforePlay,
+    this.onUserIntent,
+  })  : chapterIndex = (initialChapterIndex ??
+                initialPosition?.chapterIndex ??
+                detail.progress.chapterIndex)
             .clamp(1, detail.chapters.length),
+        _pendingRestore = initialChapterIndex == null ? initialPosition : null,
+        mode = initialPosition?.mode ?? 'translated',
         style = initialStyle,
         rate = initialStyle.defaultRate;
 
@@ -83,12 +94,14 @@ class AudiobookController extends ChangeNotifier {
   final TtsEngine engine;
   final ChapterLoader loadChapter;
   final TtsSpeechStyle initialStyle;
+  final Future<bool> Function()? beforePlay;
+  final void Function(AudiobookControlIntent intent)? onUserIntent;
 
   AudiobookPlaybackState state = AudiobookPlaybackState.idle;
   int chapterIndex;
   int chunkIndex = 0;
   List<String> chunks = const <String>[];
-  String mode = 'translated';
+  String mode;
   TtsSpeechStyle style;
   double rate;
   double volume = 1;
@@ -96,11 +109,24 @@ class AudiobookController extends ChangeNotifier {
 
   bool _initialized = false;
   bool _disposed = false;
+  bool _starting = false;
+  bool _playLoopActive = false;
+  int _startIntent = 0;
   int _playbackToken = 0;
+  Completer<void>? _resumeSignal;
+  Future<void>? _shutdown;
+  AudiobookPosition? _pendingRestore;
+  AudiobookPosition get position => captureAudiobookPosition(
+      chapterIndex: chapterIndex,
+      mode: mode,
+      chunkIndex: chunkIndex,
+      chunks: chunks);
 
   bool get isPlaying => state == AudiobookPlaybackState.playing;
   bool get isPaused => state == AudiobookPlaybackState.paused;
   bool get isLoading => state == AudiobookPlaybackState.loading;
+  bool get isClosed => _disposed;
+  bool get canPause => isPlaying || (_playLoopActive && isLoading);
 
   Chapter get currentChapter => detail.chapters.firstWhere(
         (chapter) => chapter.index == chapterIndex,
@@ -132,24 +158,70 @@ class AudiobookController extends ChangeNotifier {
     }
   }
 
-  Future<void> play() async {
+  Future<void> play({bool userInitiated = true}) async {
+    if (userInitiated) onUserIntent?.call(AudiobookControlIntent.play);
+    if (_disposed || isPlaying || isLoading || _starting) return;
+    final startIntent = ++_startIntent;
+    final startingToken = _playbackToken;
+    if (_initialized &&
+        state == AudiobookPlaybackState.stopped &&
+        chunks.isEmpty) {
+      // Stopping invalidates an in-flight chapter load. Only a new play intent
+      // may reload it, and another stop must remain able to cancel that retry.
+      await _loadCurrentChapter();
+      if (_disposed ||
+          startingToken != _playbackToken ||
+          startIntent != _startIntent) {
+        return;
+      }
+    }
+    _starting = true;
     if (!_initialized) await initialize();
-    if (state == AudiobookPlaybackState.error || chunks.isEmpty) return;
+    if (state == AudiobookPlaybackState.error || chunks.isEmpty) {
+      _starting = false;
+      return;
+    }
+    try {
+      if (beforePlay != null && !await beforePlay!()) {
+        _starting = false;
+        _setError(StateError('暂时无法获得音频播放权限，请稍后重试'));
+        return;
+      }
+    } catch (exception) {
+      _starting = false;
+      _setError(exception);
+      return;
+    }
+    if (_disposed ||
+        startingToken != _playbackToken ||
+        startIntent != _startIntent) {
+      _starting = false;
+      return;
+    }
     if (isPaused) {
       try {
         await engine.resume();
-        if (_disposed) return;
+        if (_disposed || startingToken != _playbackToken) return;
+        if (startIntent != _startIntent) {
+          await engine.pause();
+          return;
+        }
         state = AudiobookPlaybackState.playing;
+        _releasePause();
         error = null;
         _notify();
       } catch (exception) {
         await _handleControlError(exception);
+      } finally {
+        _starting = false;
       }
       return;
     }
     if (state == AudiobookPlaybackState.completed) chunkIndex = 0;
     final token = ++_playbackToken;
     state = AudiobookPlaybackState.playing;
+    _playLoopActive = true;
+    _starting = false;
     error = null;
     _notify();
 
@@ -159,9 +231,14 @@ class AudiobookController extends ChangeNotifier {
           final chunk = chunks[chunkIndex];
           await engine.setRate(style.rateFor(chunk, rate));
           await engine.setPitch(style.pitchFor(chunk));
+          await _waitWhilePaused();
+          if (token != _playbackToken || _disposed) return;
           await engine.speak(chunk);
           if (token != _playbackToken || _disposed) return;
+          await _waitWhilePaused();
+          if (token != _playbackToken || _disposed) return;
           await Future<void>.delayed(style.pauseAfter(chunk));
+          await _waitWhilePaused();
           if (token != _playbackToken || _disposed) return;
           chunkIndex += 1;
           _notify();
@@ -178,19 +255,35 @@ class AudiobookController extends ChangeNotifier {
         chunkIndex = 0;
         await _loadCurrentChapter();
         if (token != _playbackToken || _disposed || chunks.isEmpty) return;
+        await _waitWhilePaused();
+        if (token != _playbackToken || _disposed) return;
         state = AudiobookPlaybackState.playing;
         _notify();
       }
     } catch (exception) {
       if (token == _playbackToken) _setError(exception);
+    } finally {
+      if (token == _playbackToken) _playLoopActive = false;
     }
   }
 
-  Future<void> pause() async {
-    if (!isPlaying) return;
+  Future<void> pause({bool userInitiated = true}) async {
+    if (userInitiated) onUserIntent?.call(AudiobookControlIntent.pause);
+    _startIntent++;
+    if (_starting && !_playLoopActive) {
+      _playbackToken++;
+      state = AudiobookPlaybackState.stopped;
+      _notify();
+      return;
+    }
+    if (!canPause) return;
+    final token = _playbackToken;
+    _resumeSignal ??= Completer<void>();
+    state = AudiobookPlaybackState.paused;
+    _notify();
     try {
       await engine.pause();
-      if (_disposed) return;
+      if (_disposed || token != _playbackToken) return;
       state = AudiobookPlaybackState.paused;
       _notify();
     } catch (exception) {
@@ -198,12 +291,16 @@ class AudiobookController extends ChangeNotifier {
     }
   }
 
-  Future<void> stop() async {
+  Future<void> stop(
+      {bool resetPosition = false, bool userInitiated = true}) async {
+    if (userInitiated) onUserIntent?.call(AudiobookControlIntent.stop);
     _playbackToken += 1;
+    _playLoopActive = false;
+    _releasePause();
     try {
       await engine.stop();
       if (_disposed) return;
-      chunkIndex = 0;
+      if (resetPosition) chunkIndex = 0;
       state = AudiobookPlaybackState.stopped;
       error = null;
       _notify();
@@ -213,25 +310,33 @@ class AudiobookController extends ChangeNotifier {
   }
 
   Future<void> moveChapter(int delta, {bool autoplay = false}) async {
+    onUserIntent?.call(AudiobookControlIntent.chapter);
     final target = _adjacentChapter(delta);
     if (target == null) return;
-    _playbackToken += 1;
+    final token = ++_playbackToken;
+    _playLoopActive = false;
+    _releasePause();
     try {
       await engine.stop();
+      if (_disposed || token != _playbackToken) return;
       chapterIndex = target.index;
       chunkIndex = 0;
       await _loadCurrentChapter();
+      if (_disposed || token != _playbackToken) return;
       if (autoplay && state != AudiobookPlaybackState.error) {
         await play();
       }
     } catch (exception) {
-      _setError(exception);
+      if (token == _playbackToken) _setError(exception);
     }
   }
 
   Future<void> setMode(String value) async {
+    onUserIntent?.call(AudiobookControlIntent.mode);
     if (value == mode) return;
     _playbackToken += 1;
+    _playLoopActive = false;
+    _releasePause();
     try {
       await engine.stop();
       mode = value;
@@ -277,6 +382,8 @@ class AudiobookController extends ChangeNotifier {
 
   Future<void> _handleControlError(Object exception) async {
     _playbackToken += 1;
+    _playLoopActive = false;
+    _releasePause();
     try {
       await engine.stop();
     } catch (_) {
@@ -286,11 +393,14 @@ class AudiobookController extends ChangeNotifier {
   }
 
   Future<void> _loadCurrentChapter() async {
+    final token = _playbackToken;
+    chunks = const [];
     state = AudiobookPlaybackState.loading;
     error = null;
     _notify();
     try {
       final content = await loadChapter(chapterIndex, mode);
+      if (_disposed || token != _playbackToken) return;
       final text = content.content.trim().isNotEmpty
           ? content.content
           : content.paragraphs.join('\n');
@@ -299,10 +409,19 @@ class AudiobookController extends ChangeNotifier {
         throw StateError('当前章节没有可朗读的文字内容');
       }
       chunkIndex = chunkIndex.clamp(0, chunks.length - 1);
-      state = AudiobookPlaybackState.idle;
+      final restore = _pendingRestore;
+      _pendingRestore = null;
+      if (restore != null &&
+          restore.chapterIndex == chapterIndex &&
+          restore.mode == mode) {
+        chunkIndex = restoreAudiobookChunk(chunks, restore);
+      }
+      state = _resumeSignal == null
+          ? AudiobookPlaybackState.idle
+          : AudiobookPlaybackState.paused;
       _notify();
     } catch (exception) {
-      _setError(exception);
+      if (token == _playbackToken) _setError(exception);
     }
   }
 
@@ -343,6 +462,27 @@ class AudiobookController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  Future<void> _waitWhilePaused() async {
+    if (isPaused) await _resumeSignal?.future;
+  }
+
+  void _releasePause() {
+    final signal = _resumeSignal;
+    _resumeSignal = null;
+    if (signal?.isCompleted == false) signal!.complete();
+  }
+
+  Future<void> shutdown() {
+    if (_shutdown != null) return _shutdown!;
+    _disposed = true;
+    chunks = const [];
+    state = AudiobookPlaybackState.stopped;
+    notifyListeners();
+    _playbackToken++;
+    _releasePause();
+    return _shutdown ??= engine.dispose();
+  }
+
   String _languageCode(String language) => switch (language) {
         '英文' => 'en-US',
         '日文' => 'ja-JP',
@@ -351,9 +491,7 @@ class AudiobookController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _disposed = true;
-    _playbackToken += 1;
-    unawaited(engine.dispose().catchError((Object _) {
+    unawaited(shutdown().catchError((Object _) {
       // Widget 已销毁，TTS 关闭只能尽力完成，不能再向界面发送错误状态。
     }));
     super.dispose();

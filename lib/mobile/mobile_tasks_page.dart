@@ -5,6 +5,8 @@ import '../app/app_scope.dart';
 import '../core/models/task.dart';
 import '../core/state/load_state.dart';
 import '../features/tasks/tasks_controller.dart';
+import '../features/tasks/task_action_buttons.dart';
+import '../features/library/import_history_page.dart';
 import '../features/detail/book_detail_page.dart';
 import 'mobile_import_progress.dart';
 import 'mobile_action_button.dart';
@@ -21,22 +23,6 @@ class MobileTasksPage extends StatefulWidget {
 
 class _MobileTasksPageState extends State<MobileTasksPage> {
   int _filter = 0;
-  final Set<String> _retrying = <String>{};
-
-  Future<void> _retry(TasksController tasks, BookTask task) async {
-    if (!_retrying.add(task.id)) return;
-    setState(() {});
-    try {
-      await tasks.retry(task.id);
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('重试失败：$error')));
-      }
-    } finally {
-      if (mounted) setState(() => _retrying.remove(task.id));
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,8 +33,8 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
       builder: (context, _) {
         final filtered = tasks.tasks
             .where((task) => switch (_filter) {
-                  1 => task.status == 'running' || task.status == 'queued',
-                  2 => task.status == 'failed',
+                  1 => task.isActive,
+                  2 => task.status == 'failed' || task.status == 'paused',
                   3 => task.status == 'completed',
                   _ => true,
                 })
@@ -56,6 +42,11 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
         return MobilePage(
           title: '任务',
           actions: <Widget>[
+            if (scope.library.imports.enabled)
+              IconButton(
+                  tooltip: '导入记录与批量导入',
+                  icon: const Icon(Icons.history_rounded),
+                  onPressed: () => openImportHistory(context, mobile: true)),
             IconButton(
                 tooltip: '刷新任务',
                 onPressed: tasks.state == LoadState.loading
@@ -145,8 +136,6 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
           return _TaskRow(
               task: task,
               title: titles[task.bookId] ?? '作品任务',
-              retrying: _retrying.contains(task.id),
-              onRetry: () => _retry(tasks, task),
               onDetails: () => showMobileSheet<void>(
                     context: context,
                     title: titles[task.bookId] ?? '任务详情',
@@ -206,25 +195,22 @@ String _taskStatus(String status) => switch (status) {
       'failed' => '需要处理',
       'completed' => '已完成',
       'cancelled' => '已取消',
+      'pause_requested' => '正在暂停',
+      'paused' => '已暂停',
+      'cancel_requested' => '正在取消',
       _ => status
     };
 
 class _TaskRow extends StatelessWidget {
   const _TaskRow(
-      {required this.task,
-      required this.title,
-      required this.retrying,
-      required this.onRetry,
-      required this.onDetails});
+      {required this.task, required this.title, required this.onDetails});
   final BookTask task;
   final String title;
-  final bool retrying;
-  final VoidCallback onRetry;
   final VoidCallback onDetails;
   @override
   Widget build(BuildContext context) {
     final theme = MiuixTheme.of(context);
-    final active = task.status == 'running' || task.status == 'queued';
+    final active = task.isActive;
     final failed = task.status == 'failed';
     final statusColor = failed
         ? theme.colors.error
@@ -300,18 +286,7 @@ class _TaskRow extends StatelessWidget {
                     style: theme.textStyles.footnote1
                         .copyWith(color: theme.colors.onBackgroundVariant)),
               ],
-              if (failed)
-                Align(
-                    alignment: Alignment.centerLeft,
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: MobileActionButton(
-                          icon: Icons.refresh_rounded,
-                          tonal: true,
-                          busy: retrying,
-                          onPressed: retrying ? null : onRetry,
-                          child: Text(retrying ? '正在重试' : '重试任务')),
-                    )),
+              TaskActionButtons(task: task, mobile: true),
             ]));
   }
 }

@@ -5,17 +5,34 @@ import '../../../core/models/book.dart';
 import '../../../shared/app_surface.dart';
 import '../../../shared/motion.dart';
 import '../../../shared/responsive.dart';
+import 'desktop_book_card.dart';
+
+export 'desktop_book_card.dart' show DesktopBookCardActions;
 
 class BookCard extends StatelessWidget {
-  const BookCard({required this.book, required this.onOpen, super.key});
+  const BookCard({
+    required this.book,
+    required this.onOpen,
+    this.desktopActions,
+    super.key,
+  });
 
   final Book book;
   final VoidCallback onOpen;
+  final DesktopBookCardActions? desktopActions;
 
   @override
   Widget build(BuildContext context) {
     if (usesMobileUi(context)) {
       return _CompactBookCard(book: book, onOpen: onOpen);
+    }
+    if (desktopActions case final actions?) {
+      return DesktopBookCard(
+        book: book,
+        onOpen: onOpen,
+        actions: actions,
+        cover: BookCover(book: book, borderRadius: 6),
+      );
     }
     return _WideBookCard(book: book, onOpen: onOpen);
   }

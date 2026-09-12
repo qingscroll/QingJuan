@@ -375,6 +375,9 @@ def _migrate_legacy_data() -> None:
 
 
 def init_db() -> None:
+    from .link_job_repository import create_schema as create_link_job_schema
+    from .task_control import create_schema as create_task_control_schema
+
     global _SITE_PLUGIN_STATE_CACHE
     with get_connection() as conn:
         conn.execute(
@@ -522,6 +525,27 @@ def init_db() -> None:
             """
         )
         _ensure_reading_progress_columns(conn)
+        from .reading_progress_repository import ensure_reading_progress_schema
+
+        ensure_reading_progress_schema(conn)
+        from .library_metadata_repository import ensure_library_metadata_schema
+
+        ensure_library_metadata_schema(conn)
+        from .book_updates_repository import ensure_book_updates_schema
+
+        ensure_book_updates_schema(conn)
+        from .translation_quality_repository import ensure_translation_quality_schema
+
+        ensure_translation_quality_schema(conn)
+        from .resource_limits import ensure_resource_limits_schema
+
+        ensure_resource_limits_schema(conn)
+        from .annotations_repository import ensure_annotations_schema
+
+        ensure_annotations_schema(conn)
+        from .storage_meter import ensure_storage_schema
+
+        ensure_storage_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -639,6 +663,11 @@ def init_db() -> None:
             """
         )
         create_plugin_package_schema(conn)
+        create_task_control_schema(conn)
+        create_link_job_schema(conn)
+        from .account_maintenance_repository import ensure_account_maintenance_schema
+
+        ensure_account_maintenance_schema(conn)
         _seed_builtin_book_sources(conn)
         _seed_site_plugin_settings(conn)
     with _SITE_PLUGIN_STATE_LOCK:
@@ -1211,6 +1240,7 @@ def create_user(
     username_key: str,
     email: str | None = None,
     email_key: str | None = None,
+    email_verification_code_hash: str | None = None,
     display_name: str,
     password_hash: str,
     role: str = "user",
@@ -1237,6 +1267,10 @@ def create_user(
                 timestamp,
             ),
         )
+        if email_verification_code_hash is not None:
+            from .account_maintenance_repository import mark_registration_email_verified
+
+            mark_registration_email_verified(conn, user_id, email_key, email_verification_code_hash)
     created = get_user(user_id)
     if created is None:
         raise RuntimeError("用户创建失败")
@@ -1819,107 +1853,15 @@ def load_reading_progress(
     book_id: str,
     owner_id: str | None = None,
 ) -> ReadingProgressRecord:
-    owner_clause = " AND owner_id = ?" if owner_id is not None else ""
-    params = (book_id, owner_id) if owner_id is not None else (book_id,)
-    with get_connection() as conn:
-        row = conn.execute(
-            f"""
-            SELECT
-                owner_id,
-                book_id,
-                last_chapter_index,
-                last_scroll_ratio,
-                last_anchor_type,
-                last_anchor_index,
-                last_anchor_offset_ratio,
-                last_read_at,
-                last_page_index,
-                last_page_count,
-                last_layout_key,
-                last_content_mode,
-                last_character_offset
-            FROM reading_progress
-            WHERE book_id = ?{owner_clause}
-            """,
-            params,
-        ).fetchone()
+    from .reading_progress_repository import load_progress
 
-    if row is None:
-        return ReadingProgressRecord(
-            ownerId=owner_id or DEFAULT_ADMIN_USER_ID,
-            bookId=book_id,
-            lastChapterIndex=0,
-            lastReadAt=None,
-        )
-
-    return ReadingProgressRecord(
-        ownerId=row[0],
-        bookId=row[1],
-        lastChapterIndex=row[2],
-        lastScrollRatio=row[3],
-        lastAnchorType=row[4],
-        lastAnchorIndex=row[5],
-        lastAnchorOffsetRatio=row[6],
-        lastReadAt=row[7],
-        lastPageIndex=row[8],
-        lastPageCount=row[9],
-        lastLayoutKey=row[10],
-        lastContentMode=row[11],
-        lastCharacterOffset=row[12],
-    )
+    return load_progress(book_id, owner_id)
 
 
 def save_reading_progress(progress: ReadingProgressRecord) -> ReadingProgressRecord:
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO reading_progress (
-                owner_id,
-                book_id,
-                last_chapter_index,
-                last_scroll_ratio,
-                last_anchor_type,
-                last_anchor_index,
-                last_anchor_offset_ratio,
-                last_read_at,
-                last_page_index,
-                last_page_count,
-                last_layout_key,
-                last_content_mode,
-                last_character_offset
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(book_id) DO UPDATE SET
-                owner_id = excluded.owner_id,
-                last_chapter_index = excluded.last_chapter_index,
-                last_scroll_ratio = excluded.last_scroll_ratio,
-                last_anchor_type = excluded.last_anchor_type,
-                last_anchor_index = excluded.last_anchor_index,
-                last_anchor_offset_ratio = excluded.last_anchor_offset_ratio,
-                last_read_at = excluded.last_read_at,
-                last_page_index = excluded.last_page_index,
-                last_page_count = excluded.last_page_count,
-                last_layout_key = excluded.last_layout_key,
-                last_content_mode = excluded.last_content_mode,
-                last_character_offset = excluded.last_character_offset
-            """,
-            (
-                progress.ownerId,
-                progress.bookId,
-                progress.lastChapterIndex,
-                progress.lastScrollRatio,
-                progress.lastAnchorType,
-                progress.lastAnchorIndex,
-                progress.lastAnchorOffsetRatio,
-                progress.lastReadAt,
-                progress.lastPageIndex,
-                progress.lastPageCount,
-                progress.lastLayoutKey,
-                progress.lastContentMode,
-                progress.lastCharacterOffset,
-            ),
-        )
-    return progress
+    from .reading_progress_repository import save_progress_internal
+
+    return save_progress_internal(progress)
 
 
 def create_task(task: TaskRecord) -> TaskRecord:
@@ -2025,11 +1967,17 @@ def save_task(task: TaskRecord) -> TaskRecord:
                 book_id = excluded.book_id,
                 task_type = excluded.task_type,
                 chapter_indexes = excluded.chapter_indexes,
-                status = excluded.status,
+                status = CASE
+                    WHEN tasks.status IN ('pause_requested', 'cancel_requested', 'paused', 'cancelled')
+                     AND excluded.status IN ('running', 'completed', 'failed')
+                    THEN tasks.status ELSE excluded.status END,
                 total_count = excluded.total_count,
                 completed_count = excluded.completed_count,
                 progress = excluded.progress,
-                message = excluded.message,
+                message = CASE
+                    WHEN tasks.status IN ('pause_requested', 'cancel_requested', 'paused', 'cancelled')
+                     AND excluded.status IN ('running', 'completed', 'failed')
+                    THEN tasks.message ELSE excluded.message END,
                 error = excluded.error,
                 attempts = excluded.attempts,
                 created_at = excluded.created_at,

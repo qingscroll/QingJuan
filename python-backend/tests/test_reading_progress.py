@@ -24,15 +24,15 @@ def progress_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     book_dir = tmp_path / "library" / "book-progress"
     book_dir.mkdir(parents=True)
     (book_dir / "chapter.txt").write_text("第一段正文\n第二段正文", encoding="utf-8")
-    main.save_manifest(book_dir, {
-        "title": "分页定位",
-        "chapters": [{"index": 1, "title": "第一章", "file_name": "chapter.txt"}],
-    })
     db.save_book(BookRecord(
         id="book-progress", title="分页定位", sourceUrl="", bookKind="长小说",
         language="中文", status="已下载", chapterCount=1, translated=False,
         localPath="library/book-progress",
     ))
+    main.save_manifest(book_dir, {
+        "title": "分页定位",
+        "chapters": [{"index": 1, "title": "第一章", "file_name": "chapter.txt"}],
+    })
     application = create_application(routers=[library_router], api_prefix=API_PREFIX)
     with TestClient(application) as client:
         yield client

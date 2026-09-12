@@ -5,9 +5,10 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 from fastapi.testclient import TestClient
 
-from app import admin_auth, db, main
+from app import admin_auth, db, main, translation_model_health
 from app.admin_auth import (
     ADMIN_CSRF_HEADER,
     ADMIN_PASSWORD_HASH_ENV,
@@ -18,6 +19,7 @@ from app.admin_auth import (
 )
 from app.api.admin import router as admin_router
 from app.api.routers import settings_router
+from app.api.translation_model import router as translation_model_router
 from app.application import create_application
 from app.models import TranslationSettings
 from app.security import API_PREFIX
@@ -200,3 +202,65 @@ def test_trusted_windows_loopback_updates_settings_without_admin_routes(
     assert response.json()["translationModel"]["apiKeyConfigured"] is True
     assert admin_response.status_code == 404
     assert db.load_settings().translationModel.apiKey == "local-provider-key"
+
+
+def test_local_model_can_be_configured_before_enabling_and_then_probed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(TRUST_LOCAL_ADMIN_ENV, "1")
+    monkeypatch.setenv("QINGJUAN_MULTI_USER", "0")
+    monkeypatch.setenv("QINGJUAN_DISABLE_ADMIN_WEB", "1")
+    monkeypatch.delenv("QINGJUAN_AUTH_TOKEN_SHA256", raising=False)
+    monkeypatch.setattr(admin_auth, "os", SimpleNamespace(name="nt", getenv=os.getenv))
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "qingjuan.db")
+    monkeypatch.setattr(db, "_DATA_DIR_READY", True)
+    db.init_db()
+    requests: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer local-provider-key"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    monkeypatch.setattr(
+        translation_model_health,
+        "create_model_http_client",
+        lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(provider)),
+    )
+    translation_model_health.reset_translation_model_check_cache()
+    application = create_application(
+        routers=[settings_router, translation_model_router],
+        api_prefix=API_PREFIX,
+        authenticate=True,
+    )
+    headers = {LOCAL_ADMIN_REQUEST_HEADER: "1"}
+    payload = _settings_payload(base_url="https://models.example.test/v1")
+    payload["translationModel"].update(enabled=False, apiKey="local-provider-key", apiKeyAction="replace")
+    with TestClient(application, base_url="http://127.0.0.1:19453", client=("127.0.0.1", 50000)) as client:
+        disabled = client.put(f"{API_PREFIX}/settings", headers=headers, json=payload)
+        assert disabled.status_code == 200
+        assert disabled.json()["translationModel"]["enabled"] is False
+        read_back = client.get(f"{API_PREFIX}/settings", headers=headers)
+        assert read_back.status_code == 200
+        assert read_back.json()["translationModel"]["apiKeyConfigured"] is True
+        assert "local-provider-key" not in read_back.text
+        check = client.post(f"{API_PREFIX}/translation-model/check?force=true", headers=headers)
+        assert check.status_code == 200
+        assert check.json()["status"] == "disabled"
+        assert "Linux" not in check.json()["message"]
+        assert requests == []
+
+        payload["translationModel"].update(enabled=True, apiKey="", apiKeyAction="keep")
+        enabled = client.put(f"{API_PREFIX}/settings", headers=headers, json=payload)
+        assert enabled.status_code == 200
+        assert enabled.json()["translationModel"]["enabled"] is True
+        check = client.post(f"{API_PREFIX}/translation-model/check?force=true", headers=headers)
+        assert check.status_code == 200
+        assert check.json()["available"] is True
+        assert "Linux" not in check.json()["message"]
+        assert "local-provider-key" not in check.text
+    assert len(requests) == 1
+    assert db.load_settings().translationModel.apiKey == "local-provider-key"
+    translation_model_health.reset_translation_model_check_cache()

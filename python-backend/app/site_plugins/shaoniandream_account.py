@@ -16,6 +16,7 @@ from .shaoniandream_client import _json_request
 FLOW_TTL = 300
 ACCOUNT_TTL = 24 * 60 * 60
 MAX_FLOWS = 256
+MAX_ATTEMPTS = 5
 
 
 def now() -> float:
@@ -27,7 +28,30 @@ def iso(value: float) -> str:
 
 
 class LoginFlowError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "upstream_error",
+        status_code: int = 502,
+        hint: str = "请稍后重新加载验证后重试",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+        self.hint = hint
+
+
+def ended_flow() -> LoginFlowError:
+    return LoginFlowError(
+        "登录已取消或过期", code="session_revoked", status_code=401, hint="请回到青卷重新发起登录"
+    )
+
+
+def exhausted_flow() -> LoginFlowError:
+    return LoginFlowError(
+        "登录尝试次数已用完", code="too_many_attempts", status_code=429, hint="请回到青卷重新发起登录"
+    )
 
 
 @dataclass
@@ -69,7 +93,9 @@ class ShaonianDreamRuntime:
             self.accounts.purge()
             self.accounts.cancel_owner(self.owner)
             if len(self.accounts.flows) >= MAX_FLOWS:
-                raise LoginFlowError("当前登录请求较多，请稍后重试")
+                raise LoginFlowError(
+                    "当前登录请求较多，请稍后重试", code="too_many_requests", status_code=429
+                )
             flow = LoginFlow(
                 self.owner, secrets.token_urlsafe(24), secrets.token_urlsafe(32), now() + FLOW_TTL
             )
@@ -85,7 +111,9 @@ class ShaonianDreamRuntime:
             success = flow.status == "success" and self.account_status()["loggedIn"]
             return {
                 "status": flow.status,
-                "message": "登录成功" if success else "请在浏览器完成登录",
+                "message": "登录成功"
+                if success
+                else ("登录尝试次数已用完，请重新登录" if flow.status == "failed" else "请在浏览器完成登录"),
                 "loggedIn": success,
             }
 
@@ -133,16 +161,18 @@ class ShaonianDreamAccounts:
         with self.lock:
             self.purge()
             flow = next((f for f in self.flows.values() if secrets.compare_digest(f.token, token)), None)
-            if flow is None or flow.status != "pending" or flow.attempts >= 5:
-                raise LoginFlowError("登录已取消或过期，请回到青卷重新登录")
+            if flow is not None and flow.status == "failed":
+                raise exhausted_flow()
+            if flow is None or flow.status != "pending":
+                raise ended_flow()
             if flow.busy:
-                raise LoginFlowError("正在处理登录，请稍后重试")
+                raise LoginFlowError("正在处理登录，请稍后重试", code="conflict", status_code=409)
             flow.busy = True
             return flow
 
     def check_active(self, flow: LoginFlow) -> None:
         if self.flows.get(flow.flow_id) is not flow or flow.expires <= now():
-            raise LoginFlowError("登录已取消或过期，请回到青卷重新登录")
+            raise ended_flow()
 
     @staticmethod
     def client():
@@ -183,22 +213,36 @@ class ShaonianDreamAccounts:
             with self.lock:
                 flow.busy = False
 
-    async def login(self, token: str, credentials: dict[str, str]) -> None:
+    async def login(self, token: str, credentials: dict[str, str], *, auto_login: int = 1) -> None:
         flow = self.reserve(token)
         try:
             with self.lock:
                 flow.attempts += 1
                 # GeeTest may append two characters to its original challenge.
                 if not flow.challenge or not credentials["geetest_challenge"].startswith(flow.challenge):
-                    raise LoginFlowError("请重新完成人机验证后登录")
+                    raise LoginFlowError(
+                        "人机验证已失效",
+                        code="missing_geetest",
+                        status_code=422,
+                        hint="请重新完成人机验证后登录",
+                    )
                 flow.challenge = ""
             async with self.client() as client:
                 client.cookies.update(flow.cookies)
                 payload = await _json_request(
-                    client, "POST", "/user/loginaction", data={"type": "pc", "autoLogin": 1, **credentials}
+                    client,
+                    "POST",
+                    "/user/loginaction",
+                    data={"type": "pc", "autoLogin": auto_login, **credentials},
                 )
                 if str(payload.get("status")) != "1":
-                    raise LoginFlowError("少年梦登录失败，请检查账号密码并重新完成验证")
+                    invalid = str(payload.get("status")) in {"2", "3"}
+                    raise LoginFlowError(
+                        "少年梦登录失败",
+                        code="invalid_credentials" if invalid else "upstream_error",
+                        status_code=401 if invalid else 502,
+                        hint="请检查账号密码并重新完成人机验证",
+                    )
                 cookies = {
                     c.name: c.value
                     for c in client.cookies.jar
@@ -214,11 +258,19 @@ class ShaonianDreamAccounts:
                     flow.status = "success"
                     flow.cookies.clear()
         except LoginFlowError:
+            if flow.attempts >= MAX_ATTEMPTS:
+                raise exhausted_flow() from None
             raise
         except Exception:
+            if flow.attempts >= MAX_ATTEMPTS:
+                raise exhausted_flow() from None
             raise LoginFlowError("少年梦登录请求失败，请稍后重试") from None
         finally:
             with self.lock:
+                if flow.status == "pending" and flow.attempts >= MAX_ATTEMPTS:
+                    flow.status = "failed"
+                    flow.cookies.clear()
+                    flow.challenge = ""
                 flow.busy = False
 
 

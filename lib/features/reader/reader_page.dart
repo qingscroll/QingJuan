@@ -16,12 +16,20 @@ import '../../shared/motion.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import '../audiobook/audiobook_page.dart';
+import 'annotation_selection.dart';
+import 'annotation_highlights.dart';
+import 'annotations_page.dart';
+import 'reader_annotations_controller.dart';
+import 'reader_page_selection.dart';
 import 'reader_controls.dart';
+import 'reader_chapter_loader.dart';
 import 'reader_continuous_layout.dart';
 import 'reader_manga_image.dart';
 import 'reader_hardware_key_service.dart';
 import 'reader_pagination.dart';
 import 'reader_progress.dart';
+import 'reader_progress_factory.dart';
+import 'reader_progress_notice.dart';
 import 'reader_scroll_position.dart';
 import 'reader_theme.dart';
 
@@ -30,12 +38,18 @@ class ReaderPage extends StatefulWidget {
     required this.detail,
     required this.initialChapterIndex,
     this.progressWriter,
+    this.chapterLoader,
+    this.imageProvider,
+    this.initialMode,
     super.key,
   });
 
   final BookDetail detail;
   final int initialChapterIndex;
   final ReaderProgressWriter? progressWriter;
+  final ReaderChapterLoader? chapterLoader;
+  final ImageProvider<Object> Function(String source)? imageProvider;
+  final String? initialMode;
 
   @override
   State<ReaderPage> createState() => _ReaderPageState();
@@ -64,6 +78,9 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
 
   late AppScope _scope;
   late ReaderProgressWriter _progressWriter;
+  ReaderAnnotationsController? _annotations;
+  bool _ownsProgressWriter = false;
+  late ReadingProgress _initialProgress;
   final _scrollPosition = ReaderScrollPositionTracker();
   ReadingProgress? _lastPosition;
   bool _restoringPosition = false;
@@ -134,6 +151,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     if (!_initialized) return;
     if (state == AppLifecycleState.resumed) {
       unawaited(_progressWriter.flush());
+      _refreshHighlights();
     } else {
       _cancelScheduledProgressSave();
       unawaited(_saveProgress());
@@ -146,12 +164,31 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     _scope = AppScope.of(context);
     if (_initialized) return;
     _initialized = true;
+    _annotations =
+        ReaderAnnotationsController(_scope.library, widget.detail.book.id)
+          ..addListener(_highlightsChanged);
+    _initialProgress = widget.detail.progress;
+    final offline = _scope.offline;
+    final shareProgress = offline?.identity?.versioning == true &&
+        offline?.identity?.instanceId == _scope.backend.instanceId &&
+        offline?.identity?.ownerId == (_scope.auth.user?.id ?? 'user-admin');
+    _ownsProgressWriter = widget.progressWriter == null && !shareProgress;
     _progressWriter = widget.progressWriter ??
-        ReaderProgressWriter(_scope.api, widget.detail.book.id);
+        (shareProgress
+            ? offline!.writerFor(widget.detail)
+            : createReaderProgressWriter(
+                api: _scope.api,
+                detail: widget.detail,
+                versioning:
+                    _scope.backend.capabilities['readingProgressVersioning'] ==
+                        true,
+                instanceId: _scope.backend.instanceId,
+                ownerId: _scope.auth.user?.id ?? 'user-admin'));
     if (widget.initialChapterIndex == widget.detail.progress.chapterIndex &&
         widget.detail.progress.contentMode != null) {
       _mode = widget.detail.progress.contentMode!;
     }
+    _mode = widget.initialMode ?? _mode;
     _mobileUi = usesMobileUi(context);
     _hostBrightness = FluentTheme.of(context).brightness;
     _flowMode = _scope.appState.readerFlowMode;
@@ -168,11 +205,130 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         ),
       );
     }
-    unawaited(_loadChapter(_chapterIndex, initial: true));
+    if (_progressWriter.versioning) {
+      unawaited(_initializeProgress());
+    } else {
+      unawaited(_loadChapter(_chapterIndex, initial: true));
+    }
     if (_mobileUi) {
       _scheduleControlsHide();
       unawaited(_applySystemChrome());
     }
+  }
+
+  Future<void> _initializeProgress() async {
+    await _progressWriter.ready;
+    if (!mounted || !_progressWriter.isCurrentContext) return;
+    final restored =
+        _progressWriter.localPosition ?? _progressWriter.restoredPosition;
+    if (restored != null &&
+        widget.initialChapterIndex == widget.detail.progress.chapterIndex &&
+        restored.chapterIndex >= 1 &&
+        restored.chapterIndex <= _chapterCount) {
+      _initialProgress = restored;
+      _chapterIndex = restored.chapterIndex;
+      _mode = widget.initialMode ?? restored.contentMode ?? _mode;
+    }
+    unawaited(_progressWriter.flush());
+    await _loadChapter(_chapterIndex, initial: true);
+  }
+
+  Future<void> _useServerProgress(ReadingProgress progress) async {
+    if (!mounted || !_progressWriter.isCurrentContext) return;
+    _cancelScheduledProgressSave();
+    await _loadChapter(progress.chapterIndex,
+        restoreProgress: progress, contentMode: progress.contentMode);
+  }
+
+  bool get _hasAnnotations =>
+      _scope.backend.capabilities['readingAnnotations'] == true ||
+      _scope.backend.capabilities['cachedTextSearch'] == true;
+
+  Future<void> _openAnnotations(
+      {ReadingProgress? position, String? quote}) async {
+    if (_content == null || !_progressWriter.isCurrentContext) return;
+    _hideControlsTimer?.cancel();
+    final generation = _scope.library.contextGeneration;
+    final target = await showReadingAnnotations(context,
+        bookId: widget.detail.book.id,
+        position: position ?? _captureProgress(),
+        mobile: _mobileUi,
+        selectedQuote: quote);
+    if (!mounted || generation != _scope.library.contextGeneration) return;
+    _refreshHighlights();
+    if (target != null) await _useServerProgress(target);
+    if (_mobileUi) _scheduleControlsHide();
+  }
+
+  void _highlightsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _loadHighlights(ChapterContent content) {
+    if (_scope.backend.capabilities['readingAnnotations'] != true ||
+        content.imageSources.isNotEmpty) {
+      return;
+    }
+    unawaited(_annotations?.load(content.chapter.index, content.mode,
+        _readerParagraphs(content).join('\n\n')));
+  }
+
+  void _refreshHighlights() {
+    _annotations?.clear();
+    final contents = <ChapterContent>{
+      if (_content != null) _content!,
+      for (final index in _continuousChapterIndices)
+        if (_chapterCache[_cacheKey(index, _mode)] case final content?) content,
+    };
+    for (final content in contents) {
+      _loadHighlights(content);
+    }
+  }
+
+  TextSpan _highlightedSpan(ChapterContent content, String text,
+          {required int offset, double? paragraphSpacing}) =>
+      underlineAnnotationSpans(
+          readerTextSpanForLayout(text,
+              fontSize: _fontSize,
+              textScaler: MediaQuery.textScalerOf(context),
+              paragraphSpacing: paragraphSpacing),
+          _annotations?.ranges(content.chapter.index, content.mode) ?? const [],
+          offset: offset);
+
+  int _paragraphOffset(List<String> paragraphs, int index) =>
+      paragraphs.take(index).fold<int>(0, (sum, text) => sum + text.length + 2);
+
+  Widget _paragraphSelectionMenu(BuildContext context, EditableTextState state,
+      ChapterContent content, int paragraphIndex) {
+    final paragraphs = _readerParagraphs(content);
+    final text = paragraphs[paragraphIndex];
+    final range = state.textEditingValue.selection;
+    final valid =
+        range.isValid && !range.isCollapsed && range.end <= text.length;
+    return material.AdaptiveTextSelectionToolbar.buttonItems(
+        anchors: state.contextMenuAnchors,
+        buttonItems: [
+          ...state.contextMenuButtonItems,
+          if (_scope.backend.capabilities['readingAnnotations'] == true &&
+              valid)
+            ContextMenuButtonItem(
+                label: '记笔记',
+                onPressed: () {
+                  final quote =
+                      annotationQuote(text.substring(range.start, range.end));
+                  final offset = paragraphs
+                          .take(paragraphIndex)
+                          .fold<int>(0, (sum, line) => sum + line.length + 2) +
+                      range.start;
+                  state.hideToolbar();
+                  unawaited(_openAnnotations(
+                      quote: boundedAnnotationQuote(quote),
+                      position: selectedTextPosition(
+                          chapterIndex: content.chapter.index,
+                          mode: content.mode,
+                          characterOffset: offset)));
+                })
+        ]);
   }
 
   ReaderPalette get _palette {
@@ -228,18 +384,20 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   }) {
     final key = _cacheKey(chapterIndex, mode);
     final cached = _chapterCache[key];
-    if (cached != null) return Future<ChapterContent>.value(cached);
+    if (cached != null) {
+      _loadHighlights(cached);
+      return Future<ChapterContent>.value(cached);
+    }
     final pending = _inflight[key];
     if (pending != null) return pending;
-    final request = _scope.api
-        .fetchChapter(
+    final request = (widget.chapterLoader ?? _scope.api.fetchChapter)(
       widget.detail.book.id,
       chapterIndex,
       mode: mode,
       prefetch: prefetch,
-    )
-        .then((content) {
+    ).then((content) {
       _chapterCache[key] = content;
+      if (mounted) _loadHighlights(content);
       _trimCache();
       return content;
     }).whenComplete(() {
@@ -277,6 +435,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     int chapterIndex, {
     bool initial = false,
     double? restoreRatio,
+    ReadingProgress? restoreProgress,
+    String? contentMode,
   }) async {
     if (chapterIndex < 1 || chapterIndex > _chapterCount) return;
     final loadToken = ++_loadToken;
@@ -291,7 +451,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       });
     }
     try {
-      final mode = _mode;
+      final mode = contentMode ?? _mode;
       final contentRequest = _getChapter(chapterIndex, mode);
       if (chapterIndex < _chapterCount) {
         unawaited(_prefetchChapter(chapterIndex + 1, mode));
@@ -301,6 +461,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       final oldController = _pageController;
       _pageController = PageController();
       setState(() {
+        _mode = mode;
         _chapterIndex = chapterIndex;
         _content = content;
         _loading = false;
@@ -318,14 +479,15 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         oldController.dispose();
         if (!mounted || loadToken != _loadToken) return;
-        final saved = initial &&
-                restoreRatio == null &&
-                chapterIndex == widget.detail.progress.chapterIndex
-            ? widget.detail.progress
-            : ReadingProgress(
-                chapterIndex: chapterIndex,
-                scrollRatio: restoreRatio ?? 0,
-                contentMode: _mode);
+        final saved = restoreProgress ??
+            (initial &&
+                    restoreRatio == null &&
+                    chapterIndex == _initialProgress.chapterIndex
+                ? _initialProgress
+                : ReadingProgress(
+                    chapterIndex: chapterIndex,
+                    scrollRatio: restoreRatio ?? 0,
+                    contentMode: _mode));
         _lastPosition = saved;
         await _restorePosition(saved, loadToken);
         if (!mounted || loadToken != _loadToken) return;
@@ -1161,8 +1323,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   Future<void> _setContentMode(String value) async {
     if (_mode == value || _switchingChapter) return;
     final ratio = _mobileUi ? _currentProgressRatio() : null;
-    setState(() => _mode = value);
-    await _loadChapter(_chapterIndex, restoreRatio: ratio);
+    await _loadChapter(_chapterIndex, restoreRatio: ratio, contentMode: value);
   }
 
   Future<void> _openAudiobook() async {
@@ -1391,10 +1552,13 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     if (content == null || !_initialized) return;
     for (final source in content.imageSources) {
       unawaited(
-        NetworkImage(
-          source,
-          headers: _scope.api.headersForUrl(source),
-        ).evict().then<void>((_) {}),
+        (widget.imageProvider?.call(source) ??
+                NetworkImage(
+                  source,
+                  headers: _scope.api.headersForUrl(source),
+                ))
+            .evict()
+            .then<void>((_) {}),
       );
     }
   }
@@ -1402,12 +1566,14 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _annotations?.removeListener(_highlightsChanged);
+    _annotations?.dispose();
     _hideControlsTimer?.cancel();
     _visibleChapterTimer?.cancel();
     _cancelScheduledProgressSave();
     _pendingHardwareKeys.clear();
     unawaited(_saveProgress());
-    if (_initialized && widget.progressWriter == null) {
+    if (_initialized && _ownsProgressWriter) {
       _progressWriter.dispose();
     }
     unawaited(_hardwareKeys.detach());
@@ -1568,6 +1734,8 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
           children: <Widget>[
             ReaderMangaImage(
               url: content.imageSources[contentIndex],
+              imageProvider: widget.imageProvider
+                  ?.call(content.imageSources[contentIndex]),
               headers: _scope.api.headersForUrl(
                 content.imageSources[contentIndex],
               ),
@@ -1597,11 +1765,10 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     return Padding(
       padding: EdgeInsets.only(bottom: _fontSize * 0.85),
       child: SelectableText.rich(
-        readerTextSpanForLayout(
-          paragraphs[contentIndex],
-          fontSize: _fontSize,
-          textScaler: MediaQuery.textScalerOf(context),
-        ),
+        contextMenuBuilder: (context, state) =>
+            _paragraphSelectionMenu(context, state, content, contentIndex),
+        _highlightedSpan(content, paragraphs[contentIndex],
+            offset: _paragraphOffset(paragraphs, contentIndex)),
         textAlign: TextAlign.justify,
         style: _continuousTextStyle(context),
       ),
@@ -1846,14 +2013,26 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                         const SizedBox(height: 23),
                       ],
                       Expanded(
-                        child: SelectionArea(
+                        child: ReaderPageSelection(
+                          key: ValueKey(
+                              'selection-${content.chapter.index}-${content.mode}-$index'),
+                          text: pages[index],
+                          enabled: _scope
+                                  .backend.capabilities['readingAnnotations'] ==
+                              true,
+                          onNote: (quote, offset) => unawaited(_openAnnotations(
+                              quote: quote,
+                              position: selectedTextPosition(
+                                  chapterIndex: content.chapter.index,
+                                  mode: content.mode,
+                                  characterOffset:
+                                      readerPageCharacterOffset(pages, index) +
+                                          (offset ?? 0),
+                                  precise: offset != null))),
                           child: Text.rich(
-                            readerTextSpanForLayout(
-                              pages[index],
-                              fontSize: _fontSize,
-                              textScaler: MediaQuery.textScalerOf(context),
-                              paragraphSpacing: _fontSize * 0.85,
-                            ),
+                            _highlightedSpan(content, pages[index],
+                                offset: readerPageCharacterOffset(pages, index),
+                                paragraphSpacing: _fontSize * 0.85),
                             textAlign: TextAlign.justify,
                             style: bodyStyle,
                           ),
@@ -1987,6 +2166,18 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
                               activeColor: palette.accent,
                             ),
                           ),
+                        ),
+                      if (_hasAnnotations)
+                        material.IconButton(
+                          key: const ValueKey('reader-annotations-button'),
+                          tooltip: '书签、笔记与搜索',
+                          constraints:
+                              const BoxConstraints(minWidth: 48, minHeight: 48),
+                          icon:
+                              Icon(FluentIcons.bookmarks, color: palette.text),
+                          onPressed: _loading
+                              ? null
+                              : () => unawaited(_openAnnotations()),
                         ),
                       ReaderChoiceChip(
                         key: const ValueKey('reader-content-mode'),
@@ -2575,11 +2766,12 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         padding: const EdgeInsets.only(bottom: 18),
         child: Column(
           children: <Widget>[
-            Image.network(
-              content.imageSources[contentIndex],
-              headers: _scope.api.headersForUrl(
-                content.imageSources[contentIndex],
-              ),
+            Image(
+              image: widget.imageProvider
+                      ?.call(content.imageSources[contentIndex]) ??
+                  NetworkImage(content.imageSources[contentIndex],
+                      headers: _scope.api
+                          .headersForUrl(content.imageSources[contentIndex])),
               width: double.infinity,
               fit: BoxFit.contain,
               filterQuality: FilterQuality.medium,
@@ -2611,11 +2803,10 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
     return Padding(
       padding: const EdgeInsets.only(bottom: 18),
       child: SelectableText.rich(
-        readerTextSpanForLayout(
-          paragraphs[contentIndex],
-          fontSize: _fontSize,
-          textScaler: MediaQuery.textScalerOf(context),
-        ),
+        contextMenuBuilder: (context, state) =>
+            _paragraphSelectionMenu(context, state, content, contentIndex),
+        _highlightedSpan(content, paragraphs[contentIndex],
+            offset: _paragraphOffset(paragraphs, contentIndex)),
         textAlign: TextAlign.justify,
         style: _continuousTextStyle(context),
       ),
@@ -2640,6 +2831,16 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         actions: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
+            if (_hasAnnotations)
+              Tooltip(
+                  message: '书签、笔记与搜索',
+                  child: IconButton(
+                      key: const ValueKey('reader-annotations-button'),
+                      icon: const Icon(FluentIcons.bookmarks,
+                          semanticLabel: '书签、笔记与搜索'),
+                      onPressed: _loading
+                          ? null
+                          : () => unawaited(_openAnnotations()))),
             Tooltip(
               message: '减小字号',
               child: IconButton(
@@ -2769,7 +2970,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         onPopInvokedWithResult: (didPop, result) {
           if (didPop) unawaited(_saveProgress());
         },
-        child: _buildDesktopReader(context),
+        child: _withProgressNotice(_buildDesktopReader(context)),
       );
     }
     return PopScope(
@@ -2778,7 +2979,7 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
         if (didPop) unawaited(_saveProgress());
         if (!didPop && _settingsVisible) _toggleSettings();
       },
-      child: AnimatedContainer(
+      child: _withProgressNotice(AnimatedContainer(
         key: const ValueKey('reader-mobile-surface'),
         duration: _motionDuration(260, targetContext: context),
         curve: QjMotion.enterCurve,
@@ -2814,9 +3015,15 @@ class _ReaderPageState extends State<ReaderPage> with WidgetsBindingObserver {
             _buildBottomControls(context),
           ],
         ),
-      ),
+      )),
     );
   }
+
+  Widget _withProgressNotice(Widget child) => Column(children: [
+        Expanded(child: child),
+        ReaderProgressNotice(
+            writer: _progressWriter, onUseServer: _useServerProgress),
+      ]);
 }
 
 enum _ReaderElementKind { heading, content, footer }

@@ -13,13 +13,17 @@ class FlutterTtsEngine implements TtsEngine {
   final TtsVoice? voice;
   Completer<void>? _speechCompletion;
   bool _disposed = false;
+  bool _paused = false;
+  String? _activeText;
 
   @override
   Future<void> initialize(String language) async {
     // 统一使用完成、取消和错误事件驱动状态，兼容不同平台的 TTS 引擎。
     await _flutterTts.awaitSpeakCompletion(false);
     _flutterTts.setCompletionHandler(_completeSpeech);
-    _flutterTts.setCancelHandler(_completeSpeech);
+    _flutterTts.setCancelHandler(() {
+      if (!_paused) _completeSpeech();
+    });
     _flutterTts.setErrorHandler(
       (message) => _completeSpeechError(
         StateError('设备 TTS 播放失败：${message.toString()}'),
@@ -47,6 +51,7 @@ class FlutterTtsEngine implements TtsEngine {
     }
     final completion = Completer<void>();
     _speechCompletion = completion;
+    _activeText = text;
     try {
       final result = await _flutterTts.speak(text);
       if (result != 1) {
@@ -60,24 +65,35 @@ class FlutterTtsEngine implements TtsEngine {
     } finally {
       if (identical(_speechCompletion, completion)) {
         _speechCompletion = null;
+        _activeText = null;
       }
     }
   }
 
   @override
   Future<void> pause() async {
+    if (_speechCompletion == null || _speechCompletion!.isCompleted) return;
+    _paused = true;
     final result = await _flutterTts.pause();
-    if (result != 1) throw StateError('设备 TTS 未能暂停朗读');
+    if (result != 1) {
+      _paused = false;
+      throw StateError('设备 TTS 未能暂停朗读');
+    }
   }
 
   @override
   Future<void> resume() async {
-    final result = await _flutterTts.speak('');
+    if (!_paused) return;
+    _paused = false;
+    // Android's pause implementation resumes only when the original utterance
+    // is passed again; it then selects the remaining native range itself.
+    final result = await _flutterTts.speak(_activeText ?? '');
     if (result != 1) throw StateError('设备 TTS 未能继续朗读');
   }
 
   @override
   Future<void> stop() async {
+    _paused = false;
     if (_disposed) {
       _completeSpeech();
       return;
@@ -109,6 +125,7 @@ class FlutterTtsEngine implements TtsEngine {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _paused = false;
     try {
       await _flutterTts.stop();
     } finally {

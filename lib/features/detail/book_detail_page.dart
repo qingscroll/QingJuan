@@ -4,6 +4,7 @@ import 'package:flutter/rendering.dart' as rendering;
 import '../../app/app_scope.dart';
 import '../../app/app_state.dart';
 import '../../core/files/export_file_service.dart';
+import '../../core/backend/backend_connection_manager.dart';
 import '../../core/models/book.dart';
 import '../../shared/app_surface.dart';
 import '../../shared/feedback_widgets.dart';
@@ -14,8 +15,15 @@ import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import '../audiobook/audiobook_page.dart';
 import '../manga_translation/manga_bookshelf_import.dart';
+import '../library/book_metadata_editor.dart';
+import '../library/book_updates_page.dart';
+import '../offline/offline_save_page.dart';
 import '../reader/reader_page.dart';
-import '../reader/reader_progress.dart';
+import '../reader/reader_progress_factory.dart';
+import '../storage/storage_page.dart';
+import '../translation_quality/translation_quality_page.dart';
+import 'detail_action_bar.dart';
+import 'quality_chapter_picker.dart';
 import 'mobile_book_detail_view.dart';
 
 class BookDetailPage extends StatefulWidget {
@@ -39,12 +47,14 @@ class _BookDetailPageState extends State<BookDetailPage> {
   final ExportFileService _exportFiles = ExportFileService();
   late AppScope _scope;
   BookDetail? _detail;
+  bool Function()? _detailContext;
   String? _error;
   bool _loading = true;
   bool _actionRunning = false;
   double? _exportProgress;
   bool _initialized = false;
   bool _openedReaderOnLoad = false;
+  int _loadGeneration = 0;
   String? _deleteError;
   final Set<int> _selected = <int>{};
   final Set<int> _exportingChapters = <int>{};
@@ -60,6 +70,16 @@ class _BookDetailPageState extends State<BookDetailPage> {
   }
 
   Future<void> _load() async {
+    final generation = ++_loadGeneration;
+    final scope = _scope;
+    final apiCurrent = scope.api.captureContextGuard();
+    final instance = scope.backend.instanceId;
+    final identity = scope.auth.workspaceIdentity;
+    bool isCurrent() =>
+        apiCurrent() &&
+        instance == scope.backend.instanceId &&
+        identity == scope.auth.workspaceIdentity;
+    bool current() => mounted && generation == _loadGeneration && isCurrent();
     setState(() {
       _loading = _detail == null;
       _error = null;
@@ -67,19 +87,22 @@ class _BookDetailPageState extends State<BookDetailPage> {
     });
     try {
       final detail = await _scope.api.fetchBookDetail(widget.bookId);
-      if (mounted) {
-        setState(() => _detail = detail);
+      if (mounted && current()) {
+        setState(() {
+          _detail = detail;
+          _detailContext = isCurrent;
+        });
         if (widget.openReaderOnLoad &&
             !_openedReaderOnLoad &&
             detail.chapters.isNotEmpty) {
           _openedReaderOnLoad = true;
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _openReader();
+            if (current()) _openReader();
           });
         }
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && current()) {
         if (_detail != null && usesMobileUi(context)) {
           displayInfoBar(
             context,
@@ -94,7 +117,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
         }
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (current()) setState(() => _loading = false);
     }
   }
 
@@ -314,7 +337,22 @@ class _BookDetailPageState extends State<BookDetailPage> {
   Future<void> _openReader([int? chapterIndex]) async {
     final detail = _detail;
     if (detail == null || detail.chapters.isEmpty) return;
-    final writer = ReaderProgressWriter(_scope.api, detail.book.id);
+    final offline = _scope.offline;
+    final ownerId = _scope.auth.user?.id ?? 'user-admin';
+    final sharedWriter = offline?.identity?.versioning == true &&
+        offline?.identity?.instanceId == _scope.backend.instanceId &&
+        offline?.identity?.ownerId == ownerId;
+    final writer = sharedWriter
+        ? offline!.writerFor(detail)
+        : createReaderProgressWriter(
+            api: _scope.api,
+            detail: detail,
+            versioning:
+                _scope.backend.capabilities['readingProgressVersioning'] ==
+                    true,
+            instanceId: _scope.backend.instanceId,
+            ownerId: ownerId,
+          );
     final isCurrent = _scope.api.captureContextGuard();
     await Navigator.of(context).push<void>(
       qjPageRoute<void>(
@@ -330,7 +368,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
     // Route teardown submits the final position. Wait for that write before
     // fetching the detail again so Continue Reading cannot use stale progress.
     await writer.flush();
-    writer.dispose();
+    if (!sharedWriter) writer.dispose();
     if (mounted && isCurrent()) {
       try {
         final updated = await _scope.api.fetchBookDetail(widget.bookId);
@@ -342,24 +380,62 @@ class _BookDetailPageState extends State<BookDetailPage> {
     }
   }
 
-  void _openAudiobook([int? chapterIndex]) {
+  Future<void> _openAudiobook([int? chapterIndex]) async {
     final detail = _detail;
     if (detail == null || detail.book.kind == '漫画') return;
-    Navigator.of(context).push<void>(
-      qjPageRoute<void>(
-        context: context,
-        beginOffset: const Offset(0, 0.025),
-        builder: (_) => AudiobookPage(
+    final scope = _scope;
+    final apiCurrent = scope.api.captureContextGuard();
+    final instance = scope.backend.instanceId;
+    final identity = scope.auth.workspaceIdentity;
+    final detailCurrent = _detailContext;
+    final coordinator = scope.audiobook;
+    bool isCurrent() =>
+        apiCurrent() &&
+        (detailCurrent?.call() ?? false) &&
+        instance == scope.backend.instanceId &&
+        identity == scope.auth.workspaceIdentity &&
+        (coordinator == null || scope.auth.canAccessWorkspace);
+    try {
+      if (!isCurrent()) return;
+      if (coordinator != null && scope.backend.status != BackendStatus.ready) {
+        throw StateError('请先恢复服务连接，再开始新的听书');
+      }
+      final controller = await coordinator?.open(
+          instanceId: scope.backend.instanceId,
+          ownerId: scope.auth.user?.id ?? 'user-admin',
           detail: detail,
-          voice: _scope.appState.ttsVoice,
-          style: _scope.appState.ttsSpeechStyle,
-          onStyleChanged: _scope.appState.setTtsSpeechStyle,
-          initialChapterIndex: chapterIndex ?? detail.progress.chapterIndex,
           loadChapter: (index, mode) =>
-              _scope.api.fetchChapter(detail.book.id, index, mode: mode),
+              scope.api.fetchChapter(detail.book.id, index, mode: mode),
+          isCurrentContext: isCurrent,
+          initialChapterIndex: chapterIndex,
+          voice: scope.appState.ttsVoice,
+          style: scope.appState.ttsSpeechStyle);
+      if (!mounted || !isCurrent()) return;
+      await Navigator.of(context).push<void>(
+        qjPageRoute<void>(
+          context: context,
+          beginOffset: const Offset(0, 0.025),
+          builder: (_) => AudiobookPage(
+            controller: controller,
+            sleepTimer: coordinator?.sleepTimer,
+            detail: detail,
+            voice: scope.appState.ttsVoice,
+            style: scope.appState.ttsSpeechStyle,
+            onStyleChanged: scope.appState.setTtsSpeechStyle,
+            initialChapterIndex: chapterIndex ?? detail.progress.chapterIndex,
+            loadChapter: (index, mode) =>
+                scope.api.fetchChapter(detail.book.id, index, mode: mode),
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (!mounted || !isCurrent()) return;
+      await displayInfoBar(context,
+          builder: (_, __) => InfoBar(
+              title: const Text('无法打开听书'),
+              content: Text('$error'),
+              severity: InfoBarSeverity.error));
+    }
   }
 
   Future<void> _exportChapter(Chapter chapter) async {
@@ -611,20 +687,88 @@ class _BookDetailPageState extends State<BookDetailPage> {
     return '${safeName.isEmpty ? '作品导出' : safeName}.$extension';
   }
 
+  Future<void> _editMetadata() async {
+    final isCurrent = _scope.api.captureContextGuard();
+    final changed = await showBookMetadataEditor(context,
+        bookId: widget.bookId, mobile: usesMobileUi(context));
+    if (changed == true && mounted && isCurrent()) await _load();
+  }
+
+  Future<void> _manageStorage() => showBookStorage(context,
+      bookId: widget.bookId, mobile: usesMobileUi(context));
+
+  Future<void> _checkUpdates() async {
+    final isCurrent = _scope.api.captureContextGuard();
+    await showBookUpdates(context,
+        bookId: widget.bookId, mobile: usesMobileUi(context));
+    if (mounted && isCurrent()) await _load();
+  }
+
+  Future<void> _editTranslation() async {
+    final detail = _detail;
+    if (detail == null || detail.book.kind == '漫画') return;
+    final isCurrent = _scope.api.captureContextGuard();
+    final available =
+        detail.chapters.where((chapter) => chapter.downloaded).toList();
+    final selected = available
+        .where((chapter) => _selected.contains(chapter.index))
+        .toList();
+    final chapterIndex = selected.length == 1
+        ? selected.single.index
+        : await pickQualityChapter(context,
+            chapters: available, mobile: usesMobileUi(context));
+    if (chapterIndex == null || !mounted || !isCurrent()) return;
+    final changed = await showTranslationQualityEditor(context,
+        bookId: widget.bookId,
+        chapterIndex: chapterIndex,
+        mobile: usesMobileUi(context));
+    if (changed == true && mounted && isCurrent()) await _load();
+  }
+
+  Future<void> _editGlossary() async {
+    if (_detail == null ||
+        _detail!.book.kind == '漫画' ||
+        !(_detailContext?.call() ?? false)) {
+      return;
+    }
+    await showBookGlossaryEditor(context,
+        bookId: widget.bookId, mobile: usesMobileUi(context));
+  }
+
+  void _saveOffline() {
+    final offline = _scope.offline;
+    final detail = _detail;
+    if (offline == null || detail == null) return;
+    Navigator.of(context).push(FluentPageRoute<void>(
+        builder: (_) => OfflineSavePage(controller: offline, detail: detail)));
+  }
+
   Widget _buildDesktopOverview(BookDetail detail) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         AppSurface(
-          child: Flex(
-            direction: Axis.horizontal,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              _DesktopBookSummary(detail: detail),
-              const SizedBox(width: 28),
-              Expanded(child: _DesktopStats(detail: detail)),
-            ],
-          ),
+          child: LayoutBuilder(builder: (context, constraints) {
+            final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+            if (constraints.maxWidth < 820 * scale) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _DesktopBookSummary(detail: detail),
+                  const SizedBox(height: 20),
+                  _DesktopStats(detail: detail),
+                ],
+              );
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(flex: 3, child: _DesktopBookSummary(detail: detail)),
+                const SizedBox(width: 28),
+                Expanded(flex: 2, child: _DesktopStats(detail: detail)),
+              ],
+            );
+          }),
         ),
         const SizedBox(height: 24),
         if (_exportProgress case final progress?) ...<Widget>[
@@ -636,55 +780,44 @@ class _BookDetailPageState extends State<BookDetailPage> {
           ),
           const SizedBox(height: 12),
         ],
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: <Widget>[
-            FilledButton(
-              onPressed: () => _openReader(),
-              child: const Text('继续阅读'),
-            ),
-            if (detail.book.kind != '漫画' && detail.chapters.isNotEmpty)
-              Button(
-                onPressed: () => _openAudiobook(),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(FluentIcons.headset, size: 16),
-                    SizedBox(width: 8),
-                    Text('听小说'),
-                  ],
-                ),
-              ),
-            Button(
-              onPressed: _actionRunning ? null : _exportSelectedChapters,
-              child: Text(_selected.isEmpty ? '下载全部' : '下载所选'),
-            ),
-            Button(
-              onPressed:
-                  _actionRunning ? null : () => _startTranslation(detail),
-              child: Text(_translationActionLabel(detail)),
-            ),
-            Button(
-              onPressed: () {
-                setState(() {
-                  if (_selected.length == detail.chapters.length) {
-                    _selected.clear();
-                  } else {
-                    _selected
-                      ..clear()
-                      ..addAll(detail.chapters.map((chapter) => chapter.index));
-                  }
-                });
-              },
-              child: Text(
-                _selected.length == detail.chapters.length ? '取消全选' : '全选章节',
-              ),
-            ),
+        DetailActionBar(
+          onRead: () => _openReader(),
+          onListen: detail.book.kind != '漫画' && detail.chapters.isNotEmpty
+              ? () => _openAudiobook()
+              : null,
+          busy: _actionRunning,
+          managementActions: [
+            if (_scope.backend.capabilities['libraryMetadata'] == true)
+              DetailManagementAction('编辑作品信息', _editMetadata),
+            if (_scope.backend.capabilities['translationQuality'] == true &&
+                detail.book.kind != '漫画') ...[
+              DetailManagementAction('术语与人名', _editGlossary),
+              DetailManagementAction('译文校对', _editTranslation),
+            ],
+            if (_scope.backend.capabilities['bookUpdates'] == true &&
+                detail.book.sourceUrl.isNotEmpty)
+              DetailManagementAction('连载追更', _checkUpdates),
+            if (_scope.backend.capabilities['storageManagement'] == true)
+              DetailManagementAction('存储空间', _manageStorage),
           ],
         ),
-        const SizedBox(height: 30),
-        SectionTitle('章节', trailing: Text('已选择 ${_selected.length} 章')),
+        const SizedBox(height: 28),
+        DetailChapterToolbar(
+          selectedCount: _selected.length,
+          allSelected: _selected.length == detail.chapters.length,
+          onToggleAll: () => setState(() {
+            if (_selected.length == detail.chapters.length) {
+              _selected.clear();
+            } else {
+              _selected
+                ..clear()
+                ..addAll(detail.chapters.map((chapter) => chapter.index));
+            }
+          }),
+          onDownload: _actionRunning ? null : _exportSelectedChapters,
+          onTranslate: _actionRunning ? null : () => _startTranslation(detail),
+          translationLabel: _translationActionLabel(detail),
+        ),
       ],
     );
   }
@@ -726,6 +859,28 @@ class _BookDetailPageState extends State<BookDetailPage> {
         onExportChapter: _exportChapter,
         onDelete: _delete,
         onRefresh: _load,
+        onSaveOffline: _scope.offline != null ? _saveOffline : null,
+        onManageStorage:
+            _scope.backend.capabilities['storageManagement'] == true
+                ? _manageStorage
+                : null,
+        onCheckUpdates: _scope.backend.capabilities['bookUpdates'] == true &&
+                detail.book.sourceUrl.isNotEmpty
+            ? _checkUpdates
+            : null,
+        onEditTranslation:
+            _scope.backend.capabilities['translationQuality'] == true &&
+                    detail.book.kind != '漫画'
+                ? _editTranslation
+                : null,
+        onEditGlossary:
+            _scope.backend.capabilities['translationQuality'] == true &&
+                    detail.book.kind != '漫画'
+                ? _editGlossary
+                : null,
+        onEditMetadata: _scope.backend.capabilities['libraryMetadata'] == true
+            ? _editMetadata
+            : null,
         onSelectionChanged: (selection) => setState(() {
           _selected
             ..clear()
@@ -765,7 +920,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
               slivers: <Widget>[
                 SliverToBoxAdapter(child: _buildDesktopOverview(detail)),
                 SliverFixedExtentList(
-                  itemExtent: 48,
+                  itemExtent: 28 + MediaQuery.textScalerOf(context).scale(20),
                   delegate: SliverChildBuilderDelegate(
                     (context, index) {
                       final chapter = detail.chapters[index];
@@ -848,7 +1003,7 @@ class _DesktopMetric extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 92,
+      width: 92 * MediaQuery.textScalerOf(context).scale(14) / 14,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[

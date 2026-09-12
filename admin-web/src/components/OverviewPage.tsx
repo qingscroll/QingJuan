@@ -28,7 +28,7 @@ type OverviewPageProps = {
 export function OverviewPage({ data, bookTitles, onNavigate, onControlService }: OverviewPageProps) {
   const { message } = App.useApp();
   const [serviceAction, setServiceAction] = useState<BackendServiceAction | null>(null);
-  const activeTasks = data.tasks.filter((task) => ["queued", "running"].includes(task.status));
+  const activeTasks = data.tasks.filter((task) => ["queued", "running", "pause_requested", "cancel_requested"].includes(task.status));
   const completedTasks = data.tasks.filter((task) => task.status === "completed").length;
   const recentTasks = [...data.tasks]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))

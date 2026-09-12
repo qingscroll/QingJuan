@@ -64,6 +64,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
   final _logScrollController = ScrollController();
   String _kind = '长小说';
   String _language = '中文';
+  String _textEncoding = 'auto';
   String _downloadMode = 'on_demand';
   bool _translate = false;
   bool _loading = false;
@@ -153,6 +154,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
         language: _language,
         translate: _translate,
         title: _titleController.text,
+        textEncoding: _textEncoding,
       );
       if (mounted) _close(book);
     });
@@ -276,6 +278,7 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
                 InfoLabel(
                   label: '番茄正文获取方式',
                   child: ComboBox<String>(
+                    key: const ValueKey('fanqie-download-mode'),
                     value: _downloadMode,
                     isExpanded: true,
                     items: const <ComboBoxItem<String>>[
@@ -310,7 +313,28 @@ class _ImportBookDialogState extends State<_ImportBookDialog> {
                 checked: _translate,
                 onChanged:
                     busy ? null : (value) => setState(() => _translate = value),
-                content: const Text('导入后启用翻译'),
+                content: const Text('导入后翻译'),
+              ),
+              const SizedBox(height: 14),
+              InfoLabel(
+                label: '本地 TXT / TEXT 编码',
+                child: ComboBox<String>(
+                  value: _textEncoding,
+                  isExpanded: true,
+                  items: const <ComboBoxItem<String>>[
+                    ComboBoxItem(value: 'auto', child: Text('自动识别')),
+                    ComboBoxItem(value: 'utf-8', child: Text('UTF-8')),
+                    ComboBoxItem(
+                        value: 'gb18030', child: Text('GB18030（简体中文）')),
+                    ComboBoxItem(value: 'big5', child: Text('Big5（繁体中文）')),
+                    ComboBoxItem(
+                        value: 'shift_jis', child: Text('Shift-JIS（日文）')),
+                  ],
+                  onChanged: busy
+                      ? null
+                      : (value) => setState(
+                          () => _textEncoding = value ?? _textEncoding),
+                ),
               ),
               const SizedBox(height: 16),
               AppSurface(

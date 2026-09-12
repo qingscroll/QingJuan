@@ -10,6 +10,36 @@ import 'package:qingjuan/core/backend/local_backend_process.dart';
 import 'package:qingjuan/core/models/settings.dart';
 
 void main() {
+  test(
+      'replacing an instance at the same URL requires a new workspace activation',
+      () async {
+    var instance = 'first';
+    final api = ApiClient(() => 'https://backend.test',
+        client: MockClient((request) async {
+      if (request.method == 'POST') return http.Response('', 204);
+      return http.Response(
+          jsonEncode({
+            'service': 'qingjuan-backend',
+            'apiVersion': '1',
+            'instanceId': instance,
+            'capabilities': {'multiUser': true}
+          }),
+          200);
+    }));
+    final manager = BackendConnectionManager(api, isConfigured: () => true);
+    addTearDown(() async {
+      await manager.dispose();
+      api.close();
+    });
+    await manager.ensureReady();
+    final epoch = manager.readyEpoch;
+    await manager.probeRemoteHealth();
+    expect(manager.readyEpoch, epoch);
+    instance = 'replacement';
+    await manager.probeRemoteHealth();
+    expect(manager.readyEpoch, epoch + 1);
+    expect(manager.instanceId, 'replacement');
+  });
   test('remote client accepts authenticated desktop sharing and heartbeat',
       () async {
     final api = ApiClient(() => 'http://192.168.1.20:19454',

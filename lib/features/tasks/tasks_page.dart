@@ -9,6 +9,7 @@ import '../../shared/feedback_widgets.dart';
 import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
+import 'task_action_buttons.dart';
 
 enum _TaskFilter { all, active, failed, completed }
 
@@ -144,8 +145,7 @@ class _TaskList extends StatelessWidget {
     final filteredTasks = tasks
         .where((task) => switch (filter) {
               _TaskFilter.all => true,
-              _TaskFilter.active =>
-                task.status == 'queued' || task.status == 'running',
+              _TaskFilter.active => task.isActive,
               _TaskFilter.failed => task.status == 'failed',
               _TaskFilter.completed => task.status == 'completed',
             })
@@ -154,8 +154,7 @@ class _TaskList extends StatelessWidget {
     int count(_TaskFilter target) => tasks
         .where((task) => switch (target) {
               _TaskFilter.all => true,
-              _TaskFilter.active =>
-                task.status == 'queued' || task.status == 'running',
+              _TaskFilter.active => task.isActive,
               _TaskFilter.failed => task.status == 'failed',
               _TaskFilter.completed => task.status == 'completed',
             })
@@ -309,13 +308,7 @@ class _TaskTile extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final controller = AppScope.of(context).tasks;
     final failed = task.status == 'failed';
-    final statusLabel = switch (task.status) {
-      'queued' => '等待中',
-      'running' => '进行中',
-      'completed' => '已完成',
-      'failed' => '失败',
-      _ => task.status,
-    };
+    final statusLabel = task.statusLabel;
     final updatedAt = _formatTimestamp(task.updatedAt);
     final pageResults = controller
         .pageResultsForTask(task.id)
@@ -366,7 +359,7 @@ class _TaskTile extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 12),
-                ProgressBar(value: (task.progress * 100).clamp(0, 100)),
+                ProgressBar(value: task.progress.clamp(0, 100)),
                 const SizedBox(height: 8),
                 Text(
                   task.error ?? task.message,
@@ -423,13 +416,8 @@ class _TaskTile extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (failed) ...<Widget>[
-                  const SizedBox(height: 12),
-                  Button(
-                    onPressed: () => controller.retry(task.id),
-                    child: const Text('重试'),
-                  ),
-                ],
+                const SizedBox(height: 12),
+                TaskActionButtons(task: task),
               ],
             ),
           ),

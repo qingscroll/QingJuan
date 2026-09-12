@@ -6,6 +6,10 @@ import '../core/models/book.dart';
 import '../core/state/load_state.dart';
 import '../features/detail/book_detail_page.dart';
 import '../features/library/library_controller.dart';
+import '../features/library/import_history_page.dart';
+import '../features/library/book_metadata_editor.dart';
+import '../features/library/library_organization_controls.dart';
+import '../features/library/book_updates_page.dart';
 import 'mobile_action_button.dart';
 import 'mobile_import_progress.dart';
 import 'mobile_import_sheet.dart';
@@ -26,11 +30,13 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
   final _queryController = TextEditingController();
   final _selected = <String>{};
   _ShelfFilter _filter = _ShelfFilter.all;
-  _ShelfSort _sort = _ShelfSort.recent;
   bool _showSearch = false;
   bool _selecting = false;
   bool _deleting = false;
   bool _initialized = false;
+  int _generation = -1;
+  bool get _metadataEnabled =>
+      AppScope.of(context).backend.capabilities['libraryMetadata'] == true;
 
   @override
   void didChangeDependencies() {
@@ -65,17 +71,26 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
       });
 
   Future<void> _options() async {
+    final library = AppScope.of(context).library;
     final value = await showMobileSheet<String>(
       context: context,
       title: '书库整理',
       child: Column(children: <Widget>[
-        for (final sort in _ShelfSort.values)
+        if (AppScope.of(context).library.imports.enabled)
           ListTile(
-            minVerticalPadding: 12,
-            title: Text(sort.label),
-            trailing: _sort == sort ? const Icon(Icons.check_rounded) : null,
-            onTap: () => Navigator.pop(context, sort.name),
-          ),
+              title: const Text('导入记录与批量导入'),
+              onTap: () => Navigator.pop(context, 'imports')),
+        if (_metadataEnabled)
+          LibraryOrganizationControls(controller: library, mobile: true),
+        if (!_metadataEnabled)
+          for (final sort in LibrarySort.values)
+            ListTile(
+              minVerticalPadding: 12,
+              title: Text(sort.label),
+              trailing:
+                  library.sort == sort ? const Icon(Icons.check_rounded) : null,
+              onTap: () => Navigator.pop(context, sort.name),
+            ),
         const Divider(height: 1),
         ListTile(
           minVerticalPadding: 12,
@@ -87,17 +102,22 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
       ]),
     );
     if (!mounted || value == null) return;
+    if (value == 'imports') {
+      await openImportHistory(context, mobile: true);
+      return;
+    }
     setState(() {
       if (value == 'select') {
         _selecting = true;
       } else {
-        _sort = _ShelfSort.values.byName(value);
+        library.setSort(LibrarySort.values.byName(value));
       }
     });
   }
 
   Future<void> _deleteSelected() async {
     final library = AppScope.of(context).library;
+    final generation = library.contextGeneration;
     final books =
         library.books.where((book) => _selected.contains(book.id)).toList();
     if (books.isEmpty || _deleting) return;
@@ -122,18 +142,24 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
                 child: const Text('保留作品')),
           ]),
     );
-    if (!mounted || confirmed != true) return;
+    if (!mounted ||
+        confirmed != true ||
+        generation != library.contextGeneration) {
+      return;
+    }
     setState(() => _deleting = true);
     var removed = 0;
     try {
       for (final book in books) {
+        if (!mounted || generation != library.contextGeneration) return;
         await library.delete(book.id);
+        if (!mounted || generation != library.contextGeneration) return;
         _selected.remove(book.id);
         removed++;
       }
       if (mounted) setState(() => _selecting = false);
     } catch (error) {
-      if (mounted) {
+      if (mounted && generation == library.contextGeneration) {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('已删除 $removed 本，其余作品未删除：$error')));
       }
@@ -143,19 +169,7 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
   }
 
   List<Book> _books(LibraryController library) {
-    final books = library.filteredBooks.where(_filter.matches).toList();
-    if (_sort == _ShelfSort.title) {
-      books.sort((a, b) => a.title.compareTo(b.title));
-    } else if (_sort == _ShelfSort.recent) {
-      final order = {
-        for (var i = 0; i < library.books.length; i++) library.books[i].id: i
-      };
-      books.sort((a, b) {
-        final recent = (b.lastReadAt ?? '').compareTo(a.lastReadAt ?? '');
-        return recent == 0 ? order[a.id]!.compareTo(order[b.id]!) : recent;
-      });
-    }
-    return books;
+    return library.filteredBooks.where(_filter.matches).toList();
   }
 
   @override
@@ -174,122 +188,156 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
       },
       child: AnimatedBuilder(
         animation: library,
-        builder: (context, _) => MobilePage(
-          title: _selecting ? '选择作品' : '书库',
-          actions: <Widget>[
-            if (_selecting)
-              TextButton(
-                  onPressed: _deleting
-                      ? null
-                      : () => setState(() {
-                            _selecting = false;
-                            _selected.clear();
-                          }),
-                  child: const Text('完成'))
-            else ...<Widget>[
-              IconButton(
-                key: const ValueKey('mobile-library-search-toggle'),
-                tooltip: _showSearch ? '收起书库搜索' : '搜索书库',
-                onPressed: () => setState(() {
-                  _showSearch = !_showSearch;
-                  if (!_showSearch) FocusScope.of(context).unfocus();
-                }),
-                icon: const Icon(Icons.search_outlined),
-              ),
-              IconButton(
-                  key: const ValueKey('mobile-library-add'),
-                  tooltip: '导入作品',
-                  onPressed: _addBook,
-                  icon: const Icon(Icons.add_rounded)),
+        builder: (context, _) {
+          if (_generation != library.contextGeneration) {
+            _generation = library.contextGeneration;
+            _selected.clear();
+            _selecting = _deleting = false;
+            _filter = _ShelfFilter.all;
+            _queryController.text = library.query;
+          }
+          return MobilePage(
+            title: _selecting ? '选择作品' : '书库',
+            actions: <Widget>[
+              if (_selecting)
+                TextButton(
+                    onPressed: _deleting
+                        ? null
+                        : () => setState(() {
+                              _selecting = false;
+                              _selected.clear();
+                            }),
+                    child: const Text('完成'))
+              else ...<Widget>[
+                IconButton(
+                  key: const ValueKey('mobile-library-search-toggle'),
+                  tooltip: _showSearch ? '收起书库搜索' : '搜索书库',
+                  onPressed: () => setState(() {
+                    _showSearch = !_showSearch;
+                    if (!_showSearch) FocusScope.of(context).unfocus();
+                  }),
+                  icon: const Icon(Icons.search_outlined),
+                ),
+                IconButton(
+                    key: const ValueKey('mobile-library-add'),
+                    tooltip: '导入作品',
+                    onPressed: _addBook,
+                    icon: const Icon(Icons.add_rounded)),
+              ],
             ],
-          ],
-          child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                if (_showSearch) ...<Widget>[
-                  MobileSearchField(
-                      key: const ValueKey('mobile-library-query'),
-                      controller: _queryController,
-                      hintText: '搜索书名或简介',
-                      autofocus: true,
-                      onChanged: library.setQuery),
-                  const SizedBox(height: 8),
-                ],
-                if (library.books.isNotEmpty)
-                  Row(children: <Widget>[
-                    Expanded(
-                        child: SizedBox(
-                      height:
-                          (MediaQuery.textScalerOf(context).scale(13) * 1.5 +
-                                  20)
-                              .clamp(48, double.infinity),
-                      child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: <Widget>[
-                            for (final filter in _ShelfFilter.values)
-                              Semantics(
-                                  selected: _filter == filter,
-                                  child: TextButton(
-                                    key: ValueKey(
-                                        'mobile-library-filter-${filter.name}'),
-                                    onPressed: () =>
-                                        setState(() => _filter = filter),
-                                    style: TextButton.styleFrom(
-                                        foregroundColor: _filter == filter
-                                            ? theme.colors.primary
-                                            : theme.colors.onBackgroundVariant),
-                                    child: Column(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: <Widget>[
-                                          Text(
-                                              '${filter.label} ${library.books.where(filter.matches).length}',
-                                              style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: _filter == filter
-                                                      ? FontWeight.w700
-                                                      : FontWeight.w400)),
-                                          const SizedBox(height: 3),
-                                          Container(
-                                              height: 2,
-                                              width: 16,
-                                              color: _filter == filter
-                                                  ? theme.colors.primary
-                                                  : Colors.transparent),
-                                        ]),
-                                  )),
-                          ]),
-                    )),
-                    IconButton(
-                        key: const ValueKey('mobile-library-organize'),
-                        tooltip: '排序与批量管理',
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if (_showSearch) ...<Widget>[
+                    MobileSearchField(
+                        key: const ValueKey('mobile-library-query'),
+                        controller: _queryController,
+                        hintText: '搜索书名、作者、简介或标签',
+                        autofocus: true,
+                        onChanged: library.setQuery),
+                    const SizedBox(height: 8),
+                  ],
+                  if (library.books.isNotEmpty)
+                    Row(children: <Widget>[
+                      Expanded(
+                          child: SizedBox(
+                        height:
+                            (MediaQuery.textScalerOf(context).scale(13) * 1.5 +
+                                    20)
+                                .clamp(48, double.infinity),
+                        child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: <Widget>[
+                              for (final filter in _ShelfFilter.values)
+                                Semantics(
+                                    selected: _filter == filter,
+                                    child: TextButton(
+                                      key: ValueKey(
+                                          'mobile-library-filter-${filter.name}'),
+                                      onPressed: () =>
+                                          setState(() => _filter = filter),
+                                      style: TextButton.styleFrom(
+                                          foregroundColor: _filter == filter
+                                              ? theme.colors.primary
+                                              : theme
+                                                  .colors.onBackgroundVariant),
+                                      child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: <Widget>[
+                                            Text(
+                                                '${filter.label} ${library.books.where(filter.matches).length}',
+                                                style: TextStyle(
+                                                    fontSize: 13,
+                                                    fontWeight:
+                                                        _filter == filter
+                                                            ? FontWeight.w700
+                                                            : FontWeight.w400)),
+                                            const SizedBox(height: 3),
+                                            Container(
+                                                height: 2,
+                                                width: 16,
+                                                color: _filter == filter
+                                                    ? theme.colors.primary
+                                                    : Colors.transparent),
+                                          ]),
+                                    )),
+                            ]),
+                      )),
+                      IconButton(
+                          key: const ValueKey('mobile-library-organize'),
+                          tooltip: '排序与批量管理',
+                          onPressed: _options,
+                          icon: const Icon(Icons.tune_rounded, size: 21)),
+                    ]),
+                  if (_selecting)
+                    Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        children: <Widget>[
+                          Text('已选 ${_selected.length} 本',
+                              style: theme.textStyles.footnote1),
+                          TextButton(
+                              onPressed: _deleting
+                                  ? null
+                                  : () => setState(() => _selected.addAll(
+                                      _books(library).map((book) => book.id))),
+                              child: const Text('全选')),
+                          if (_metadataEnabled && _selected.length == 1)
+                            TextButton(
+                                onPressed: _deleting
+                                    ? null
+                                    : () => showBookMetadataEditor(context,
+                                        bookId: _selected.single, mobile: true),
+                                child: const Text('编辑信息')),
+                          if (library.serials.enabled && _selected.length == 1)
+                            TextButton(
+                                onPressed: _deleting
+                                    ? null
+                                    : () => showBookUpdates(context,
+                                        bookId: _selected.single, mobile: true),
+                                child: const Text('连载追更')),
+                          TextButton(
+                              onPressed: _deleting || _selected.isEmpty
+                                  ? null
+                                  : _deleteSelected,
+                              child: Text(_deleting ? '删除中' : '删除所选',
+                                  style: TextStyle(color: theme.colors.error))),
+                        ]),
+                  if (library.hasOrganizationFilters)
+                    TextButton(
                         onPressed: _options,
-                        icon: const Icon(Icons.tune_rounded, size: 21)),
-                  ]),
-                if (_selecting)
-                  Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 8,
-                      children: <Widget>[
-                        Text('已选 ${_selected.length} 本',
-                            style: theme.textStyles.footnote1),
-                        TextButton(
-                            onPressed: _deleting
-                                ? null
-                                : () => setState(() => _selected.addAll(
-                                    _books(library).map((book) => book.id))),
-                            child: const Text('全选')),
-                        TextButton(
-                            onPressed: _deleting || _selected.isEmpty
-                                ? null
-                                : _deleteSelected,
-                            child: Text(_deleting ? '删除中' : '删除所选',
-                                style: TextStyle(color: theme.colors.error))),
-                      ]),
-                const SizedBox(height: 8),
-                Expanded(child: _content(library)),
-              ]),
-        ),
+                        child:
+                            Text('筛选中 · ${_books(library).length} 本 · 调整筛选')),
+                  if (library.serials.error != null)
+                    TextButton(
+                        onPressed: library.serials.load,
+                        child: const Text('追更状态刷新失败 · 点击重试')),
+                  const SizedBox(height: 8),
+                  Expanded(child: _content(library)),
+                ]),
+          );
+        },
       ),
     );
   }
@@ -330,11 +378,12 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
                   setState(() => _filter = _ShelfFilter.all);
                   _queryController.clear();
                   library.setQuery('');
+                  library.setOrganization();
                 },
                 child: const Text('查看全部藏书')),
       );
     }
-    final recents = library.books
+    final recents = books
         .where((book) => book.lastReadAt?.isNotEmpty == true)
         .toList()
       ..sort((a, b) => b.lastReadAt!.compareTo(a.lastReadAt!));
@@ -378,7 +427,7 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
               SliverToBoxAdapter(
                   child: MobileSection(
                       title: '全部作品',
-                      trailing: Text(_sort.label,
+                      trailing: Text(library.sort.label,
                           style: MiuixTheme.of(context).textStyles.footnote1))),
             SliverGrid(
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -393,6 +442,8 @@ class _MobileLibraryPageState extends State<MobileLibraryPage> {
                 return MobileLibraryTile(
                     key: ValueKey('mobile-library-book-${book.id}'),
                     book: book,
+                    newChapterCount:
+                        library.serials.records[book.id]?.newChapterCount ?? 0,
                     selecting: _selecting,
                     selected: _selected.contains(book.id),
                     onOpen: () =>
@@ -421,13 +472,4 @@ enum _ShelfFilter {
         _ShelfFilter.novels => book.kind != '漫画',
         _ShelfFilter.manga => book.kind == '漫画'
       };
-}
-
-enum _ShelfSort {
-  recent('最近阅读'),
-  title('按书名'),
-  server('书库顺序');
-
-  const _ShelfSort(this.label);
-  final String label;
 }

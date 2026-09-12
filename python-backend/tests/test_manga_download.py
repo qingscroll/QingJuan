@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib
-import sys
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -2351,7 +2350,6 @@ async def test_generic_manga_chapter_returns_image_pages_without_browser() -> No
 @pytest.mark.asyncio
 async def test_retry_requeues_the_same_task(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QINGJUAN_DATA_DIR", str(tmp_path))
-    sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")
     task = TaskRecord(
         id="task-original",

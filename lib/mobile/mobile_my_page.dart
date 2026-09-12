@@ -8,7 +8,9 @@ import '../core/backend/backend_connection_manager.dart';
 import '../core/backend/backend_connection_link.dart';
 import '../core/backend/backend_url_validator.dart';
 import '../features/audiobook/tts_voice_service.dart';
+import '../features/audiobook/audiobook_resume_entry.dart';
 import '../features/settings/widgets/app_update_card.dart';
+import '../features/offline/offline_library_entry.dart';
 import 'mobile_action_button.dart';
 import 'mobile_connection_scanner.dart';
 import 'mobile_auth_page.dart';
@@ -129,6 +131,17 @@ class MobileMyPage extends StatelessWidget {
                             child: Text(connected ? '重新登录' : '连接服务')),
                   ),
                   const SizedBox(height: 20),
+                ],
+                if (scope.audiobook case final audiobook?)
+                  AudiobookResumeEntry(
+                    coordinator: audiobook,
+                    mobile: true,
+                    voice: app.ttsVoice,
+                    onStyleChanged: app.setTtsSpeechStyle,
+                  ),
+                if (scope.offline case final offline?) ...<Widget>[
+                  OfflineLibraryEntry(controller: offline),
+                  const SizedBox(height: 16),
                 ],
                 const _ThemeCard(),
                 const SizedBox(height: 24),

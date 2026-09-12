@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import httpx
@@ -177,6 +178,9 @@ async def test_fanqie_on_demand_import_creates_manifest_without_full_download(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    from app import book_import_execution
+
+    monkeypatch.setattr(book_import_execution, "provisional_book_storage", lambda *_: nullcontext())
     preview = PreviewResponse(
         title="长篇测试小说",
         chapterCount=2,
@@ -234,6 +238,9 @@ async def test_fanqie_full_import_keeps_existing_download_behavior(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    from app import book_import_execution
+
+    monkeypatch.setattr(book_import_execution, "provisional_book_storage", lambda *_: nullcontext())
     preview = PreviewResponse(
         title="短篇测试小说",
         chapterCount=1,

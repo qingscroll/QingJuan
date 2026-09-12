@@ -35,6 +35,7 @@ void main() {
     await tester.tap(find.text('添加书籍'));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.enterText(find.byKey(const ValueKey('import-book-url')), '0');
+    await tester.ensureVisible(find.text('预览'));
     await tester.tap(find.text('预览'));
     await tester.pump();
     expect(submitted, isEmpty);
@@ -97,6 +98,7 @@ void main() {
     expect(find.text('边看边下（默认）'), findsOneWidget);
     expect(find.textContaining('退出客户端后仍会继续'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('导入'));
     await tester.tap(find.text('导入'));
     await tester.pump(const Duration(milliseconds: 200));
 
@@ -108,10 +110,11 @@ void main() {
     harness.library.clearLinkJob();
     await tester.pump();
     final modeSelector = tester.widget<ComboBox<String>>(
-      find.byType(ComboBox<String>).last,
+      find.byKey(const ValueKey('fanqie-download-mode')),
     );
     modeSelector.onChanged!('all');
     await tester.pump();
+    await tester.ensureVisible(find.text('导入'));
     await tester.tap(find.text('导入'));
     await tester.pump(const Duration(milliseconds: 200));
 
@@ -185,6 +188,7 @@ void main() {
       find.byKey(const ValueKey('import-book-url')),
       'https://example.com/comic/1',
     );
+    await tester.ensureVisible(find.text('预览'));
     await tester.tap(find.text('预览'));
     await tester.pump(const Duration(milliseconds: 200));
 

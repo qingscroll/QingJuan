@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircleOutlined,
   EditOutlined,
@@ -30,6 +30,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 
 import * as api from "../api";
+import { UserResourceLimits } from "./UserResourceLimits";
 import type { UserAdminView, UserCreatePayload, UserRole, UserStatus } from "../types";
 
 type UserFilter = "all" | UserStatus;
@@ -60,25 +61,47 @@ export function UsersPage() {
   const [editTarget, setEditTarget] = useState<UserAdminView | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [resetTarget, setResetTarget] = useState<UserAdminView | null>(null);
+  const [resourceTarget, setResourceTarget] = useState<UserAdminView | null>(null);
   const [resetSubmitting, setResetSubmitting] = useState(false);
   const [createForm] = Form.useForm<CreateUserFields>();
   const [editForm] = Form.useForm<EditProfileFields>();
   const [resetForm] = Form.useForm<ResetPasswordFields>();
+  const loadRequest = useRef(0);
+  const pendingUserChanges = useRef<Map<string, UserAdminView> | null>(null);
 
   const loadUsers = useCallback(async () => {
+    const request = ++loadRequest.current;
+    const changes = new Map<string, UserAdminView>();
+    pendingUserChanges.current = changes;
     setLoading(true);
     setLoadError("");
     try {
-      setUsers(await api.getUsers());
+      const loaded = await api.getUsers();
+      if (request !== loadRequest.current) return;
+      const loadedIds = new Set(loaded.map((user) => user.id));
+      // Successful writes during this read are newer than its server snapshot.
+      setUsers([
+        ...Array.from(changes.values()).filter((user) => !loadedIds.has(user.id)),
+        ...loaded.map((user) => changes.get(user.id) ?? user),
+      ]);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "用户列表加载失败");
+      if (request === loadRequest.current) {
+        setLoadError(error instanceof Error ? error.message : "用户列表加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (request === loadRequest.current) {
+        pendingUserChanges.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void loadUsers();
+    return () => {
+      loadRequest.current += 1;
+      pendingUserChanges.current = null;
+    };
   }, [loadUsers]);
 
   const counts = useMemo(() => ({
@@ -105,6 +128,7 @@ export function UsersPage() {
   }, [filter, query, users]);
 
   const replaceUser = (updated: UserAdminView) => {
+    pendingUserChanges.current?.set(updated.id, updated);
     setUsers((current) => current.map((user) => user.id === updated.id ? updated : user));
   };
 
@@ -116,6 +140,7 @@ export function UsersPage() {
         displayName: values.displayName.trim(),
         password: values.password,
       });
+      pendingUserChanges.current?.set(created.id, created);
       setUsers((current) => [created, ...current.filter((user) => user.id !== created.id)]);
       createForm.resetFields();
       setCreateOpen(false);
@@ -299,6 +324,8 @@ export function UsersPage() {
       fixed: "right",
       render: (_, user) => (
         <Space size={4} wrap>
+          <Button size="small" onClick={() => setResourceTarget(user)}
+            aria-label={`管理 ${user.displayName} 的资源限制`}>资源限制</Button>
           <Button
             size="small"
             icon={<EditOutlined />}
@@ -517,6 +544,8 @@ export function UsersPage() {
         />
       </div>
 
+      {resourceTarget && <UserResourceLimits key={resourceTarget.id} userId={resourceTarget.id}
+        displayName={resourceTarget.displayName} onClose={() => setResourceTarget(null)} />}
       <Modal
         open={createOpen}
         title="创建普通用户"

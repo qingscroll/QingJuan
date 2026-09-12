@@ -9,6 +9,7 @@ from ..models import BuiltinSiteSearchResult, ChapterPreview, PreviewResponse
 from ..scraper_network_security import create_public_http_client, validate_public_url
 from ..site_plugins.base import SitePlugin, host_matches
 from .sdk import PluginContext
+from .usage import active_call
 
 CALL_TIMEOUT_SECONDS = 30
 
@@ -74,7 +75,8 @@ async def _invoke(plugin: SitePlugin, operation: str, base_url: str, *args):
                 headers={"User-Agent": "QingJuan-Plugin/1", "Accept": "*/*"},
             ) as client,
         ):
-            return await handler(*args, PluginContext(plugin, base_url, client))
+            with active_call(plugin):
+                return await handler(*args, PluginContext(plugin, base_url, client))
     except TimeoutError:
         raise ValueError(f"插件“{plugin.name}”运行超时，请稍后重试") from None
     except (Exception, SystemExit):

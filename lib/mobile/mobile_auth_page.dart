@@ -4,6 +4,7 @@ import 'package:flutter_miuix/miuix.dart';
 import '../app/app_scope.dart';
 import '../core/backend/backend_connection_manager.dart';
 import '../features/auth/auth_controller.dart';
+import '../features/auth/account_maintenance_form.dart';
 import '../features/auth/widgets/account_security_dialog.dart';
 import '../features/auth/widgets/github_device_dialog.dart';
 import 'mobile_action_button.dart';
@@ -461,6 +462,16 @@ class _MobileAccountPageState extends State<MobileAccountPage> {
                           ? '创建账号'
                           : '登录')),
           const SizedBox(height: 8),
+          if (!challenge && !_registering)
+            TextButton(
+                key: const ValueKey('mobile-forgot-password'),
+                onPressed: auth.isBusy
+                    ? null
+                    : () => showAccountMaintenanceForm(
+                        context: context,
+                        auth: auth,
+                        mode: AccountMaintenanceMode.resetPassword),
+                child: const Text('忘记密码')),
           if (!challenge && !_registering && policy?.githubLoginEnabled == true)
             OutlinedButton(
                 onPressed: auth.isBusy ? null : _github,

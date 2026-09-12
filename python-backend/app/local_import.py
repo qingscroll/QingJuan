@@ -52,13 +52,14 @@ def inspect_local_document(
     *,
     original_name: str,
     requested_kind: str,
+    text_encoding: str = "auto",
 ) -> LocalImportPlan:
     suffix = Path(original_name).suffix.lower() or source_path.suffix.lower()
     _validate_source_file(source_path, suffix)
     fallback_title = Path(original_name).stem.strip() or "未命名本地作品"
 
     if suffix in {".txt", ".text"}:
-        content = _decode_text(source_path.read_bytes())
+        content = _decode_text(source_path.read_bytes(), encoding=text_encoding)
         chapters = _split_novel_into_chapters(content)
         return LocalImportPlan(
             source_format=suffix.removeprefix(".").upper(),
@@ -110,15 +111,38 @@ def _novel_kind(requested_kind: str) -> str:
     return requested_kind if requested_kind in {"长小说", "轻小说"} else "长小说"
 
 
-def _decode_text(raw_content: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "gb18030", "big5", "shift_jis"):
+def _decode_text(raw_content: bytes, *, encoding: str = "auto") -> str:
+    supported = {"utf-8": "utf-8-sig", "gb18030": "gb18030", "big5": "big5", "shift_jis": "shift_jis"}
+    if encoding != "auto":
+        if encoding not in supported:
+            raise LocalImportError("不支持该文本编码，请选择 UTF-8、GB18030、Big5 或 Shift-JIS")
         try:
-            content = raw_content.decode(encoding)
-            if content.strip():
-                return content.replace("\r\n", "\n").replace("\r", "\n")
+            content = raw_content.decode(supported[encoding])
+        except UnicodeDecodeError as exc:
+            raise LocalImportError("文件与所选文本编码不匹配，请重新选择编码或转换为 UTF-8") from exc
+    elif raw_content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            content = raw_content.decode("utf-16")
+        except UnicodeDecodeError as exc:
+            raise LocalImportError("UTF-16 文本已损坏，请转换为 UTF-8 后重试") from exc
+    else:
+        try:
+            content = raw_content.decode("utf-8-sig")
         except UnicodeDecodeError:
-            continue
-    raise LocalImportError("无法识别文本编码，请将文件转换为 UTF-8 后重试")
+            # Legacy encodings overlap: a successful decode alone cannot select
+            # GB18030 over Big5 or Shift-JIS without silently corrupting text.
+            candidates = set()
+            for codec in ("gb18030", "big5", "shift_jis"):
+                try:
+                    candidates.add(raw_content.decode(codec))
+                except UnicodeDecodeError:
+                    continue
+            if len(candidates) != 1:
+                raise LocalImportError("无法可靠识别文本编码，请选择 GB18030、Big5 或 Shift-JIS，或转换为 UTF-8") from None
+            content = candidates.pop()
+    if not content.strip():
+        raise LocalImportError("文本文件没有可导入的正文")
+    return content.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _split_novel_into_chapters(content: str) -> list[tuple[str, str]]:
@@ -133,6 +157,7 @@ def _split_novel_into_chapters(content: str) -> list[tuple[str, str]]:
         return [("第1章", normalized)]
 
     chapters: list[tuple[str, str]] = []
+    preamble = normalized[:matches[0].start()].strip()
     for index, match in enumerate(matches):
         title = _normalize_chapter_title(match.group("title"), index + 1)
         start = match.end()
@@ -140,7 +165,11 @@ def _split_novel_into_chapters(content: str) -> list[tuple[str, str]]:
         body = normalized[start:end].strip()
         if body:
             chapters.append((title or f"第{index + 1}章", body))
-    return chapters or [("第1章", normalized)]
+    if not chapters:
+        return [("第1章", normalized)]
+    if preamble:
+        chapters.insert(0, ("序章", preamble))
+    return chapters
 
 
 def _normalize_chapter_title(raw_title: str, chapter_number: int) -> str:
@@ -352,11 +381,13 @@ def _write_text_chapters(
     book_dir: Path,
     chapters: tuple[LocalChapter, ...],
 ) -> list[dict[str, object]]:
+    from .storage_quota import quota_write_text
+
     chapter_manifest: list[dict[str, object]] = []
     for index, chapter in enumerate(chapters, start=1):
         safe_title = _sanitize_title(chapter.title)[:80]
         file_name = f"{index:04d}-{safe_title}.txt"
-        (book_dir / file_name).write_text(chapter.content.strip(), encoding="utf-8")
+        quota_write_text(book_dir / file_name, chapter.content.strip())
         chapter_manifest.append(_chapter_manifest(index, chapter.title, file_name))
     return chapter_manifest
 
@@ -366,6 +397,10 @@ def _render_pdf_manga(
     book_dir: Path,
     plan: LocalImportPlan,
 ) -> list[dict[str, object]]:
+    from io import BytesIO
+
+    from .storage_quota import quota_write_bytes, quota_write_text
+
     try:
         import pypdfium2 as pdfium
 
@@ -389,7 +424,9 @@ def _render_pdf_manga(
                     if image.mode not in {"RGB", "RGBA"}:
                         image = image.convert("RGB")
                     file_name = f"0001-{page_index + 1:04d}.png"
-                    image.save(images_dir / file_name, format="PNG", optimize=True)
+                    with BytesIO() as encoded:
+                        image.save(encoded, format="PNG", optimize=True)
+                        quota_write_bytes(images_dir / file_name, encoded.getvalue())
                 finally:
                     image.close()
                     if source_image is not image:
@@ -406,9 +443,7 @@ def _render_pdf_manga(
 
     chapter_title = plan.title or "PDF 漫画"
     file_name = f"0001-{_sanitize_title(chapter_title)}.txt"
-    (book_dir / file_name).write_text(
-        f"{chapter_title}\n\nPDF 漫画，共 {len(image_files)} 页。", encoding="utf-8"
-    )
+    quota_write_text(book_dir / file_name, f"{chapter_title}\n\nPDF 漫画，共 {len(image_files)} 页。")
     manifest = _chapter_manifest(1, chapter_title, file_name)
     manifest.update(
         {

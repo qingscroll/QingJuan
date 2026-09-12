@@ -31,6 +31,47 @@ void main() {
   setUpAll(loadMobileCaptureFonts);
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
+  testWidgets(
+      'mobile shelf has account metadata filters and a reachable edit entry',
+      (tester) async {
+    _setViewport(tester, const Size(390, 844));
+    final fixture = await _Fixture.create((_) async => _json({
+          'bookId': 'metadata',
+          'title': '可编辑作品',
+          'author': '作者',
+          'synopsis': '',
+          'revision': 0
+        }));
+    addTearDown(fixture.dispose);
+    fixture.backend.capabilities = {'libraryMetadata': true};
+    fixture.library.books = [
+      Book.fromJson({
+        'id': 'metadata',
+        'title': '可编辑作品',
+        'pinned': true,
+        'groupName': '收藏'
+      })
+    ];
+    fixture.library.state = LoadState.ready;
+    await tester
+        .pumpWidget(fixture.app(const MobileLibraryPage(), textScale: 2));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('mobile-library-organize')));
+    await tester.pumpAndSettle();
+    expect(find.text('全部分组'), findsOneWidget);
+    expect(find.text('全部阅读状态'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    await tester
+        .longPress(find.byKey(const ValueKey('mobile-library-book-metadata')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('编辑信息'));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑作品信息'), findsOneWidget);
+    expect(find.byKey(const ValueKey('metadata-title')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final dedicatedEntry in <bool>[false, true]) {
     testWidgets(
         'mobile album number import works with dedicated entry $dedicatedEntry',
@@ -137,7 +178,7 @@ void main() {
     addTearDown(fixture.dispose);
     await tester.pumpWidget(fixture.app(const MobileSearchPage()));
     await tester.pumpAndSettle();
-    expect(find.text('发现'), findsOneWidget);
+    expect(find.text('搜索'), findsWidgets);
 
     await tester.tap(find.byKey(const ValueKey('mobile-store-search-submit')));
     await tester.pumpAndSettle();

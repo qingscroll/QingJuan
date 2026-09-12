@@ -13,6 +13,8 @@ from urllib.parse import SplitResult, urlsplit
 import httpcore
 import httpx
 
+from .public_dns import PublicDnsResolutionError, is_fake_ip_address, resolve_public_dns_addresses
+
 MODEL_ENDPOINT_ALLOWLIST_ENV = "QINGJUAN_MODEL_ENDPOINT_ALLOWLIST"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -36,6 +38,16 @@ _METADATA_NETWORKS = (
 
 class ModelEndpointSecurityError(ValueError):
     """The configured model endpoint violates the outbound network policy."""
+
+
+class ModelEndpointDnsError(ModelEndpointSecurityError):
+    """A proxy's synthetic DNS answer could not be resolved to a public IP."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "检测到代理 Fake-IP DNS，但无法解析模型服务的真实公网地址；"
+            "请检查网络，或将代理 DNS 改为真实 IP 模式（redir-host）"
+        )
 
 
 def model_endpoint_origin(value: str) -> str:
@@ -80,7 +92,7 @@ async def validate_model_endpoint_url(
     origin = validate_model_endpoint_url_policy(value)
     parsed = _parse_model_endpoint_url(value)
     allowlist = configured_model_endpoint_allowlist()
-    addresses = await (resolver or resolve_model_endpoint_addresses)(
+    addresses = await (resolver or resolve_model_service_addresses)(
         _canonical_hostname(parsed.hostname or ""),
         _parsed_port(parsed),
     )
@@ -138,6 +150,30 @@ async def resolve_model_endpoint_addresses(host: str, port: int) -> tuple[IPAddr
     if not addresses:
         raise ModelEndpointSecurityError("模型服务地址无法解析")
     return tuple(addresses)
+
+
+async def resolve_model_service_addresses(host: str, port: int) -> tuple[IPAddress, ...]:
+    """Recover public model DNS behind a TUN proxy without authorizing private IPs."""
+
+    normalized_host = _canonical_hostname(host)
+    addresses = await resolve_model_endpoint_addresses(normalized_host, port)
+    # An explicit IP is an endpoint, never a domain to look up through public DNS.
+    if _parse_ip_address(normalized_host) is not None or not any(
+        is_fake_ip_address(address) for address in addresses
+    ):
+        return addresses
+    remaining = tuple(address for address in addresses if not is_fake_ip_address(address))
+    if remaining:
+        _validate_resolved_addresses(remaining, allow_private=False)
+    try:
+        resolved = await resolve_public_dns_addresses(
+            normalized_host, transport_factory=ValidatedModelHTTPTransport
+        )
+    except PublicDnsResolutionError as error:
+        raise ModelEndpointDnsError() from error
+    # All recovered A/AAAA answers must be public, even with an operator allowlist.
+    _validate_resolved_addresses(resolved, allow_private=False)
+    return resolved
 
 
 class ValidatedModelNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -250,6 +286,10 @@ def create_model_http_client(
 
     async def validate_request(request: httpx.Request) -> None:
         validate_model_endpoint_url_policy(str(request.url))
+        if request.method == "POST":
+            from .resource_limits import reserve_current_model_request
+
+            reserve_current_model_request()
 
     return httpx.AsyncClient(
         timeout=timeout,
@@ -257,7 +297,7 @@ def create_model_http_client(
         trust_env=False,
         transport=ValidatedModelHTTPTransport(
             allowlist=allowlist,
-            resolver=resolver,
+            resolver=resolver or resolve_model_service_addresses,
         ),
         event_hooks={"request": [validate_request]},
     )

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../core/api/api_client.dart';
+import '../../core/api/api_exception.dart';
 import '../../core/backend/user_session_store.dart';
 import '../../core/models/user_account.dart';
 
@@ -53,6 +54,7 @@ class AuthController extends ChangeNotifier {
   int _githubLoginGeneration = 0;
   int _accountSecurityOperation = 0;
   bool _disposed = false;
+  bool _canRestoreOfflineSession = false;
 
   RegistrationPolicy? registrationPolicy;
   bool registrationPolicyLoading = false;
@@ -69,6 +71,8 @@ class AuthController extends ChangeNotifier {
   String? accountSecurityError;
 
   String get userToken => _userToken;
+  bool get canRestoreOfflineSession => _canRestoreOfflineSession;
+  int get contextRevision => _generation;
   bool get multiUserEnabled => _multiUser;
   bool get isAuthenticated => status == UserAuthStatus.authenticated;
   bool get isLocalAdministrator => status == UserAuthStatus.localAdministrator;
@@ -94,6 +98,7 @@ class AuthController extends ChangeNotifier {
     user = null;
     error = null;
     _userToken = '';
+    _canRestoreOfflineSession = false;
     _resetRegistrationState();
     _resetSensitiveAuthState();
 
@@ -115,6 +120,7 @@ class AuthController extends ChangeNotifier {
     }
 
     _userToken = token.trim();
+    _canRestoreOfflineSession = true;
     try {
       final restoredUser = await api.fetchUserSession();
       if (generation != _generation || _disposed) return;
@@ -126,7 +132,11 @@ class AuthController extends ChangeNotifier {
       user = null;
       status = UserAuthStatus.anonymous;
       error = '$exception';
-      await _deleteStoredToken();
+      if (exception is ApiException &&
+          (exception.statusCode == 401 || exception.statusCode == 403)) {
+        _canRestoreOfflineSession = false;
+        await _deleteStoredToken();
+      }
     }
     _notify();
   }
@@ -454,8 +464,16 @@ class AuthController extends ChangeNotifier {
   Future<void> logout() async {
     if (!_multiUser) return;
     final generation = ++_generation;
+    final request =
+        _userToken.isNotEmpty ? api.logoutUser() : Future<void>.value();
+    _canRestoreOfflineSession = false;
+    _userToken = '';
+    user = null;
+    status = UserAuthStatus.anonymous;
+    _resetSensitiveAuthState();
+    _notify();
     try {
-      if (_userToken.isNotEmpty) await api.logoutUser();
+      await request;
     } finally {
       if (generation == _generation && !_disposed) {
         _userToken = '';
@@ -471,6 +489,7 @@ class AuthController extends ChangeNotifier {
 
   Future<void> clearForBackendSwitch() async {
     ++_generation;
+    _canRestoreOfflineSession = false;
     _multiUser = false;
     _userToken = '';
     user = null;
@@ -478,13 +497,14 @@ class AuthController extends ChangeNotifier {
     _resetRegistrationState();
     _resetSensitiveAuthState();
     status = UserAuthStatus.inactive;
-    await _deleteStoredToken();
     _notify();
+    await _deleteStoredToken();
   }
 
   void invalidateSession() {
     if (!_multiUser || _userToken.isEmpty) return;
     ++_generation;
+    _canRestoreOfflineSession = false;
     _userToken = '';
     user = null;
     error = '登录状态已失效，请重新登录';
@@ -507,6 +527,7 @@ class AuthController extends ChangeNotifier {
       return;
     }
     _userToken = session.token;
+    _canRestoreOfflineSession = true;
     user = session.user;
     error = null;
     loginTwoFactorChallenge = null;
@@ -600,6 +621,7 @@ class AuthController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _canRestoreOfflineSession = false;
     _resetSensitiveAuthState();
     _userToken = '';
     user = null;

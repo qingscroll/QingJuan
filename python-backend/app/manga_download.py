@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC
@@ -48,6 +47,8 @@ def is_valid_image_file(path: Path) -> bool:
 
 
 def write_image_atomic(target_path: Path, content: bytes) -> None:
+    from .storage_quota import quota_replace
+
     if not is_valid_image_bytes(content):
         raise InvalidMangaImageError("响应内容不是有效图片")
 
@@ -57,7 +58,7 @@ def write_image_atomic(target_path: Path, content: bytes) -> None:
         temporary_path.write_bytes(content)
         if not is_valid_image_file(temporary_path):
             raise InvalidMangaImageError("临时文件不是有效图片")
-        os.replace(temporary_path, target_path)
+        quota_replace(temporary_path, target_path)
     finally:
         temporary_path.unlink(missing_ok=True)
 

@@ -8,6 +8,7 @@ import '../../shared/motion.dart';
 import '../../shared/page_frame.dart';
 import '../../shared/responsive.dart';
 import '../detail/book_detail_page.dart';
+import '../preview/book_preview_page.dart';
 import '../sources/sources_controller.dart';
 
 class SearchPage extends StatefulWidget {
@@ -131,6 +132,22 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _search(SourcesController sources) =>
       sources.search(_controller.text, engine: _engine);
 
+  Future<void> _preview(SourceSearchResult result) => showBookPreview(
+        context,
+        payload: {
+          ...result.toImportPayload(),
+          'author': result.author,
+          if (usesMobileUi(context) &&
+              const <String>{
+                'source-builtin-quark',
+                'source-builtin-fanqie',
+                'source-builtin-qidian',
+                'source-builtin-biqvge',
+              }.contains(result.sourceId))
+            'downloadMode': 'on_demand',
+        },
+      );
+
   void _setEngine(
     SourcesController sources,
     BookSearchEngine engine,
@@ -212,7 +229,7 @@ class _SearchPageState extends State<SearchPage> {
         if (!usesMobileUi(context)) return _buildDesktopPage(sources);
         return PageFrame(
           title: '搜索',
-          subtitle: '选择夸克、番茄、起点、笔趣阁或已启用书源发现作品，找到后直接加入书架。',
+          subtitle: '搜索作品，先查看目录和正文，再决定加入书架。',
           compactHeader: ReadingPageHeader(
             title: '搜索',
             subtitle: '当前使用$_engineName搜索',
@@ -296,6 +313,7 @@ class _SearchPageState extends State<SearchPage> {
                 ...sources.results.map(
                   (result) => _SearchResultTile(
                     result: result,
+                    onPreview: () => _preview(result),
                     importing: _importingSourceUrl == result.sourceUrl,
                     onImport: _importingSourceUrl == null
                         ? () => _import(result)
@@ -314,7 +332,7 @@ class _SearchPageState extends State<SearchPage> {
     return PageFrame(
       key: const ValueKey('desktop-search-page'),
       title: '全网搜索',
-      subtitle: '选择夸克、番茄、起点、笔趣阁或已启用书源查找作品，并直接加入书架。',
+      subtitle: '搜索作品，先查看目录和正文，再决定加入书架。',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -372,6 +390,7 @@ class _SearchPageState extends State<SearchPage> {
             ...sources.results.map(
               (result) => _SearchResultTile(
                 result: result,
+                onPreview: () => _preview(result),
                 importing: false,
                 onImport: () => _import(result),
               ),
@@ -387,13 +406,22 @@ class _SearchResultTile extends StatelessWidget {
     required this.result,
     required this.importing,
     required this.onImport,
+    required this.onPreview,
   });
 
   final SourceSearchResult result;
   final bool importing;
   final VoidCallback? onImport;
+  final VoidCallback onPreview;
 
-  Widget _importButton({required bool compact}) => FilledButton(
+  Widget _previewTarget(Widget child) => HoverButton(
+        onPressed: onPreview,
+        cursor: SystemMouseCursors.click,
+        builder: (context, states) =>
+            FocusBorder(focused: states.isFocused, child: child),
+      );
+
+  Widget _importButton({required bool compact}) => Button(
         key: ValueKey('search-import-${result.sourceUrl}'),
         onPressed: onImport,
         child: importing
@@ -412,6 +440,18 @@ class _SearchResultTile extends StatelessWidget {
             : Text(compact ? '加入' : '加入书架'),
       );
 
+  Widget _actions({required bool compact}) => Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          FilledButton(
+              key: ValueKey('search-preview-${result.sourceUrl}'),
+              onPressed: onPreview,
+              child: const Text('查看内容')),
+          _importButton(compact: compact),
+        ],
+      );
+
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
@@ -421,8 +461,9 @@ class _SearchResultTile extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 8),
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final narrow = constraints.maxWidth < 560;
-            final details = Row(
+            final narrow = constraints.maxWidth < 700 ||
+                MediaQuery.textScalerOf(context).scale(1) > 1.3;
+            final details = _previewTarget(Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
                 const AccentIcon(FluentIcons.book_answers),
@@ -462,14 +503,14 @@ class _SearchResultTile extends StatelessWidget {
                   ),
                 ),
               ],
-            );
+            ));
             if (narrow) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   details,
                   const SizedBox(height: 14),
-                  _importButton(compact: false),
+                  _actions(compact: false),
                 ],
               );
             }
@@ -478,7 +519,7 @@ class _SearchResultTile extends StatelessWidget {
               children: <Widget>[
                 Expanded(child: details),
                 const SizedBox(width: 20),
-                _importButton(compact: false),
+                _actions(compact: false),
               ],
             );
           },
@@ -492,59 +533,58 @@ class _SearchResultTile extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          SizedBox(
+          _previewTarget(SizedBox(
             width: compact ? 70 : 62,
             height: compact ? 98 : 88,
             child: _SearchCover(result: result),
-          ),
+          )),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(
-                  result.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.typography.bodyLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  result.author.isEmpty ? result.sourceName : result.author,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.typography.caption?.copyWith(
-                    color: theme.resources.textFillColorSecondary,
-                  ),
-                ),
-                if (result.synopsis.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Text(
-                    result.synopsis,
-                    maxLines: compact ? 2 : 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.typography.caption?.copyWith(height: 1.4),
-                  ),
-                ],
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        children: <Widget>[
-                          StatusPill(result.sourceName, accented: true),
-                          StatusPill(result.kind),
-                        ],
+                _previewTarget(Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      result.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.typography.bodyLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    _importButton(compact: true),
+                    const SizedBox(height: 6),
+                    Text(
+                      result.author.isEmpty ? result.sourceName : result.author,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.typography.caption?.copyWith(
+                        color: theme.resources.textFillColorSecondary,
+                      ),
+                    ),
+                    if (result.synopsis.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 6),
+                      Text(
+                        result.synopsis,
+                        maxLines: compact ? 2 : 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.typography.caption?.copyWith(height: 1.4),
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: <Widget>[
+                        StatusPill(result.sourceName, accented: true),
+                        StatusPill(result.kind),
+                      ],
+                    ),
                   ],
-                ),
+                )),
+                const SizedBox(height: 8),
+                _actions(compact: true),
               ],
             ),
           ),

@@ -8,7 +8,8 @@
 1. Windows 本机模式：打开 **插件配置 → 导入插件**；Linux：使用管理员登录 **`/admin/#plugins` → 导入插件**。
 2. 选择插件包，核对名称、ID、作者声明、版本及站点。确认信任来源后安装。读取这些信息时后端只校验清单和 Python 语法，不执行插件代码。
 3. 安装成功后立即参与链接匹配；支持搜索的插件可在 Windows / Android 搜索页的 **导入插件** 中使用。远程客户端也能使用已安装插件，但安装和卸载由服务器管理网页负责。
-4. 更新时导入同 ID、更高版本的包，界面展示版本变化。卸载入口位于插件详情或管理表格，内置模块只能停用。
+4. 更新时导入同 ID、更高版本的包，界面展示版本变化。成功更新会保存上一版本，可在 **插件维护** 中运行自检并显式回退。
+5. 自检检查包与接口兼容性，不访问站点；解析效果仍须通过实际导入或固定上游 Fixture 验证。卸载入口位于插件详情或管理表格，内置模块只能停用。
 
 可立即使用的离线示例位于 `examples/plugins/demo-novel/`。在仓库根目录执行：
 
@@ -24,7 +25,7 @@ python tool/package_site_plugin.py examples/plugins/demo-novel
 **Python 插件在后端进程内运行，不是沙箱。** 插件拥有后端进程的文件、网络及环境访问权限；仅应安装来自可信来源且经过审查的代码。
 作者字段属于自我声明，不是签名认证。SHA-256 用于确认安装记录完整性，不证明作者身份。
 
-- 安装、检查安装包、更新、卸载要求管理员网页会话及 CSRF，或受信任 Windows 本机回环请求及 `X-QingJuan-Local-Request: 1`。
+- 安装、检查安装包、更新、维护自检（包括 GET）、回退和卸载要求管理员网页会话及 CSRF，或受信任 Windows 本机回环请求及 `X-QingJuan-Local-Request: 1`。
   普通连接 Token、远程客户端用户会话，即使用户角色为管理员，也不能上传执行代码。
 - 清单/启停沿用原有用户授权。插件代码不接收青卷用户 Token、管理员 Cookie、站点账号会话、模型密钥或数据库对象。
 - 插件应只使用 `context` 发起网络请求。其请求及重定向限制在 `domains + networkDomains`，并复用青卷公网 IP 校验和 DNS 固定机制；
@@ -133,7 +134,8 @@ async def chapter(url, context):
   相对 URL 以当前输入作品/章节 URL 为基准，搜索则以 `https://domains[0]/` 为基准。
 - 解析不到正文、遇到验证页、结构变更或无可用图片时应抛异常；不得把错误、简介或反爬页面伪装成正文，不得虚构上游内容或授权状态。
   宿主向用户返回不含异常原文的中文错误，既有章节仍按原有原子写入流程保留。
-- 每次调用可以并发进行；避免全局可变状态，不缓存用户私有数据。更新只影响后续解析调用，已在执行的调用持有原处理器，长任务可能在后续章节使用新版本。
+- 每次调用可以并发进行；避免全局可变状态，不缓存用户私有数据。调用执行期间，以及有运行中任务或链接导入使用该插件的站点时，更新、回退与卸载返回 `409`。
+  请先暂停任务并等待当前请求结束，再维护插件；排队或已暂停任务恢复后使用当前版本。被替换的旧处理器不接受新的调用。
 
 ## 5. Context SDK
 
@@ -163,7 +165,7 @@ python tool/package_site_plugin.py examples/plugins/html-novel --output dist/plu
 
 ```powershell
 Set-Location python-backend
-python -m pytest tests/test_plugin_packages.py tests/test_plugin_runtime.py
+python -m pytest tests/test_plugin_packages.py tests/test_plugin_runtime.py tests/test_plugin_maintenance.py
 ```
 
 打包工具仅收集上述两个文件，固定文件顺序与 ZIP 时间戳，相同源码生成相同内容。`--check` 只校验清单、包结构和语法，
@@ -172,12 +174,18 @@ python -m pytest tests/test_plugin_packages.py tests/test_plugin_runtime.py
 
 ## 7. 生命周期与持久化
 
-- 安装包、清单、摘要保存在当前后端 SQLite 的 `site_plugin_packages`；开关保存在既有 `site_plugin_settings`。
-  两者同一事务保存，升级后端保留，备份数据库即可同时备份插件。切换后端不会同步插件。
+- 安装包、清单、摘要保存在当前后端 SQLite 的 `site_plugin_packages`；开关保存在既有 `site_plugin_settings`；上一版本保存在 `site_plugin_package_history`。
+  三者在同一数据库中，升级后端保留，完整备份包含这些记录。切换后端不会同步插件。
 - 更新必须显式提交 `replace=true` 且版本严格提高；加载失败的记录允许同版本修复。版本/ID/域名冲突、语法、签名、模块加载或保存失败均不会替换旧包和旧运行时。
   Python 顶层副作用无法回滚，因此插件必须遵守无副作用要求。
+- 每个插件只保留一个上一版本，包括包、清单及摘要；成功更新才覆盖此记录。回退请求必须携带自检返回的当前版本及包摘要，后端再次校验以拒绝过期确认。
+  只有显式回退允许降低版本；回退仍检查历史包、协议、内置 ID、域名冲突和运行接口。回退成功后，原当前版本成为上一版本，因此可以再次切回。
+  历史包损坏或当前没有上一版本时拒绝回退。更新、回退及卸载在 SQLite 事务中切换运行注册表，发布或提交失败时恢复旧注册表；不提前释放旧模块。
+- 维护自检校验当前包 SHA-256、保存清单一致性、ZIP 结构、Python 语法、协议版本，以及已加载模块的异步函数和参数签名，返回当前 Python/协议版本与兼容提示。
+  自检不重新导入插件、不执行处理器、不请求第三方站点，也不证明插件可信或站点可用。上一版本仅做静态检查，回退时还需加载验证。
+  不提供自动下载更新、任意更新 URL、作者身份认证或可信自动升级。
 - 服务启动逐个校验摘要并恢复插件。一项加载失败不会阻止其他模块和后端启动；列表显示 `loadError`，相关操作拒绝执行，可更新修复或卸载。
-- 卸载删除安装包和该插件开关，不删除书籍、缓存正文、图片或阅读进度。未缓存章节需要可用解析器；链接重新按当前注册表匹配。
+- 卸载删除当前安装包、上一版本和该插件开关，不删除书籍、缓存正文、图片或阅读进度。未缓存章节需要可用解析器；链接重新按当前注册表匹配。
 - 安装热生效针对后端单进程模型；Linux 继续使用单 worker。不能把该实现部署为多个共享数据库但互不通知的 worker。
 
 ## 8. HTTP 契约
@@ -190,6 +198,9 @@ python -m pytest tests/test_plugin_packages.py tests/test_plugin_runtime.py
 | `PUT /plugins/{id}` | `{"enabled":false}` | 保存启停；管理员用户或管理网页 |
 | `POST /plugins/inspect` | multipart `file` | `plugin` 元数据、`installedVersion`、`sha256`；管理网页或受信本机 |
 | `POST /plugins/import` | multipart `file`、可选 `replace` | `201` + 插件元数据；管理网页或受信本机 |
+| `GET /plugins/{id}/maintenance` | 无 | 当前维护报告；管理网页（含 CSRF）或受信本机 |
+| `POST /plugins/{id}/check` | 无 | 显式运行自检，返回维护报告；管理网页或受信本机 |
+| `POST /plugins/{id}/rollback` | `{"expectedVersion":"1.1.0","expectedSha256":"当前包的64位小写十六进制摘要"}` | 回退后的插件元数据；管理网页或受信本机 |
 | `DELETE /plugins/{id}` | 无 | `204`；管理网页或受信本机 |
 | `POST /plugins/search` | `{"keyword":"青卷","limit":20,"sourceIds":[]}` | 聚合外部插件搜索结果；有效用户 |
 
@@ -199,4 +210,13 @@ python -m pytest tests/test_plugin_packages.py tests/test_plugin_runtime.py
 
 新增公开元数据：`origin` 为 `builtin` / `installed`，`author` 为作者声明，`apiVersion` 为插件协议版本，`loadError` 可空。
 不返回源代码、包内容、服务器路径或运行时对象。错误使用中文 `detail`：无管理会话 `401`，缺少 CSRF `403`，不存在 `404`，
-重复安装/版本/域名/内置 ID 冲突 `409`，包过大 `413`，格式/加载失败 `422`，存储失败 `503`。
+重复安装/版本/域名/内置 ID 冲突、活跃调用或任务、过期回退确认 `409`，包过大 `413`，格式/加载失败 `422`，存储失败 `503`。
+
+维护报告包含 `pluginId`、`version`、`sha256`、`apiVersion`、`supportedApiVersion`、`pythonVersion`、`enabled`、`compatible`、`activeCalls`、
+`rollbackVersion`、`rollbackSha256`、`rollbackAvailable`、`checkedAt` 及 `checks`（每项含 `code`、`label`、`status`、`message`）。
+`status` 为 `passed`、`failed` 或 `warning`。`activeCalls` 是检查时的在途处理器数量，操作提交时仍会检查任务和新请求，不能把零值当作回退预约。
+`rollbackAvailable` 仅表示存在通过静态校验的历史包；回退时可能因为任务繁忙、域名冲突或运行接口加载失败而拒绝。维护与回退响应使用 `Cache-Control: no-store`。
+
+## 9. COMICORES 当前边界
+
+COMICORES 仍只支持搜索和作品元数据，`chapter_handler=None`，不能把空目录或文章图片列表标成可下载章节。2026-09-11 公开抽查的 [塔之迷宫](https://www.comicores.cc/tower-dungeon/.html)、[屠龙者布伦希尔德](https://www.comicores.cc/ryuugoroshi-no-brunhild/.html)只提供作品信息并提示登录后查看；[CLAYMORE](https://www.comicores.cc/claymore/.html)的文章图片缺少可验证卷章标识，抽查图片直链返回 403。后续需要可验证的公开章节或授权样例后再实现解析与下载，不绕过访问限制。

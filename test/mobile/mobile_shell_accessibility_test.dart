@@ -183,7 +183,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final node = tester.getSemantics(find.bySemanticsLabel('发现'));
+      final node = tester.getSemantics(find.bySemanticsLabel('搜索'));
       expect(node.getSemanticsData().hasAction(ui.SemanticsAction.tap), isTrue);
       tester.binding.performSemanticsAction(
         ui.SemanticsActionEvent(

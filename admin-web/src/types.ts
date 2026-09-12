@@ -279,7 +279,7 @@ export type Book = {
   lastReadAt: string | null;
 };
 
-export type TaskStatus = "queued" | "running" | "completed" | "failed";
+export type TaskStatus = "queued" | "running" | "pause_requested" | "paused" | "cancel_requested" | "cancelled" | "completed" | "failed";
 
 export type Task = {
   id: string;

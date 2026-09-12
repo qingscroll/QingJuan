@@ -17,6 +17,7 @@ enum AppSection {
   translator,
   settings,
   about,
+  discovery,
 }
 
 enum AppThemeMode { system, light, dark }

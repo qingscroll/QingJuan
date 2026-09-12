@@ -19,6 +19,7 @@ import type { ColumnsType } from "antd/es/table";
 
 import * as api from "../api";
 import { PluginPackageImport } from "./PluginPackageImport";
+import { PluginMaintenance } from "./PluginMaintenance";
 import type {
   SitePlugin,
   SitePluginBookshelfImportJob,
@@ -32,6 +33,7 @@ type PluginsPageProps = {
   plugins: SitePlugin[];
   onSetEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
   onDataChanged?: () => Promise<void>;
+  supportsMaintenance?: boolean;
 };
 
 const categoryLabel: Record<SitePlugin["category"], string> = {
@@ -52,7 +54,7 @@ const capabilityLabel: Record<string, string> = {
 
 const terminalLoginStatuses = new Set(["success", "cancelled", "expired", "error"]);
 
-export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPageProps) {
+export function PluginsPage({ plugins, onSetEnabled, onDataChanged, supportsMaintenance = false }: PluginsPageProps) {
   const { message, modal } = App.useApp();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PluginFilter>("all");
@@ -68,10 +70,12 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
   const [importPlugin, setImportPlugin] = useState<SitePlugin | null>(null);
   const [importJob, setImportJob] = useState<SitePluginBookshelfImportJob | null>(null);
   const [importError, setImportError] = useState("");
-  const loginPolling = useRef(false);
+  const loginRequest = useRef(0);
   const importPolling = useRef(false);
   const onDataChangedRef = useRef(onDataChanged);
   onDataChangedRef.current = onDataChanged;
+
+  useEffect(() => () => { loginRequest.current++; }, []);
 
   useEffect(() => {
     if (
@@ -82,19 +86,23 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
     ) {
       return undefined;
     }
+    const request = loginRequest.current;
     let disposed = false;
+    let polling = false;
     const poll = async () => {
-      if (loginPolling.current) return;
-      loginPolling.current = true;
+      if (disposed || request !== loginRequest.current || polling) return;
+      polling = true;
       try {
         const result = await api.pollSitePluginLogin(loginPlugin.id, loginQr.flowId);
-        if (disposed) return;
+        if (disposed || request !== loginRequest.current) return;
         setLoginStatus(result);
         if (result.loggedIn) await onDataChangedRef.current?.();
       } catch (error) {
-        if (!disposed) setLoginError(error instanceof Error ? error.message : "登录状态读取失败");
+        if (!disposed && request === loginRequest.current) {
+          setLoginError(error instanceof Error ? error.message : "登录状态读取失败");
+        }
       } finally {
-        loginPolling.current = false;
+        polling = false;
       }
     };
     const timer = window.setInterval(() => void poll(), 2000);
@@ -175,15 +183,27 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
   };
 
   const openLogin = async (plugin: SitePlugin) => {
+    const request = ++loginRequest.current;
     setLoginPlugin(plugin);
     setLoginQr(null);
     setLoginStatus(null);
     setLoginError("");
     try {
-      setLoginQr(await api.startSitePluginLogin(plugin.id));
+      const result = await api.startSitePluginLogin(plugin.id);
+      if (request === loginRequest.current) setLoginQr(result);
     } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "登录二维码获取失败");
+      if (request === loginRequest.current) {
+        setLoginError(error instanceof Error ? error.message : "登录二维码获取失败");
+      }
     }
+  };
+
+  const closeLogin = () => {
+    loginRequest.current++;
+    setLoginPlugin(null);
+    setLoginQr(null);
+    setLoginStatus(null);
+    setLoginError("");
   };
 
   const logoutAccount = async (plugin: SitePlugin) => {
@@ -239,6 +259,14 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
       setImportJob(await api.startSitePluginBookshelfImport(plugin.id));
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "账号书架导入失败");
+    }
+  };
+
+  const retryBookshelfImport = () => {
+    if (importJob) {
+      setImportError("");
+    } else if (importPlugin) {
+      void openBookshelfImport(importPlugin);
     }
   };
 
@@ -355,8 +383,10 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
     {
       title: "安装管理",
       key: "package-actions",
-      width: 100,
+      width: 160,
       render: (_, plugin) => plugin.origin === "installed" ? (
+        <Space wrap>
+        {supportsMaintenance && <PluginMaintenance plugin={plugin} onChanged={onDataChanged} />}
         <Button danger size="small" aria-label={`卸载${plugin.name}`} disabled={Boolean(updating)} onClick={() => modal.confirm({
           title: `卸载${plugin.name}？`,
           content: "卸载后该站点无法继续通过此插件解析或下载。已导入书籍和缓存章节会保留。",
@@ -375,6 +405,7 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
             await onDataChangedRef.current?.();
           },
         })}>卸载</Button>
+        </Space>
       ) : <Typography.Text type="secondary">随程序更新</Typography.Text>,
     },
     {
@@ -444,14 +475,14 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
       <Modal
         open={Boolean(loginPlugin)}
         title={`${loginPlugin?.name ?? "站点"}扫码登录`}
-        onCancel={() => setLoginPlugin(null)}
+        onCancel={closeLogin}
         footer={[
           loginError || (loginStatus && ["cancelled", "expired", "error"].includes(loginStatus.status)) ? (
             <Button key="retry" onClick={() => loginPlugin && void openLogin(loginPlugin)}>
               重新获取
             </Button>
           ) : null,
-          <Button key="close" type="primary" onClick={() => setLoginPlugin(null)}>
+          <Button key="close" type="primary" onClick={closeLogin}>
             {loginStatus?.status === "success" ? "完成" : "关闭"}
           </Button>,
         ]}
@@ -525,7 +556,7 @@ export function PluginsPage({ plugins, onSetEnabled, onDataChanged }: PluginsPag
         width={680}
         footer={[
           importError ? (
-            <Button key="retry" onClick={() => importPlugin && void openBookshelfImport(importPlugin)}>
+            <Button key="retry" onClick={retryBookshelfImport}>
               重试
             </Button>
           ) : null,

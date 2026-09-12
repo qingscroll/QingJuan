@@ -18,6 +18,8 @@ import 'package:qingjuan/features/auth/auth_controller.dart';
 import 'package:qingjuan/features/library/library_controller.dart';
 import 'package:qingjuan/features/settings/settings_controller.dart';
 import 'package:qingjuan/features/settings/settings_page.dart';
+import 'package:qingjuan/features/settings/widgets/desktop_settings_workspace.dart';
+import '../../helpers/settings_navigation.dart';
 import 'package:qingjuan/features/sources/sources_controller.dart';
 import 'package:qingjuan/features/tasks/tasks_controller.dart';
 import 'package:qingjuan/shared/responsive.dart';
@@ -83,11 +85,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await selectSettingsCategory(tester, SettingsCategory.appearance);
     expect(find.textContaining('Windows的浅色与深色设置'), findsOneWidget);
     expect(find.byIcon(FluentIcons.system), findsOneWidget);
     expect(find.byIcon(FluentIcons.brightness), findsOneWidget);
     expect(find.byIcon(FluentIcons.clear_night), findsOneWidget);
-    expect(find.byIcon(FluentIcons.cell_phone), findsOneWidget);
     final systemIcon = tester.widget<Icon>(
       find.descendant(
         of: find.byKey(const ValueKey('theme-mode-system')),
@@ -96,6 +98,7 @@ void main() {
     );
     expect(systemIcon.semanticLabel, '跟随系统外观');
     expect(find.text('已发现 1 个系统声音。选择会立即保存，并用于之后打开的听书页面。'), findsOneWidget);
+    await selectSettingsCategory(tester, SettingsCategory.translation);
     expect(find.text('由 Linux 后端管理界面统一配置'), findsOneWidget);
     expect(find.text('等待服务端模型自检'), findsOneWidget);
     expect(find.text('重新检测模型'), findsOneWidget);
@@ -105,6 +108,7 @@ void main() {
     expect(find.text('启用当前提供商'), findsNothing);
     expect(find.text('newapi'), findsNothing);
     expect(find.text('anthropic'), findsNothing);
+    await selectSettingsCategory(tester, SettingsCategory.appearance);
 
     await tester.ensureVisible(find.byType(ComboBox<String>));
     await tester.pumpAndSettle();
@@ -187,6 +191,7 @@ void main() {
     expect(
         find.byKey(const ValueKey('open-local-model-settings')), findsNothing);
     expect(find.textContaining('/admin/'), findsNothing);
+    await selectSettingsCategory(tester, SettingsCategory.translation);
     expect(find.text('模型配置保存在本机后端'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('translation-model-enabled')),
@@ -205,6 +210,7 @@ void main() {
       findsOneWidget,
     );
 
+    await selectSettingsCategory(tester, SettingsCategory.connection);
     final modeSelector = find.byType(ComboBox<BackendConnectionMode>);
     await tester.ensureVisible(modeSelector);
     await tester.pumpAndSettle();
@@ -355,6 +361,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await selectSettingsCategory(tester, SettingsCategory.translation);
     await tester.enterText(
       find.byKey(const ValueKey('translation-model-api-key')),
       'local-secret',

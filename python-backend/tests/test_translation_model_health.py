@@ -197,6 +197,42 @@ def test_model_check_snapshot_never_probes_and_hides_uncached_provider() -> None
     assert "models.example.test" not in result.model_dump_json()
 
 
+@pytest.mark.asyncio
+async def test_passive_model_status_retains_last_check_after_probe_cache_expires(monkeypatch):
+    from app import translation_model_health as health
+
+    reset_translation_model_check_cache()
+    clock = [100.0]
+    calls = []
+    monkeypatch.setattr(health.time, "monotonic", lambda: clock[0])
+
+    async def probe(settings, **kwargs):
+        calls.append(settings)
+        return TranslationModelCheckResponse(
+            enabled=True, configured=True, available=len(calls) == 1,
+            status="ready" if len(calls) == 1 else "failed", model="translation-model",
+            supportsVision=False, checkedAt="2030-01-01T00:00:00Z", message="last probe result",
+        )
+
+    monkeypatch.setattr(health, "probe_translation_model", probe)
+    try:
+        await check_translation_model(_settings(), force=True)
+        for seconds in (59, 61, 3600):
+            clock[0] = 100 + seconds
+            snapshot = get_translation_model_check_snapshot(_settings())
+            assert snapshot.available and snapshot.status == "ready" and snapshot.cached
+            assert snapshot.checkedAt == "2030-01-01T00:00:00Z"
+        assert len(calls) == 1
+        assert not get_translation_model_check_snapshot(_settings(api_key="changed-key")).available
+        assert not get_translation_model_check_snapshot(_settings(enabled=False)).available
+        assert not (await check_translation_model(_settings(), force=True)).available
+        clock[0] += 3600
+        assert get_translation_model_check_snapshot(_settings()).status == "failed"
+        assert len(calls) == 2
+    finally:
+        reset_translation_model_check_cache()
+
+
 def test_model_check_endpoint_requires_backend_auth_and_returns_safe_dto(
     monkeypatch,
     tmp_path: Path,

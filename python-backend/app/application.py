@@ -14,9 +14,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .maintenance import MaintenanceGate, MaintenanceMiddleware
 from .process_lifecycle import BackendServiceController, require_business_service_running
+from .resource_limits import ResourceLimitError
 from .security import API_PREFIX, authentication_enabled, require_api_authentication
 from .service_diagnostics import RequestMetrics, should_track_request
+from .storage_models import StorageError
 
 APP_TITLE = "青卷后端"
 DISABLE_ADMIN_WEB_ENV = "QINGJUAN_DISABLE_ADMIN_WEB"
@@ -50,6 +53,7 @@ def create_application(
     *,
     routers: Iterable[APIRouter],
     public_routers: Iterable[APIRouter] = (),
+    management_routers: Iterable[APIRouter] = (),
     api_prefix: str = "",
     authenticate: bool = False,
     lifespan: Lifespan | None = None,
@@ -79,6 +83,12 @@ def create_application(
             for item in error.errors()
         ]
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(details)})
+
+    @application.exception_handler(ResourceLimitError)
+    @application.exception_handler(StorageError)
+    async def resource_error(_request: Request, error: ResourceLimitError | StorageError) -> JSONResponse:
+        return JSONResponse(status_code=error.status_code, content={"detail": str(error)},
+            headers={"Cache-Control": "no-store"})
 
     request_metrics = RequestMetrics()
     application.state.request_metrics = request_metrics
@@ -113,6 +123,10 @@ def create_application(
 
     for router in public_routers:
         application.include_router(router)
+    for router in management_routers:
+        # These routes perform their own authentication inside a short admission.
+        # Their exclusive maintenance operation must not hold outer admission.
+        application.include_router(router, prefix=router_prefix)
     dependencies = (
         [Depends(require_api_authentication), Depends(require_business_service_running)]
         if authenticate
@@ -151,4 +165,9 @@ def create_application(
             name="admin",
         )
 
+    gate = MaintenanceGate()
+    application.state.maintenance_gate = gate
+    application.add_middleware(
+        MaintenanceMiddleware, gate=gate, backup_prefix=f"{router_prefix}/backups",
+    )
     return application

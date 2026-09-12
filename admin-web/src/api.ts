@@ -1,3 +1,6 @@
+import type { BackupArtifact, BackupInspection, BackupMode, BackupRestoreResult } from "./backup_types";
+import type { ResourceLimitUpdate, ResourceUsage } from "./resource_types";
+import type { PluginMaintenanceReport } from "./plugin_maintenance_types";
 import type {
   BackendUpdateStartPayload,
   BackendUpdateStartResponse,
@@ -34,6 +37,16 @@ import type {
 
 let csrfToken = "";
 let csrfHeader = "X-QingJuan-CSRF";
+
+export function getUserResourceUsage(userId: string): Promise<ResourceUsage> {
+  return request<ResourceUsage>(`/admin/api/users/${encodeURIComponent(userId)}/resources`);
+}
+
+export function updateUserResourceLimits(userId: string, value: ResourceLimitUpdate): Promise<ResourceUsage> {
+  return request<ResourceUsage>(`/admin/api/users/${encodeURIComponent(userId)}/resources`, {
+    method: "PUT", body: JSON.stringify(value),
+  });
+}
 
 export class ApiError extends Error {
   constructor(
@@ -126,6 +139,12 @@ export const getBooks = (): Promise<Book[]> => request("/api/v1/books");
 export const getTasks = (): Promise<Task[]> => request("/api/v1/tasks");
 export const getSources = (): Promise<BookSource[]> => request("/api/v1/sources");
 export const getSitePlugins = (): Promise<SitePlugin[]> => request("/api/v1/plugins");
+export const checkPluginMaintenance = (pluginId: string): Promise<PluginMaintenanceReport> =>
+  request(`/api/v1/plugins/${encodeURIComponent(pluginId)}/check`, { method: "POST" });
+export const rollbackSitePlugin = (pluginId: string, expectedVersion: string, expectedSha256: string): Promise<SitePlugin> =>
+  request(`/api/v1/plugins/${encodeURIComponent(pluginId)}/rollback`, {
+    method: "POST", body: JSON.stringify({ expectedVersion, expectedSha256 }),
+  });
 export function inspectSitePluginPackage(file: File): Promise<SitePluginPackageInspection> {
   const body = new FormData();
   body.append("file", file);
@@ -144,6 +163,8 @@ export const getTaskLogs = (taskId: string): Promise<TaskLog[]> =>
   request(`/api/v1/tasks/${encodeURIComponent(taskId)}/logs`);
 export const retryTask = (taskId: string): Promise<Task> =>
   request(`/api/v1/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+export const controlTask = (taskId: string, action: "pause" | "resume" | "cancel"): Promise<Task> =>
+  request(`/api/v1/tasks/${encodeURIComponent(taskId)}/control/${action}`, { method: "POST" });
 export const deleteBook = (bookId: string): Promise<{ status: string; bookId: string }> =>
   request(`/api/v1/books/${encodeURIComponent(bookId)}`, { method: "DELETE" });
 export const updateSettings = (payload: SettingsUpdate): Promise<Settings> =>
@@ -193,7 +214,29 @@ export const getSitePluginBookshelfImport = (
     `/api/v1/plugins/${encodeURIComponent(pluginId)}/bookshelf/import-jobs/${encodeURIComponent(jobId)}`,
   );
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export const getBackups = (): Promise<BackupArtifact[]> => request("/api/v1/backups", {
+  method: "GET", headers: { [csrfHeader]: csrfToken },
+});
+export const createBackup = (): Promise<BackupArtifact> => request("/api/v1/backups", {
+  method: "POST", body: JSON.stringify({ acknowledgeSensitiveData: true }),
+});
+export function inspectBackup(file: File, mode: BackupMode, owner?: string): Promise<BackupInspection> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("mode", mode);
+  if (owner) body.append("migrationOwnerId", owner);
+  return request("/api/v1/backups/inspect", { method: "POST", body });
+}
+export const restoreBackup = (inspection: BackupInspection): Promise<BackupRestoreResult> =>
+  request("/api/v1/backups/restore", {
+    method: "POST", body: JSON.stringify({
+      restoreId: inspection.restoreId, confirmationToken: inspection.confirmationToken,
+    }),
+  });
+export const downloadBackup = (id: string): Promise<Blob> =>
+  request(`/api/v1/backups/${encodeURIComponent(id)}/download`, { method: "POST", redirect: "error" }, "blob");
+
+async function request<T>(path: string, init: RequestInit = {}, responseType: "json" | "blob" = "json"): Promise<T> {
   const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
@@ -216,7 +259,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError("无法连接青卷后端，请检查服务状态和网络。", 0);
   }
 
-  const payload = await readPayload(response);
+  const payload = response.ok && responseType === "blob" ? await response.blob() : await readPayload(response);
   if (!response.ok) {
     if (
       response.status === 401

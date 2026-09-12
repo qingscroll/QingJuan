@@ -34,6 +34,7 @@ class LinkJob {
     this.preview,
     this.book,
     this.error,
+    this.sourceUrl = '',
   });
 
   factory LinkJob.fromJson(JsonMap json) {
@@ -45,6 +46,7 @@ class LinkJob {
     final book = json['book'];
     return LinkJob(
       id: json['id'] as String? ?? '',
+      sourceUrl: json['sourceUrl'] as String? ?? '',
       mode: json['mode'] as String? ?? 'preview',
       status: json['status'] as String? ?? 'queued',
       progress: (json['progress'] as num?)?.toDouble() ?? 0,
@@ -62,6 +64,7 @@ class LinkJob {
 
   final String id;
   final String mode;
+  final String sourceUrl;
   final String status;
   final double progress;
   final String message;

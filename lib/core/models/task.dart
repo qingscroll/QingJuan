@@ -40,6 +40,31 @@ class BookTask {
   final int attempts;
   final String updatedAt;
   final String? error;
+
+  bool get isActive => const [
+        'queued',
+        'running',
+        'pause_requested',
+        'cancel_requested'
+      ].contains(status);
+  bool get canPause => status == 'queued' || status == 'running';
+  bool get canResume => status == 'paused';
+  bool get canCancel =>
+      canPause ||
+      canResume ||
+      status == 'pause_requested' ||
+      status == 'failed';
+  String get statusLabel => switch (status) {
+        'queued' => '等待中',
+        'running' => '进行中',
+        'pause_requested' => '正在暂停',
+        'paused' => '已暂停',
+        'cancel_requested' => '正在取消',
+        'cancelled' => '已取消',
+        'completed' => '已完成',
+        'failed' => '失败',
+        _ => status,
+      };
 }
 
 class TaskPageText {

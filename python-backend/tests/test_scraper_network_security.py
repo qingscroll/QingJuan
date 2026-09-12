@@ -470,12 +470,13 @@ async def test_fake_ip_dns_recovers_browser_proxy(monkeypatch):
 async def test_fake_ip_dns_never_connects_to_nonpublic_doh_answer(monkeypatch, address):
     from app.scraper_network_security import ScraperNetworkSecurityError
 
-    mock_fake_ip_dns(monkeypatch, lambda request: dns_response(request, ipv4=address))
+    requests = mock_fake_ip_dns(monkeypatch, lambda request: dns_response(request, ipv4=address))
     client, wire = wire_client(monkeypatch, [])
     async with client:
         with pytest.raises(ScraperNetworkSecurityError):
             await client.get("https://books.example/book")
     assert wire.connected == []
+    assert {request.url.host for request, _ in requests} == {"cloudflare-dns.com"}
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,12 @@ class MobileBookDetailView extends StatefulWidget {
     required this.onSelectionChanged,
     required this.onRefresh,
     this.exportProgress,
+    this.onEditMetadata,
+    this.onSaveOffline,
+    this.onCheckUpdates,
+    this.onEditTranslation,
+    this.onEditGlossary,
+    this.onManageStorage,
     super.key,
   });
 
@@ -37,6 +43,12 @@ class MobileBookDetailView extends StatefulWidget {
   final VoidCallback onDelete;
   final ValueChanged<Set<int>> onSelectionChanged;
   final VoidCallback onRefresh;
+  final VoidCallback? onEditMetadata;
+  final VoidCallback? onSaveOffline;
+  final VoidCallback? onCheckUpdates;
+  final VoidCallback? onEditTranslation;
+  final VoidCallback? onEditGlossary;
+  final VoidCallback? onManageStorage;
 
   @override
   State<MobileBookDetailView> createState() => _MobileBookDetailViewState();
@@ -74,6 +86,18 @@ class _MobileBookDetailViewState extends State<MobileBookDetailView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (widget.onSaveOffline != null)
+                  _actionRow(sheetContext, FluentIcons.offline_storage, '保存到本机',
+                      '选择离线章节，断网后继续阅读', widget.onSaveOffline!),
+                if (widget.onCheckUpdates != null)
+                  _actionRow(sheetContext, FluentIcons.refresh, '连载追更',
+                      '检查新章节，设置定时检查与自动下载', widget.onCheckUpdates!),
+                if (widget.onEditTranslation != null)
+                  _actionRow(sheetContext, FluentIcons.edit, '译文校对',
+                      '小说校对、历史版本与选段重译', widget.onEditTranslation!),
+                if (widget.onEditGlossary != null)
+                  _actionRow(sheetContext, FluentIcons.locale_language, '术语与人名',
+                      '翻译前统一译名，无需先下载章节', widget.onEditGlossary!),
                 _actionRow(
                   sheetContext,
                   FluentIcons.download,
@@ -96,6 +120,17 @@ class _MobileBookDetailViewState extends State<MobileBookDetailView> {
                   widget.onExport,
                 ),
                 if (!_selecting) ...[
+                  if (widget.onManageStorage != null)
+                    _actionRow(sheetContext, FluentIcons.folder, '存储空间',
+                        '查看服务端占用，清理导出临时文件', widget.onManageStorage!),
+                  if (widget.onEditMetadata != null)
+                    _actionRow(
+                      sheetContext,
+                      FluentIcons.edit,
+                      '编辑作品信息',
+                      '书名、作者、分组、标签与阅读状态',
+                      widget.onEditMetadata!,
+                    ),
                   _actionRow(
                     sheetContext,
                     FluentIcons.refresh,

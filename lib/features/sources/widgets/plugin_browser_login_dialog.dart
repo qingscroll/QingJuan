@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/api/api_exception.dart';
 import '../../../core/models/site_plugin.dart';
 import '../../../shared/mobile_sheet.dart';
 import '../../../shared/responsive.dart';
@@ -27,6 +28,11 @@ class _PluginBrowserLoginDialogState extends State<PluginBrowserLoginDialog> {
   bool _success = false;
   bool _opening = false;
   String? _error;
+
+  String _message(Object error, String fallback) =>
+      error is ApiException && error.statusCode != null
+          ? error.message
+          : fallback;
 
   @override
   void initState() {
@@ -70,9 +76,9 @@ class _PluginBrowserLoginDialogState extends State<PluginBrowserLoginDialog> {
       }
       setState(() => _flow = flow);
       _schedulePoll(generation);
-    } catch (_) {
+    } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = '无法创建登录，请确认后端连接和插件状态后重试。');
+        setState(() => _error = _message(error, '无法创建登录，请确认后端连接和插件状态后重试。'));
       }
     }
   }
@@ -100,13 +106,14 @@ class _PluginBrowserLoginDialogState extends State<PluginBrowserLoginDialog> {
           _error = null;
         });
       } else if (result.status != 'pending') {
-        setState(() => _error = '登录已取消或过期，请重新登录。');
+        setState(() => _error =
+            result.status == 'failed' ? '登录尝试次数已用完，请重新登录。' : '登录已取消或过期，请重新登录。');
       } else {
         _schedulePoll(generation);
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = '读取登录状态失败，后端或账号可能已切换，请重试。');
+        setState(() => _error = _message(error, '读取登录状态失败，后端或账号可能已切换，请重试。'));
       }
     }
   }
@@ -125,8 +132,10 @@ class _PluginBrowserLoginDialogState extends State<PluginBrowserLoginDialog> {
           mode: LaunchMode.externalApplication)) {
         throw StateError('无法打开浏览器');
       }
-    } catch (_) {
-      if (mounted) setState(() => _error = '无法打开登录页面，请确认系统浏览器和后端连接后重试。');
+    } catch (error) {
+      if (mounted && identical(flow, _flow)) {
+        setState(() => _error = _message(error, '无法打开登录页面，请确认系统浏览器和后端连接后重试。'));
+      }
     } finally {
       if (mounted) setState(() => _opening = false);
     }

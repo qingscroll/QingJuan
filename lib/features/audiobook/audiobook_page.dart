@@ -15,6 +15,8 @@ import '../../shared/mobile_sheet.dart';
 import '../../shared/responsive.dart';
 import '../../shared/smooth_scroll.dart';
 import 'audiobook_controller.dart';
+import 'audiobook_sleep_timer.dart';
+import 'audiobook_timer_control.dart';
 import 'flutter_tts_engine.dart';
 
 class AudiobookPage extends StatefulWidget {
@@ -26,6 +28,8 @@ class AudiobookPage extends StatefulWidget {
     this.voice,
     this.style = TtsSpeechStyle.natural,
     this.onStyleChanged,
+    this.controller,
+    this.sleepTimer,
     super.key,
   });
 
@@ -36,6 +40,10 @@ class AudiobookPage extends StatefulWidget {
   final TtsVoice? voice;
   final TtsSpeechStyle style;
   final Future<void> Function(TtsSpeechStyle style)? onStyleChanged;
+
+  /// An application-owned session survives navigation; injected engines remain page-owned.
+  final AudiobookController? controller;
+  final AudiobookSleepTimer? sleepTimer;
 
   @override
   State<AudiobookPage> createState() => _AudiobookPageState();
@@ -50,20 +58,21 @@ class _AudiobookPageState extends State<AudiobookPage> {
   @override
   void initState() {
     super.initState();
-    _controller = AudiobookController(
-      detail: widget.detail,
-      engine: widget.engine ?? FlutterTtsEngine(voice: widget.voice),
-      loadChapter: widget.loadChapter,
-      initialChapterIndex: widget.initialChapterIndex,
-      initialStyle: widget.style,
-    );
+    _controller = widget.controller ??
+        AudiobookController(
+          detail: widget.detail,
+          engine: widget.engine ?? FlutterTtsEngine(voice: widget.voice),
+          loadChapter: widget.loadChapter,
+          initialChapterIndex: widget.initialChapterIndex,
+          initialStyle: widget.style,
+        );
     unawaited(_controller.initialize());
   }
 
   @override
   void dispose() {
     _textScrollController.dispose();
-    _controller.dispose();
+    if (widget.controller == null) _controller.dispose();
     super.dispose();
   }
 
@@ -72,6 +81,15 @@ class _AudiobookPageState extends State<AudiobookPage> {
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) {
+        if (_controller.isClosed) {
+          return Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('听书会话已结束或身份已切换'),
+            HyperlinkButton(
+                onPressed: () => Navigator.maybePop(context),
+                child: const Text('返回')),
+          ]));
+        }
         final theme = FluentTheme.of(context);
         if (!usesMobileUi(context)) return _buildDesktopPage(context, theme);
         return _buildMobilePlayer(context, theme);
@@ -115,6 +133,10 @@ class _AudiobookPageState extends State<AudiobookPage> {
                       child: const Text('结束本次听书并选择音色'),
                     ),
                   const SizedBox(height: 20),
+                  if (widget.sleepTimer != null) ...[
+                    AudiobookTimerControl(timer: widget.sleepTimer!),
+                    const SizedBox(height: 20),
+                  ],
                   _SpeechSettings(
                     controller: _controller,
                     onStyleChanged: (style) async {
@@ -144,9 +166,10 @@ class _AudiobookPageState extends State<AudiobookPage> {
                     width: 48,
                     height: 48,
                     child: IconButton(
-                      icon: const Icon(
+                      icon: Icon(
                         FluentIcons.back,
-                        semanticLabel: '结束听书并返回',
+                        semanticLabel:
+                            widget.controller == null ? '结束听书并返回' : '返回并保留听书',
                       ),
                       onPressed: () => Navigator.pop(context),
                     ),
@@ -280,7 +303,9 @@ class _AudiobookPageState extends State<AudiobookPage> {
                           ),
                         const SizedBox(height: 24),
                         Text(
-                          '由设备语音引擎朗读，离开听书页面后停止播放。',
+                          widget.controller == null
+                              ? '由设备语音引擎朗读，离开听书页面后停止播放。'
+                              : '由设备语音引擎朗读，返回后继续播放。可通过通知控制或定时停止。',
                           style: theme.typography.caption?.copyWith(
                             height: 1.5,
                           ),
@@ -368,6 +393,10 @@ class _AudiobookPageState extends State<AudiobookPage> {
                 const SizedBox(height: 20),
                 _PlaybackControls(controller: _controller),
                 const SizedBox(height: 18),
+                if (widget.sleepTimer != null) ...[
+                  AudiobookTimerControl(timer: widget.sleepTimer!),
+                  const SizedBox(height: 12),
+                ],
                 _SpeechSettings(
                   controller: _controller,
                   onStyleChanged: (style) async {

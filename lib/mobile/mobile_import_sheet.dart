@@ -60,6 +60,7 @@ class _MobileImportPageState extends State<MobileImportPage> {
   XFile? _file;
   String _kind = '长小说';
   String _language = '中文';
+  String _textEncoding = 'auto';
   String _downloadMode = 'on_demand';
   bool _translate = false;
   bool _busy = false;
@@ -129,6 +130,7 @@ class _MobileImportPageState extends State<MobileImportPage> {
             filePath: file.path,
             kind: _kind,
             language: _language,
+            textEncoding: _textEncoding,
             translate: _translate &&
                 scope.backend.translationModelCheck?.available == true,
             title: _titleController.text.trim().isEmpty
@@ -277,6 +279,34 @@ class _MobileImportPageState extends State<MobileImportPage> {
                                               _language,
                                               (value) => setState(
                                                   () => _language = value)),
+                                          if (widget.local &&
+                                              (_file?.name
+                                                          .toLowerCase()
+                                                          .endsWith('.txt') ==
+                                                      true ||
+                                                  _file?.name
+                                                          .toLowerCase()
+                                                          .endsWith('.text') ==
+                                                      true))
+                                            _choice(
+                                                '文本编码',
+                                                const <String>[
+                                                  'auto',
+                                                  'utf-8',
+                                                  'gb18030',
+                                                  'big5',
+                                                  'shift_jis'
+                                                ],
+                                                _textEncoding,
+                                                (value) => setState(() =>
+                                                    _textEncoding = value),
+                                                labels: const <String>[
+                                                  '自动识别',
+                                                  'UTF-8',
+                                                  'GB18030（简体中文）',
+                                                  'Big5（繁体中文）',
+                                                  'Shift-JIS（日文）'
+                                                ]),
                                           if (_isFanqie && !widget.local)
                                             _choice(
                                                 '正文下载',

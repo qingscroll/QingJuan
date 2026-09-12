@@ -12,6 +12,7 @@ query GetQingJuanWork($workId: ID!) {
   work(id: $workId) {
     id
     title
+    serialStatus
     catchphrase
     introduction
     adminCoverImageUrl

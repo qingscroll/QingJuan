@@ -82,6 +82,7 @@ def register_user(
     display_name: str | None,
     password: str,
     email: str | None = None,
+    email_verification_code_hash: str | None = None,
 ) -> UserRecord:
     normalized, username_key = normalize_username(username)
     display = normalize_display_name(display_name, fallback=normalized)
@@ -97,6 +98,7 @@ def register_user(
             username_key=username_key,
             email=normalized_email,
             email_key=email_key,
+            email_verification_code_hash=email_verification_code_hash,
             display_name=display,
             password_hash=hash_admin_password(password),
         )
@@ -225,6 +227,9 @@ def read_user_session(request: Request) -> UserRecord:
     user = get_user_by_session_hash(_token_hash(token), now=_now())
     if user is None or user.status != "active":
         raise _user_unauthorized()
+    from .account_maintenance import record_request_session
+
+    record_request_session(request, _token_hash(token))
     return user
 
 

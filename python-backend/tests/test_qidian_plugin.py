@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from app import main, scraper
+from app import db, main, scraper
 from app.api.routers import plugins_router
 from app.application import create_application
 from app.models import (
@@ -629,7 +629,13 @@ async def test_qidian_main_resolves_owner_cookie_for_every_download_path(
     monkeypatch,
     tmp_path,
 ) -> None:
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "qingjuan.db")
+    monkeypatch.setattr(db, "_DATA_DIR_READY", True)
+    db.init_db()
     reader_id = "user-reader"
+    db.create_user(user_id=reader_id, username="reader", username_key="reader",
+                   display_name="Reader", password_hash="test-unused")
     cookies_by_owner = {
         DEFAULT_ADMIN_USER_ID: {"ywguid": "admin-guid"},
         reader_id: {"ywguid": "reader-guid"},

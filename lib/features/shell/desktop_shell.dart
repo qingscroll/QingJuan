@@ -54,8 +54,11 @@ class _DesktopShellState extends State<DesktopShell> {
     }
     // Keep existing Ctrl+1…8 destinations, including settings and about.
     final sections = <AppSection>[
-      ...widget.primarySections,
+      ...widget.primarySections
+          .where((section) => section != AppSection.discovery),
       AppSection.about,
+      if (widget.primarySections.contains(AppSection.discovery))
+        AppSection.discovery,
     ];
     for (var index = 0; index < sections.length; index++) {
       if (event.logicalKey == _shortcutKey(index) ||
@@ -245,7 +248,8 @@ class _DesktopShellState extends State<DesktopShell> {
         4 => LogicalKeyboardKey.digit5,
         5 => LogicalKeyboardKey.digit6,
         6 => LogicalKeyboardKey.digit7,
-        _ => LogicalKeyboardKey.digit8,
+        7 => LogicalKeyboardKey.digit8,
+        _ => LogicalKeyboardKey.digit9,
       };
 
   PhysicalKeyboardKey _shortcutPhysicalKey(int index) => switch (index) {
@@ -256,7 +260,8 @@ class _DesktopShellState extends State<DesktopShell> {
         4 => PhysicalKeyboardKey.digit5,
         5 => PhysicalKeyboardKey.digit6,
         6 => PhysicalKeyboardKey.digit7,
-        _ => PhysicalKeyboardKey.digit8,
+        7 => PhysicalKeyboardKey.digit8,
+        _ => PhysicalKeyboardKey.digit9,
       };
 }
 
