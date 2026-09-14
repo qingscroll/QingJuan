@@ -4,7 +4,7 @@ httpx==0.28.1
 httpcore==1.0.9
 pycryptodome==3.23.0
 beautifulsoup4==4.13.4
-python-multipart==0.0.20
+python-multipart==0.0.32
 requests==2.32.5
 curl_cffi==0.14.0
 websockets==16.0
